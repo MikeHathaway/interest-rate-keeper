@@ -848,4 +848,132 @@ describeIf("Base factory fork integration", () => {
     },
     120_000
   );
+
+  it(
+    "handles repeated update-only cycles across roughly a week until the target band is reached, then stops cleanly",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      const collateralToken = await deployMockToken(
+        walletClient,
+        publicClient,
+        artifact,
+        "Long Horizon Collateral",
+        "LHC"
+      );
+      const quoteToken = await deployMockToken(
+        walletClient,
+        publicClient,
+        artifact,
+        "Long Horizon Quote",
+        "LHQ"
+      );
+
+      for (const tokenAddress of [collateralToken, quoteToken]) {
+        await mintToken(
+          walletClient,
+          publicClient,
+          artifact,
+          tokenAddress,
+          account.address,
+          1_000_000n * 10n ** 18n
+        );
+      }
+
+      const poolAddress = await deployPoolThroughFactory(
+        walletClient,
+        publicClient,
+        collateralToken,
+        quoteToken
+      );
+
+      await approveToken(
+        walletClient,
+        publicClient,
+        quoteToken,
+        poolAddress,
+        1_000_000n * 10n ** 18n,
+        artifact.abi
+      );
+
+      const latestBlock = await publicClient.getBlock();
+      const addQuoteHash = await walletClient.writeContract({
+        account,
+        chain: undefined,
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "addQuoteToken",
+        args: [1_000n * 10n ** 18n, 3_000n, latestBlock.timestamp + 3600n]
+      });
+      await publicClient.waitForTransactionReceipt({ hash: addQuoteHash });
+
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+      const config = resolveKeeperConfig({
+        chainId: 8453,
+        poolAddress,
+        poolId: `8453:${poolAddress.toLowerCase()}`,
+        rpcUrl: LOCAL_RPC_URL,
+        targetRateBps: 200,
+        toleranceBps: 500,
+        toleranceMode: "relative",
+        completionPolicy: "next_move_would_overshoot",
+        executionBufferBps: 0,
+        maxQuoteTokenExposure: "1000000000000000000000000",
+        maxBorrowExposure: "1000000000000000000000000",
+        snapshotAgeMaxSeconds: 3600,
+        minTimeBeforeRateWindowSeconds: 120,
+        minExecutableActionQuoteToken: "1",
+        recheckBeforeSubmit: true
+      });
+
+      const observedRates: number[] = [];
+      let executedUpdateCount = 0;
+      let sawTerminalNoOp = false;
+      let chainNow = Number((await publicClient.getBlock()).timestamp);
+
+      for (let cycle = 0; cycle < 20; cycle += 1) {
+        await testClient.increaseTime({
+          seconds: FORK_TIME_SKIP_SECONDS
+        });
+        await testClient.mine({
+          blocks: 1
+        });
+        chainNow = Number((await publicClient.getBlock()).timestamp);
+
+        const result = await runCycle(config, {
+          snapshotSource: new AjnaRpcSnapshotSource(config, {
+            publicClient,
+            now: () => chainNow
+          }),
+          executor: createAjnaExecutionBackend(config)
+        });
+
+        chainNow = Number((await publicClient.getBlock()).timestamp);
+        const currentRateBps = await readCurrentRateBps(publicClient, poolAddress);
+
+        if (result.status === "NO_OP") {
+          sawTerminalNoOp = true;
+          expect(result.plan.requiredSteps).toEqual([]);
+          expect(currentRateBps).toBeGreaterThanOrEqual(190);
+          expect(currentRateBps).toBeLessThanOrEqual(210);
+          break;
+        }
+
+        expect(result.status).toBe("EXECUTED");
+        expect(result.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")).toBe(true);
+        observedRates.push(currentRateBps);
+        executedUpdateCount += 1;
+      }
+
+      expect(executedUpdateCount).toBe(15);
+      expect(observedRates).toHaveLength(15);
+      for (let index = 1; index < observedRates.length; index += 1) {
+        expect(observedRates[index]).toBeLessThan(observedRates[index - 1]!);
+      }
+      expect(observedRates.at(-1)).toBeGreaterThanOrEqual(190);
+      expect(observedRates.at(-1)).toBeLessThanOrEqual(210);
+      expect(sawTerminalNoOp).toBe(true);
+    },
+    120_000
+  );
 });

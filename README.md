@@ -157,6 +157,7 @@ The Base integration test is intended to stay close to real deployed Ajna behavi
 - it runs the keeper cycle and verifies that `UPDATE_INTEREST` changes the rate as expected
 - it also proves that exact simulation-backed due-cycle `LEND` synthesis stays silent on the tested borrowed-pool scenarios while heuristic discovery still finds a dry-run `ADD_QUOTE` plan
 - it proves the one-cycle-ahead forecast by checking that a post-update not-due snapshot predicts the next eligible rate update correctly on a later real `updateInterest`
+- it proves repeated update-only cycles across roughly a week by stepping a pool from `1000 bps` down to a `200 bps` target band over 15 successive real updates, then verifying the keeper stops cleanly once the band is reached
 
 Run it with:
 
@@ -171,5 +172,6 @@ BASE_RPC_URL=https://mainnet.base.org npm run test:integration:base
 - Exact simulation-backed lend synthesis is opt-in and currently behaves as a conservative safety check for due-cycle borrowed-pool lend plans in the tested Base-fork scenarios.
 - Exact simulation-backed lend synthesis also remains conservative in the tested pre-window post-update scenarios; the one-cycle-ahead forecast is validated, but exact pre-window `LEND` plans are still not appearing in those cases.
 - Heuristic lend synthesis is opt-in and currently validated for live planning/dry-run discovery, not for blind live execution in borrowed pools.
+- Repeated natural update-only convergence is covered by integration tests, including week-scale multi-cycle operation.
 - Token approvals are checked, not managed.
 - The current fork integration tests prove factory creation, real interest updates, next-cycle forecasting, and the exact-vs-heuristic split for lend planning, but not yet a fully validated live-executed computed `LEND` or `BORROW` steering cycle.
