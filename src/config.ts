@@ -249,11 +249,36 @@ export function resolveKeeperConfig(input: unknown): KeeperConfig {
     );
   }
 
+  if (record.enableSimulationBackedBorrowSynthesis !== undefined) {
+    config.enableSimulationBackedBorrowSynthesis = parseBoolean(
+      record.enableSimulationBackedBorrowSynthesis,
+      "enableSimulationBackedBorrowSynthesis"
+    );
+  }
+
   if (record.simulationSenderAddress !== undefined) {
     config.simulationSenderAddress = parseHexAddress(
       record.simulationSenderAddress,
       "simulationSenderAddress"
     );
+  }
+
+  if (record.drawDebtLimitIndex !== undefined) {
+    config.drawDebtLimitIndex = parseNonNegativeInteger(
+      record.drawDebtLimitIndex,
+      "drawDebtLimitIndex"
+    );
+  }
+
+  const drawDebtCollateralAmount = parseOptionalBigInt(
+    record.drawDebtCollateralAmount,
+    "drawDebtCollateralAmount"
+  );
+  if (drawDebtCollateralAmount !== undefined) {
+    if (drawDebtCollateralAmount < 0n) {
+      throw new Error("drawDebtCollateralAmount must not be negative");
+    }
+    config.drawDebtCollateralAmount = drawDebtCollateralAmount;
   }
 
   if (record.enableHeuristicLendSynthesis !== undefined) {

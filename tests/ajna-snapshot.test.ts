@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyAjnaNextRate,
   forecastAjnaNextEligibleRate,
+  synthesizeAjnaBorrowCandidate,
   synthesizeAjnaLendCandidate
 } from "../src/ajna/snapshot.js";
 import type { KeeperConfig } from "../src/types.js";
@@ -152,7 +153,7 @@ describe("synthesizeAjnaLendCandidate", () => {
       type: "ADD_QUOTE",
       bucketIndex: 3000
     });
-    expect(matched?.candidate.predictedRateBpsAfterNextUpdate).toBe(900);
+    expect(matched?.candidate.predictedRateBpsAfterNextUpdate).toBe(1000);
 
     const belowThreshold = synthesizeAjnaLendCandidate(
       matched!.state,
@@ -191,5 +192,79 @@ describe("synthesizeAjnaLendCandidate", () => {
     );
 
     expect(candidate).toBeUndefined();
+  });
+});
+
+describe("synthesizeAjnaBorrowCandidate", () => {
+  it("finds the minimum draw-debt amount that changes the next move toward the target", () => {
+    let matched:
+      | {
+          state: Parameters<typeof synthesizeAjnaBorrowCandidate>[0];
+          candidate: NonNullable<ReturnType<typeof synthesizeAjnaBorrowCandidate>>;
+        }
+      | undefined;
+
+    const borrowConfig: KeeperConfig = {
+      ...baseConfig,
+      targetRateBps: 1_300,
+      drawDebtLimitIndex: 3000,
+      drawDebtCollateralAmount: 0n
+    };
+
+    for (const debtEmaWad of [
+      50_000_000_000_000_000n,
+      100_000_000_000_000_000n,
+      150_000_000_000_000_000n,
+      200_000_000_000_000_000n,
+      250_000_000_000_000_000n
+    ]) {
+      for (const debtColEmaWad of [
+        10_000_000_000_000_000n,
+        25_000_000_000_000_000n,
+        50_000_000_000_000_000n,
+        75_000_000_000_000_000n,
+        100_000_000_000_000_000n
+      ]) {
+        const state = {
+          currentRateWad: 100_000_000_000_000_000n,
+          currentDebtWad: 1_000n,
+          debtEmaWad,
+          depositEmaWad: 1_000_000_000_000_000_000n,
+          debtColEmaWad,
+          lupt0DebtEmaWad: WAD,
+          lastInterestRateUpdateTimestamp: 0,
+          nowTimestamp: 50_000
+        } as const;
+        const candidate = synthesizeAjnaBorrowCandidate(state, borrowConfig, {});
+
+        if (candidate) {
+          matched = { state, candidate };
+          break;
+        }
+      }
+
+      if (matched) {
+        break;
+      }
+    }
+
+    expect(matched).toBeDefined();
+    expect(matched?.candidate.intent).toBe("BORROW");
+    expect(matched?.candidate.minimumExecutionSteps[0]).toMatchObject({
+      type: "DRAW_DEBT",
+      limitIndex: 3000
+    });
+    expect(matched?.candidate.predictedRateBpsAfterNextUpdate).toBe(1100);
+
+    const belowThreshold = synthesizeAjnaBorrowCandidate(
+      matched!.state,
+      {
+        ...borrowConfig,
+        maxBorrowExposure: matched!.candidate.quoteTokenDelta - 1n
+      },
+      {}
+    );
+
+    expect(belowThreshold).toBeUndefined();
   });
 });

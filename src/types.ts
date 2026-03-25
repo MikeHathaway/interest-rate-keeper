@@ -128,7 +128,10 @@ export interface KeeperConfig {
   addQuoteBucketIndex?: number;
   addQuoteExpirySeconds?: number;
   enableSimulationBackedLendSynthesis?: boolean;
+  enableSimulationBackedBorrowSynthesis?: boolean;
   simulationSenderAddress?: HexAddress;
+  drawDebtLimitIndex?: number;
+  drawDebtCollateralAmount?: bigint;
   enableHeuristicLendSynthesis?: boolean;
   logPath?: string;
   manualCandidates?: PlanCandidate[];

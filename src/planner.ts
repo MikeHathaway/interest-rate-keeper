@@ -123,7 +123,7 @@ function candidateImprovesConvergence(
   snapshot: PoolSnapshot,
   band: TargetBand
 ): boolean {
-  const currentDistance = distanceToTargetBand(snapshot.currentRateBps, band);
+  const baselineDistance = distanceToTargetBand(snapshot.predictedNextRateBps, band);
   const candidateDistance = distanceToTargetBand(
     candidate.predictedRateBpsAfterNextUpdate,
     band
@@ -131,7 +131,7 @@ function candidateImprovesConvergence(
 
   return (
     isRateInBand(candidate.predictedRateBpsAfterNextUpdate, band) ||
-    candidateDistance < currentDistance
+    candidateDistance < baselineDistance
   );
 }
 

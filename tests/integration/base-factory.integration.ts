@@ -38,6 +38,7 @@ const INITIAL_RATE_WAD = 100_000_000_000_000_000n;
 const DECREASED_RATE_BPS = 900;
 const FORK_TIME_SKIP_SECONDS = 12 * 60 * 60 + 5;
 const STEERING_BUCKET_CANDIDATES = [2500, 2750, 3000, 3250, 3500] as const;
+const BORROW_COLLATERAL_CANDIDATES = [1n, 2n, 5n, 10n, 20n, 50n, 100n] as const;
 const STEERING_SCENARIOS = [
   { initialQuoteAmount: 500n, borrowAmount: 400n, collateralAmount: 600n },
   { initialQuoteAmount: 500n, borrowAmount: 450n, collateralAmount: 800n },
@@ -372,6 +373,180 @@ describeIf("Base factory fork integration", () => {
 
       chainNow = Number((await publicClient.getBlock()).timestamp);
       expect(await readCurrentRateBps(publicClient, poolAddress)).toBe(DECREASED_RATE_BPS);
+    },
+    120_000
+  );
+
+  it(
+    "does not yet find an exact same-cycle borrow steering candidate in the tested abandoned-pool search space",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const collateralToken = await deployMockToken(
+        walletClient,
+        publicClient,
+        artifact,
+        "Borrow Steering Collateral",
+        "BSC"
+      );
+      const quoteToken = await deployMockToken(
+        walletClient,
+        publicClient,
+        artifact,
+        "Borrow Steering Quote",
+        "BSQ"
+      );
+
+      for (const tokenAddress of [collateralToken, quoteToken]) {
+        await mintToken(
+          walletClient,
+          publicClient,
+          artifact,
+          tokenAddress,
+          account.address,
+          1_000_000n * 10n ** 18n
+        );
+      }
+
+      const poolAddress = await deployPoolThroughFactory(
+        walletClient,
+        publicClient,
+        collateralToken,
+        quoteToken
+      );
+
+      await approveToken(
+        walletClient,
+        publicClient,
+        quoteToken,
+        poolAddress,
+        1_000_000n * 10n ** 18n,
+        artifact.abi
+      );
+      await approveToken(
+        walletClient,
+        publicClient,
+        collateralToken,
+        poolAddress,
+        1_000_000n * 10n ** 18n,
+        artifact.abi
+      );
+
+      const latestBlock = await publicClient.getBlock();
+      const addQuoteHash = await walletClient.writeContract({
+        account,
+        chain: undefined,
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "addQuoteToken",
+        args: [1_000n * 10n ** 18n, 3_000n, latestBlock.timestamp + 3600n]
+      });
+      await publicClient.waitForTransactionReceipt({ hash: addQuoteHash });
+
+      let matched:
+        | {
+            poolAddress: `0x${string}`;
+            chainNow: number;
+            config: KeeperConfig;
+            snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+          }
+        | undefined;
+      let eligibleBaselineCount = 0;
+
+      for (let preUpdates = 0; preUpdates < 6; preUpdates += 1) {
+        await testClient.increaseTime({
+          seconds: FORK_TIME_SKIP_SECONDS
+        });
+        await testClient.mine({
+          blocks: 1
+        });
+
+        const chainNow = Number((await publicClient.getBlock()).timestamp);
+        const baselineConfig = resolveKeeperConfig({
+          chainId: 8453,
+          poolAddress,
+          poolId: `8453:${poolAddress.toLowerCase()}`,
+          rpcUrl: LOCAL_RPC_URL,
+          targetRateBps: 1000,
+          toleranceBps: 50,
+          toleranceMode: "relative",
+          completionPolicy: "next_move_would_overshoot",
+          executionBufferBps: 0,
+          maxQuoteTokenExposure: "1000000000000000000000000",
+          maxBorrowExposure: "1000000000000000000000",
+          snapshotAgeMaxSeconds: 3600,
+          minTimeBeforeRateWindowSeconds: 120,
+          minExecutableActionQuoteToken: "1",
+          recheckBeforeSubmit: true
+        });
+        const baselineSnapshot = await new AjnaRpcSnapshotSource(baselineConfig, {
+          publicClient,
+          now: () => chainNow
+        }).getSnapshot();
+
+        if (
+          baselineSnapshot.currentRateBps < 1000 &&
+          baselineSnapshot.predictedNextOutcome !== "STEP_UP"
+        ) {
+          eligibleBaselineCount += 1;
+          for (const collateralUnits of BORROW_COLLATERAL_CANDIDATES) {
+            const config = resolveKeeperConfig({
+              chainId: 8453,
+              poolAddress,
+              poolId: `8453:${poolAddress.toLowerCase()}`,
+              rpcUrl: LOCAL_RPC_URL,
+              targetRateBps: 1000,
+              toleranceBps: 50,
+              toleranceMode: "relative",
+              completionPolicy: "next_move_would_overshoot",
+              executionBufferBps: 0,
+              maxQuoteTokenExposure: "1000000000000000000000000",
+              maxBorrowExposure: "1000000000000000000000",
+              snapshotAgeMaxSeconds: 3600,
+              minTimeBeforeRateWindowSeconds: 120,
+              minExecutableActionQuoteToken: "1",
+              recheckBeforeSubmit: true,
+              borrowerAddress: account.address,
+              simulationSenderAddress: account.address,
+              enableSimulationBackedBorrowSynthesis: true,
+              drawDebtLimitIndex: 3000,
+              drawDebtCollateralAmount: (collateralUnits * 10n ** 18n).toString()
+            });
+            const snapshot = await new AjnaRpcSnapshotSource(config, {
+              publicClient,
+              now: () => chainNow
+            }).getSnapshot();
+
+            if (snapshot.candidates.some((candidate) => candidate.intent === "BORROW")) {
+              matched = {
+                poolAddress,
+                chainNow,
+                config,
+                snapshot
+              };
+              break;
+            }
+          }
+        }
+
+        if (matched) {
+          break;
+        }
+
+        const updateHash = await walletClient.writeContract({
+          account,
+          chain: undefined,
+          address: poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "updateInterest"
+        });
+        await publicClient.waitForTransactionReceipt({ hash: updateHash });
+      }
+
+      expect(eligibleBaselineCount).toBeGreaterThan(0);
+      expect(matched).toBeUndefined();
     },
     120_000
   );
