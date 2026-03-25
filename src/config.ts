@@ -76,6 +76,16 @@ function parsePositiveInteger(value: unknown, label: string): number {
   return parsed;
 }
 
+function parseIntegerArray(value: unknown, label: string): number[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be an array`);
+  }
+
+  return value.map((item, index) =>
+    parseNonNegativeInteger(item, `${label}[${index}]`)
+  );
+}
+
 function parseOptionalBigInt(value: unknown, label: string): bigint | undefined {
   if (value === undefined || value === null || value === "") {
     return undefined;
@@ -268,6 +278,17 @@ export function resolveKeeperConfig(input: unknown): KeeperConfig {
       record.drawDebtLimitIndex,
       "drawDebtLimitIndex"
     );
+  }
+
+  if (record.drawDebtLimitIndexes !== undefined) {
+    const parsedLimitIndexes = parseIntegerArray(
+      record.drawDebtLimitIndexes,
+      "drawDebtLimitIndexes"
+    );
+    if (parsedLimitIndexes.length === 0) {
+      throw new Error("drawDebtLimitIndexes must not be empty");
+    }
+    config.drawDebtLimitIndexes = Array.from(new Set(parsedLimitIndexes));
   }
 
   const drawDebtCollateralAmount = parseOptionalBigInt(

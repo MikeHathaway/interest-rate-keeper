@@ -17,6 +17,7 @@ describe("resolveKeeperConfig", () => {
       enableSimulationBackedBorrowSynthesis: true,
       simulationSenderAddress: "0x2222222222222222222222222222222222222222",
       drawDebtLimitIndex: 3100,
+      drawDebtLimitIndexes: [2800, 3000, 3100],
       drawDebtCollateralAmount: "2500000000000000000",
       enableHeuristicLendSynthesis: true,
       maxQuoteTokenExposure: "1000000",
@@ -34,6 +35,7 @@ describe("resolveKeeperConfig", () => {
     expect(config.enableSimulationBackedBorrowSynthesis).toBe(true);
     expect(config.simulationSenderAddress).toBe("0x2222222222222222222222222222222222222222");
     expect(config.drawDebtLimitIndex).toBe(3100);
+    expect(config.drawDebtLimitIndexes).toEqual([2800, 3000, 3100]);
     expect(config.drawDebtCollateralAmount).toBe(2500000000000000000n);
     expect(config.enableHeuristicLendSynthesis).toBe(true);
   });

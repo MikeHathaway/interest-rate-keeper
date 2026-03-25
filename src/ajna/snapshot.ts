@@ -226,6 +226,33 @@ function drawDebtIntoRateState(
   };
 }
 
+function resolveDrawDebtLimitIndexes(config: KeeperConfig): number[] {
+  const configured = [
+    ...(config.drawDebtLimitIndexes ?? []),
+    ...(config.drawDebtLimitIndex === undefined ? [] : [config.drawDebtLimitIndex])
+  ];
+
+  return Array.from(new Set(configured)).sort((left, right) => left - right);
+}
+
+function compareCandidatePreference(left: PlanCandidate, right: PlanCandidate): number {
+  const leftInBand = left.resultingDistanceToTargetBps === 0 ? 0 : 1;
+  const rightInBand = right.resultingDistanceToTargetBps === 0 ? 0 : 1;
+  if (leftInBand !== rightInBand) {
+    return leftInBand - rightInBand;
+  }
+
+  if (left.resultingDistanceToTargetBps !== right.resultingDistanceToTargetBps) {
+    return left.resultingDistanceToTargetBps - right.resultingDistanceToTargetBps;
+  }
+
+  if (left.quoteTokenDelta !== right.quoteTokenDelta) {
+    return left.quoteTokenDelta < right.quoteTokenDelta ? -1 : 1;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
 function buildSnapshotFingerprint(
   poolAddress: HexAddress,
   blockNumber: bigint,
@@ -920,7 +947,8 @@ export function synthesizeAjnaBorrowCandidate(
     baselinePrediction?: AjnaRatePrediction;
   }
 ): PlanCandidate | undefined {
-  if (config.drawDebtLimitIndex === undefined) {
+  const limitIndexes = resolveDrawDebtLimitIndexes(config);
+  if (limitIndexes.length === 0) {
     return undefined;
   }
 
@@ -935,6 +963,7 @@ export function synthesizeAjnaBorrowCandidate(
     baselinePrediction.predictedNextRateBps,
     targetBand
   );
+  const limitIndex = limitIndexes[0]!;
   const minimumAmount =
     config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
   const maxAmount = config.maxBorrowExposure;
@@ -999,7 +1028,7 @@ export function synthesizeAjnaBorrowCandidate(
       {
         type: "DRAW_DEBT",
         amount: upperBound,
-        limitIndex: config.drawDebtLimitIndex,
+        limitIndex,
         collateralAmount,
         note: "auto-synthesized draw-debt threshold"
       }
@@ -1024,7 +1053,8 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
     baselinePrediction?: AjnaRatePrediction;
   }
 ): Promise<PlanCandidate | undefined> {
-  if (config.drawDebtLimitIndex === undefined) {
+  const limitIndexes = resolveDrawDebtLimitIndexes(config);
+  if (limitIndexes.length === 0) {
     return undefined;
   }
 
@@ -1049,7 +1079,6 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
   const simulationSenderAddress = resolveSimulationSenderAddress(config);
   const borrowerAddress = resolveSimulationBorrowerAddress(config, simulationSenderAddress);
   const collateralAmount = config.drawDebtCollateralAmount ?? 0n;
-  const limitIndex = config.drawDebtLimitIndex;
 
   return withTemporaryAnvilFork(
     {
@@ -1088,162 +1117,177 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
           }
         }
 
-        const evaluate = async (
-          drawDebtAmount: bigint
-        ): Promise<{
-          predictedOutcome: RateMoveOutcome;
-          predictedRateWadAfterNextUpdate: bigint;
-          predictedRateBpsAfterNextUpdate: number;
-          improvesConvergence: boolean;
-        }> => {
-          const snapshotId = await testClient.snapshot();
+        let bestCandidate: PlanCandidate | undefined;
 
-          try {
-            const drawDebtHash = await walletClient.writeContract({
-              account: simulationSenderAddress,
-              chain: undefined,
-              address: options.poolAddress,
-              abi: ajnaPoolAbi,
-              functionName: "drawDebt",
-              args: [
-                borrowerAddress,
-                drawDebtAmount,
-                BigInt(limitIndex),
-                collateralAmount
-              ]
-            });
-            const drawDebtReceipt = await publicClient.waitForTransactionReceipt({
-              hash: drawDebtHash
-            });
-            if (drawDebtReceipt.status !== "success") {
+        for (const limitIndex of limitIndexes) {
+          const evaluate = async (
+            drawDebtAmount: bigint
+          ): Promise<{
+            predictedOutcome: RateMoveOutcome;
+            predictedRateWadAfterNextUpdate: bigint;
+            predictedRateBpsAfterNextUpdate: number;
+            improvesConvergence: boolean;
+          }> => {
+            const snapshotId = await testClient.snapshot();
+
+            try {
+              const drawDebtHash = await walletClient.writeContract({
+                account: simulationSenderAddress,
+                chain: undefined,
+                address: options.poolAddress,
+                abi: ajnaPoolAbi,
+                functionName: "drawDebt",
+                args: [
+                  borrowerAddress,
+                  drawDebtAmount,
+                  BigInt(limitIndex),
+                  collateralAmount
+                ]
+              });
+              const drawDebtReceipt = await publicClient.waitForTransactionReceipt({
+                hash: drawDebtHash
+              });
+              if (drawDebtReceipt.status !== "success") {
+                return {
+                  predictedOutcome: baselinePrediction.predictedOutcome,
+                  predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
+                  predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
+                  improvesConvergence: false
+                };
+              }
+
+              let simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              if (simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate > 0) {
+                await testClient.increaseTime({
+                  seconds: simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate
+                });
+                await testClient.mine({
+                  blocks: 1
+                });
+                simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              }
+
+              const updateHash = await walletClient.writeContract({
+                account: simulationSenderAddress,
+                chain: undefined,
+                address: options.poolAddress,
+                abi: ajnaPoolAbi,
+                functionName: "updateInterest",
+                args: []
+              });
+              const updateReceipt = await publicClient.waitForTransactionReceipt({
+                hash: updateHash
+              });
+              if (updateReceipt.status !== "success") {
+                return {
+                  predictedOutcome: baselinePrediction.predictedOutcome,
+                  predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
+                  predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
+                  improvesConvergence: false
+                };
+              }
+
+              const postUpdateReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              const predictedRateWadAfterNextUpdate =
+                postUpdateReadState.rateState.currentRateWad;
+              const predictedRateBpsAfterNextUpdate = toRateBps(
+                predictedRateWadAfterNextUpdate
+              );
+              const predictedDistance = distanceToTargetBand(
+                predictedRateBpsAfterNextUpdate,
+                targetBand
+              );
+              const predictedOutcome = deriveRateMoveOutcome(
+                readState.rateState.currentRateWad,
+                predictedRateWadAfterNextUpdate
+              );
+
+              return {
+                predictedOutcome,
+                predictedRateWadAfterNextUpdate,
+                predictedRateBpsAfterNextUpdate,
+                improvesConvergence:
+                  predictionChanged(baselinePrediction, {
+                    predictedOutcome,
+                    predictedNextRateWad: predictedRateWadAfterNextUpdate,
+                    predictedNextRateBps: predictedRateBpsAfterNextUpdate,
+                    secondsUntilNextRateUpdate: 0
+                  }) &&
+                  predictedDistance < baselineDistance
+              };
+            } catch {
               return {
                 predictedOutcome: baselinePrediction.predictedOutcome,
                 predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
                 predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
                 improvesConvergence: false
               };
+            } finally {
+              await testClient.revert({ id: snapshotId });
+            }
+          };
+
+          let lowerBound = minimumAmount - 1n;
+          let upperBound = minimumAmount;
+          let upperEvaluation = await evaluate(upperBound);
+
+          while (!upperEvaluation.improvesConvergence) {
+            lowerBound = upperBound;
+            if (upperBound === maxAmount) {
+              upperEvaluation = undefined as never;
+              break;
             }
 
-            let simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
-            if (simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate > 0) {
-              await testClient.increaseTime({
-                seconds: simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate
-              });
-              await testClient.mine({
-                blocks: 1
-              });
-              simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+            upperBound = upperBound * 2n;
+            if (upperBound > maxAmount) {
+              upperBound = maxAmount;
             }
+            upperEvaluation = await evaluate(upperBound);
+          }
 
-            const updateHash = await walletClient.writeContract({
-              account: simulationSenderAddress,
-              chain: undefined,
-              address: options.poolAddress,
-              abi: ajnaPoolAbi,
-              functionName: "updateInterest",
-              args: []
-            });
-            const updateReceipt = await publicClient.waitForTransactionReceipt({
-              hash: updateHash
-            });
-            if (updateReceipt.status !== "success") {
-              return {
-                predictedOutcome: baselinePrediction.predictedOutcome,
-                predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
-                predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
-                improvesConvergence: false
-              };
+          if (!upperEvaluation?.improvesConvergence) {
+            continue;
+          }
+
+          while (upperBound - lowerBound > 1n) {
+            const middle = lowerBound + (upperBound - lowerBound) / 2n;
+            const middleEvaluation = await evaluate(middle);
+            if (middleEvaluation.improvesConvergence) {
+              upperBound = middle;
+              upperEvaluation = middleEvaluation;
+            } else {
+              lowerBound = middle;
             }
+          }
 
-            const postUpdateReadState = await readAjnaPoolState(publicClient, options.poolAddress);
-            const predictedRateWadAfterNextUpdate =
-              postUpdateReadState.rateState.currentRateWad;
-            const predictedRateBpsAfterNextUpdate = toRateBps(
-              predictedRateWadAfterNextUpdate
-            );
-            const predictedDistance = distanceToTargetBand(
-              predictedRateBpsAfterNextUpdate,
+          const candidate: PlanCandidate = {
+            id: `sim-borrow:${limitIndex}:draw-debt:${upperBound.toString()}`,
+            intent: "BORROW",
+            minimumExecutionSteps: [
+              {
+                type: "DRAW_DEBT",
+                amount: upperBound,
+                limitIndex,
+                collateralAmount,
+                note: "simulation-backed draw-debt threshold"
+              }
+            ],
+            predictedOutcome: upperEvaluation.predictedOutcome,
+            predictedRateBpsAfterNextUpdate: upperEvaluation.predictedRateBpsAfterNextUpdate,
+            resultingDistanceToTargetBps: distanceToTargetBand(
+              upperEvaluation.predictedRateBpsAfterNextUpdate,
               targetBand
-            );
-            const predictedOutcome = deriveRateMoveOutcome(
-              readState.rateState.currentRateWad,
-              predictedRateWadAfterNextUpdate
-            );
+            ),
+            quoteTokenDelta: upperBound,
+            explanation: `simulation-backed draw-debt threshold changes the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.predictedOutcome}`
+          };
 
-            return {
-              predictedOutcome,
-              predictedRateWadAfterNextUpdate,
-              predictedRateBpsAfterNextUpdate,
-              improvesConvergence:
-                predictionChanged(baselinePrediction, {
-                  predictedOutcome,
-                  predictedNextRateWad: predictedRateWadAfterNextUpdate,
-                  predictedNextRateBps: predictedRateBpsAfterNextUpdate,
-                  secondsUntilNextRateUpdate: 0
-                }) &&
-                predictedDistance < baselineDistance
-            };
-          } catch {
-            return {
-              predictedOutcome: baselinePrediction.predictedOutcome,
-              predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
-              predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
-              improvesConvergence: false
-            };
-          } finally {
-            await testClient.revert({ id: snapshotId });
-          }
-        };
-
-        let lowerBound = minimumAmount - 1n;
-        let upperBound = minimumAmount;
-        let upperEvaluation = await evaluate(upperBound);
-
-        while (!upperEvaluation.improvesConvergence) {
-          lowerBound = upperBound;
-          if (upperBound === maxAmount) {
-            return undefined;
-          }
-
-          upperBound = upperBound * 2n;
-          if (upperBound > maxAmount) {
-            upperBound = maxAmount;
-          }
-          upperEvaluation = await evaluate(upperBound);
-        }
-
-        while (upperBound - lowerBound > 1n) {
-          const middle = lowerBound + (upperBound - lowerBound) / 2n;
-          const middleEvaluation = await evaluate(middle);
-          if (middleEvaluation.improvesConvergence) {
-            upperBound = middle;
-            upperEvaluation = middleEvaluation;
-          } else {
-            lowerBound = middle;
+          if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
+            bestCandidate = candidate;
           }
         }
 
-        return {
-          id: `sim-borrow:draw-debt:${upperBound.toString()}`,
-          intent: "BORROW",
-          minimumExecutionSteps: [
-            {
-              type: "DRAW_DEBT",
-              amount: upperBound,
-              limitIndex,
-              collateralAmount,
-              note: "simulation-backed draw-debt threshold"
-            }
-          ],
-          predictedOutcome: upperEvaluation.predictedOutcome,
-          predictedRateBpsAfterNextUpdate: upperEvaluation.predictedRateBpsAfterNextUpdate,
-          resultingDistanceToTargetBps: distanceToTargetBand(
-            upperEvaluation.predictedRateBpsAfterNextUpdate,
-            targetBand
-          ),
-          quoteTokenDelta: upperBound,
-          explanation: `simulation-backed draw-debt threshold changes the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.predictedOutcome}`
-        };
+        return bestCandidate;
       } finally {
         await testClient.stopImpersonatingAccount({
           address: simulationSenderAddress

@@ -511,7 +511,7 @@ describeIf("Base factory fork integration", () => {
               borrowerAddress: account.address,
               simulationSenderAddress: account.address,
               enableSimulationBackedBorrowSynthesis: true,
-              drawDebtLimitIndex: 3000,
+              drawDebtLimitIndexes: [...STEERING_BUCKET_CANDIDATES],
               drawDebtCollateralAmount: (collateralUnits * 10n ** 18n).toString()
             });
             const snapshot = await new AjnaRpcSnapshotSource(config, {

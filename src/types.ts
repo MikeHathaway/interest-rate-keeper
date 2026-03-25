@@ -131,6 +131,7 @@ export interface KeeperConfig {
   enableSimulationBackedBorrowSynthesis?: boolean;
   simulationSenderAddress?: HexAddress;
   drawDebtLimitIndex?: number;
+  drawDebtLimitIndexes?: number[];
   drawDebtCollateralAmount?: bigint;
   enableHeuristicLendSynthesis?: boolean;
   logPath?: string;

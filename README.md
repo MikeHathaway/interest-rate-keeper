@@ -125,6 +125,7 @@ Optional live-execution fields:
 - `enableSimulationBackedBorrowSynthesis`
 - `simulationSenderAddress`
 - `drawDebtLimitIndex`
+- `drawDebtLimitIndexes`
 - `drawDebtCollateralAmount`
 - `enableHeuristicLendSynthesis`
 
