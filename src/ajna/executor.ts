@@ -121,26 +121,21 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
 
   async function resolvePoolTokens() {
     if (!tokenAddressesPromise) {
-      tokenAddressesPromise = publicClient
-        .multicall({
-          allowFailure: false,
-          contracts: [
-            {
-              address: runtime.poolAddress,
-              abi: ajnaPoolAbi,
-              functionName: "quoteTokenAddress"
-            },
-            {
-              address: runtime.poolAddress,
-              abi: ajnaPoolAbi,
-              functionName: "collateralAddress"
-            }
-          ]
+      tokenAddressesPromise = Promise.all([
+        publicClient.readContract({
+          address: runtime.poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "quoteTokenAddress"
+        }),
+        publicClient.readContract({
+          address: runtime.poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "collateralAddress"
         })
-        .then(([quoteTokenAddress, collateralAddress]) => ({
-          quoteTokenAddress,
-          collateralAddress
-        }));
+      ]).then(([quoteTokenAddress, collateralAddress]) => ({
+        quoteTokenAddress,
+        collateralAddress
+      }));
     }
 
     return tokenAddressesPromise;

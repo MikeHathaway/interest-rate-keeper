@@ -22,6 +22,7 @@ import {
   BASE_AJNA_DEPLOYMENT,
   AjnaRpcSnapshotSource,
   createAjnaExecutionBackend,
+  DryRunExecutionBackend,
   resolveKeeperConfig,
   runCycle,
   type KeeperConfig
@@ -112,6 +113,117 @@ async function deployMockToken(
   return receipt.contractAddress;
 }
 
+function createClients() {
+  const account = privateKeyToAccount(DEFAULT_ANVIL_PRIVATE_KEY);
+
+  return {
+    account,
+    publicClient: createPublicClient({
+      chain: base,
+      transport: http(LOCAL_RPC_URL)
+    }) as any,
+    walletClient: createWalletClient({
+      account,
+      chain: base,
+      transport: http(LOCAL_RPC_URL)
+    }) as any,
+    testClient: createTestClient({
+      chain: base,
+      mode: "anvil",
+      transport: http(LOCAL_RPC_URL)
+    }) as any
+  };
+}
+
+async function mintToken(
+  walletClient: any,
+  publicClient: any,
+  artifact: { abi: unknown[] },
+  tokenAddress: `0x${string}`,
+  recipient: `0x${string}`,
+  amount: bigint
+): Promise<void> {
+  const hash = await walletClient.writeContract({
+    account: walletClient.account!,
+    chain: undefined,
+    address: tokenAddress,
+    abi: artifact.abi,
+    functionName: "mint",
+    args: [recipient, amount]
+  });
+
+  await publicClient.waitForTransactionReceipt({ hash });
+}
+
+async function deployPoolThroughFactory(
+  walletClient: any,
+  publicClient: any,
+  collateralToken: `0x${string}`,
+  quoteToken: `0x${string}`
+): Promise<`0x${string}`> {
+  const deployHash = await walletClient.writeContract({
+    account: walletClient.account!,
+    chain: undefined,
+    address: BASE_AJNA_DEPLOYMENT.erc20Factory,
+    abi: ajnaErc20PoolFactoryAbi,
+    functionName: "deployPool",
+    args: [collateralToken, quoteToken, INITIAL_RATE_WAD]
+  });
+  const deployReceipt = await publicClient.waitForTransactionReceipt({ hash: deployHash });
+  const poolCreatedLog = deployReceipt.logs
+    .map((log: any) => {
+      try {
+        return decodeEventLog({
+          abi: ajnaErc20PoolFactoryAbi,
+          data: log.data,
+          topics: log.topics
+        });
+      } catch {
+        return undefined;
+      }
+    })
+    .find((log: any) => log?.eventName === "PoolCreated");
+
+  if (!poolCreatedLog) {
+    throw new Error("PoolCreated event not found in factory receipt");
+  }
+
+  return poolCreatedLog.args.pool_ as `0x${string}`;
+}
+
+async function approveToken(
+  walletClient: any,
+  publicClient: any,
+  tokenAddress: `0x${string}`,
+  spender: `0x${string}`,
+  amount: bigint,
+  abi: unknown[]
+): Promise<void> {
+  const hash = await walletClient.writeContract({
+    account: walletClient.account!,
+    chain: undefined,
+    address: tokenAddress,
+    abi,
+    functionName: "approve",
+    args: [spender, amount]
+  });
+
+  await publicClient.waitForTransactionReceipt({ hash });
+}
+
+async function readCurrentRateBps(
+  publicClient: any,
+  poolAddress: `0x${string}`
+): Promise<number> {
+  const [updatedRate] = await publicClient.readContract({
+    address: poolAddress,
+    abi: ajnaPoolAbi,
+    functionName: "interestRateInfo"
+  });
+
+  return Number((updatedRate * 10_000n) / 1_000_000_000_000_000_000n);
+}
+
 const describeIf = RUN_BASE_FORK_TESTS ? describe : describe.skip;
 
 describeIf("Base factory fork integration", () => {
@@ -146,21 +258,7 @@ describeIf("Base factory fork integration", () => {
   it(
     "creates a new pool through the deployed Base factory and updates interest after fast-forwarding time",
     async () => {
-      const account = privateKeyToAccount(DEFAULT_ANVIL_PRIVATE_KEY);
-      const publicClient: any = createPublicClient({
-        chain: base,
-        transport: http(LOCAL_RPC_URL)
-      });
-      const walletClient: any = createWalletClient({
-        account,
-        chain: base,
-        transport: http(LOCAL_RPC_URL)
-      });
-      const testClient: any = createTestClient({
-        chain: base,
-        mode: "anvil",
-        transport: http(LOCAL_RPC_URL)
-      });
+      const { account, publicClient, walletClient, testClient } = createClients();
 
       const artifact = await ensureMockArtifact();
       const collateralToken = await deployMockToken(
@@ -179,55 +277,31 @@ describeIf("Base factory fork integration", () => {
       );
 
       for (const tokenAddress of [collateralToken, quoteToken]) {
-        const mintHash = await walletClient.writeContract({
-          account,
-          chain: undefined,
-          address: tokenAddress,
-          abi: artifact.abi,
-          functionName: "mint",
-          args: [account.address, 10_000n * 10n ** 18n]
-        });
-        await publicClient.waitForTransactionReceipt({ hash: mintHash });
+        await mintToken(
+          walletClient,
+          publicClient,
+          artifact,
+          tokenAddress,
+          account.address,
+          10_000n * 10n ** 18n
+        );
       }
 
-      const deployHash = await walletClient.writeContract({
-        account,
-        chain: undefined,
-        address: BASE_AJNA_DEPLOYMENT.erc20Factory,
-        abi: ajnaErc20PoolFactoryAbi,
-        functionName: "deployPool",
-        args: [collateralToken, quoteToken, INITIAL_RATE_WAD]
-      });
-      const deployReceipt = await publicClient.waitForTransactionReceipt({ hash: deployHash });
-      const poolCreatedLog = deployReceipt.logs
-        .map((log: any) => {
-          try {
-            return decodeEventLog({
-              abi: ajnaErc20PoolFactoryAbi,
-              data: log.data,
-              topics: log.topics
-            });
-          } catch {
-            return undefined;
-          }
-        })
-        .find((log: any) => log?.eventName === "PoolCreated");
+      const poolAddress = await deployPoolThroughFactory(
+        walletClient,
+        publicClient,
+        collateralToken,
+        quoteToken
+      );
 
-      if (!poolCreatedLog) {
-        throw new Error("PoolCreated event not found in factory receipt");
-      }
-
-      const poolAddress = poolCreatedLog.args.pool_ as `0x${string}`;
-
-      const approveHash = await walletClient.writeContract({
-        account,
-        chain: undefined,
-        address: quoteToken,
-        abi: artifact.abi,
-        functionName: "approve",
-        args: [poolAddress, 2_000n * 10n ** 18n]
-      });
-      await publicClient.waitForTransactionReceipt({ hash: approveHash });
+      await approveToken(
+        walletClient,
+        publicClient,
+        quoteToken,
+        poolAddress,
+        2_000n * 10n ** 18n,
+        artifact.abi
+      );
 
       const latestBlock = await publicClient.getBlock();
       const addQuoteHash = await walletClient.writeContract({
@@ -287,15 +361,211 @@ describeIf("Base factory fork integration", () => {
       expect(result.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")).toBe(true);
 
       chainNow = Number((await publicClient.getBlock()).timestamp);
-      const [updatedRate] = await publicClient.readContract({
-        address: poolAddress,
-        abi: ajnaPoolAbi,
-        functionName: "interestRateInfo"
+      expect(await readCurrentRateBps(publicClient, poolAddress)).toBe(DECREASED_RATE_BPS);
+    },
+    120_000
+  );
+
+  it(
+    "discovers a heuristic ADD_QUOTE steering plan against a real borrowed pool state",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+      const scenarios = [
+        { initialQuoteAmount: 500n, borrowAmount: 400n, collateralAmount: 600n },
+        { initialQuoteAmount: 500n, borrowAmount: 450n, collateralAmount: 800n },
+        { initialQuoteAmount: 500n, borrowAmount: 490n, collateralAmount: 1_000n },
+        { initialQuoteAmount: 750n, borrowAmount: 650n, collateralAmount: 1_000n },
+        { initialQuoteAmount: 1_000n, borrowAmount: 850n, collateralAmount: 1_200n },
+        { initialQuoteAmount: 1_000n, borrowAmount: 950n, collateralAmount: 1_500n },
+        { initialQuoteAmount: 1_000n, borrowAmount: 990n, collateralAmount: 2_000n }
+      ] as const;
+
+      let matched:
+        | {
+            poolAddress: `0x${string}`;
+            config: KeeperConfig;
+            chainNow: number;
+            snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+          }
+        | undefined;
+
+      for (const [index, scenario] of scenarios.entries()) {
+        const collateralToken = await deployMockToken(
+          walletClient,
+          publicClient,
+          artifact,
+          `Steering Collateral ${index}`,
+          `SC${index}`
+        );
+        const quoteToken = await deployMockToken(
+          walletClient,
+          publicClient,
+          artifact,
+          `Steering Quote ${index}`,
+          `SQ${index}`
+        );
+
+        for (const tokenAddress of [collateralToken, quoteToken]) {
+          await mintToken(
+            walletClient,
+            publicClient,
+            artifact,
+            tokenAddress,
+            account.address,
+            10_000n * 10n ** 18n
+          );
+        }
+
+        const poolAddress = await deployPoolThroughFactory(
+          walletClient,
+          publicClient,
+          collateralToken,
+          quoteToken
+        );
+
+        await approveToken(
+          walletClient,
+          publicClient,
+          quoteToken,
+          poolAddress,
+          20_000n * 10n ** 18n,
+          artifact.abi
+        );
+        await approveToken(
+          walletClient,
+          publicClient,
+          collateralToken,
+          poolAddress,
+          5_000n * 10n ** 18n,
+          artifact.abi
+        );
+
+        const latestBlock = await publicClient.getBlock();
+        const initialQuoteAmount = scenario.initialQuoteAmount * 10n ** 18n;
+        const borrowAmount = scenario.borrowAmount * 10n ** 18n;
+        const collateralAmount = scenario.collateralAmount * 10n ** 18n;
+
+        try {
+          const addQuoteHash = await walletClient.writeContract({
+            account,
+            chain: undefined,
+            address: poolAddress,
+            abi: ajnaPoolAbi,
+            functionName: "addQuoteToken",
+            args: [initialQuoteAmount, 3_000n, latestBlock.timestamp + 3600n]
+          });
+          await publicClient.waitForTransactionReceipt({ hash: addQuoteHash });
+
+          const drawDebtHash = await walletClient.writeContract({
+            account,
+            chain: undefined,
+            address: poolAddress,
+            abi: ajnaPoolAbi,
+            functionName: "drawDebt",
+            args: [account.address, borrowAmount, 3_000n, collateralAmount]
+          });
+          await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
+        } catch {
+          continue;
+        }
+
+        await testClient.increaseTime({
+          seconds: FORK_TIME_SKIP_SECONDS
+        });
+        await testClient.mine({
+          blocks: 1
+        });
+
+        const chainNow = Number((await publicClient.getBlock()).timestamp);
+        const config = resolveKeeperConfig({
+          chainId: 8453,
+          poolAddress,
+          poolId: `8453:${poolAddress.toLowerCase()}`,
+          rpcUrl: LOCAL_RPC_URL,
+          targetRateBps: 800,
+          toleranceBps: 50,
+          toleranceMode: "relative",
+          completionPolicy: "next_move_would_overshoot",
+          executionBufferBps: 10_000,
+          maxQuoteTokenExposure: "50000000000000000000000",
+          maxBorrowExposure: "5000000000000000000000",
+          snapshotAgeMaxSeconds: 3600,
+          minTimeBeforeRateWindowSeconds: 120,
+          minExecutableActionQuoteToken: "1",
+          recheckBeforeSubmit: true,
+          addQuoteBucketIndex: 3000,
+          addQuoteExpirySeconds: 3600,
+          enableHeuristicLendSynthesis: true
+        });
+
+        const snapshot = await new AjnaRpcSnapshotSource(config, {
+          publicClient,
+          now: () => chainNow
+        }).getSnapshot();
+
+        let evaluationSnapshot = snapshot;
+        let evaluationChainNow = chainNow;
+
+        if (snapshot.predictedNextOutcome === "STEP_DOWN") {
+          const updateHash = await walletClient.writeContract({
+            account,
+            chain: undefined,
+            address: poolAddress,
+            abi: ajnaPoolAbi,
+            functionName: "updateInterest"
+          });
+          await publicClient.waitForTransactionReceipt({ hash: updateHash });
+
+          await testClient.increaseTime({
+            seconds: FORK_TIME_SKIP_SECONDS
+          });
+          await testClient.mine({
+            blocks: 1
+          });
+
+          evaluationChainNow = Number((await publicClient.getBlock()).timestamp);
+          evaluationSnapshot = await new AjnaRpcSnapshotSource(config, {
+            publicClient,
+            now: () => evaluationChainNow
+          }).getSnapshot();
+        }
+
+        if (
+          evaluationSnapshot.currentRateBps > config.targetRateBps &&
+          evaluationSnapshot.predictedNextOutcome === "STEP_UP" &&
+          evaluationSnapshot.candidates.some((candidate) => candidate.intent === "LEND")
+        ) {
+          matched = {
+            poolAddress,
+            config,
+            chainNow: evaluationChainNow,
+            snapshot: evaluationSnapshot
+          };
+          break;
+        }
+      }
+
+      expect(matched).toBeDefined();
+      expect(matched?.snapshot.predictedNextOutcome).toBe("STEP_UP");
+      expect(matched?.snapshot.candidates.some((candidate) => candidate.intent === "LEND")).toBe(
+        true
+      );
+
+      let chainNow = matched!.chainNow;
+      const result = await runCycle(matched!.config, {
+        snapshotSource: new AjnaRpcSnapshotSource(matched!.config, {
+          publicClient,
+          now: () => chainNow
+        }),
+        executor: new DryRunExecutionBackend()
       });
 
-      expect(Number((updatedRate * 10_000n) / 1_000_000_000_000_000_000n)).toBe(
-        DECREASED_RATE_BPS
-      );
+      expect(result.status).toBe("EXECUTED");
+      expect(result.plan.intent).toBe("LEND");
+      expect(result.plan.requiredSteps.some((step) => step.type === "ADD_QUOTE")).toBe(true);
+      expect(result.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")).toBe(true);
     },
     120_000
   );

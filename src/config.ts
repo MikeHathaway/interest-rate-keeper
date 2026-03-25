@@ -58,6 +58,24 @@ function parsePositiveNumber(value: unknown, label: string): number {
   return parsed;
 }
 
+function parseNonNegativeInteger(value: unknown, label: string): number {
+  const parsed = parseNumber(value, label);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${label} must be a non-negative integer`);
+  }
+
+  return parsed;
+}
+
+function parsePositiveInteger(value: unknown, label: string): number {
+  const parsed = parsePositiveNumber(value, label);
+  if (!Number.isInteger(parsed)) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+
+  return parsed;
+}
+
 function parseOptionalBigInt(value: unknown, label: string): bigint | undefined {
   if (value === undefined || value === null || value === "") {
     return undefined;
@@ -208,6 +226,27 @@ export function resolveKeeperConfig(input: unknown): KeeperConfig {
 
   if (record.logPath !== undefined) {
     config.logPath = parseString(record.logPath, "logPath");
+  }
+
+  if (record.addQuoteBucketIndex !== undefined) {
+    config.addQuoteBucketIndex = parseNonNegativeInteger(
+      record.addQuoteBucketIndex,
+      "addQuoteBucketIndex"
+    );
+  }
+
+  if (record.addQuoteExpirySeconds !== undefined) {
+    config.addQuoteExpirySeconds = parsePositiveInteger(
+      record.addQuoteExpirySeconds,
+      "addQuoteExpirySeconds"
+    );
+  }
+
+  if (record.enableHeuristicLendSynthesis !== undefined) {
+    config.enableHeuristicLendSynthesis = parseBoolean(
+      record.enableHeuristicLendSynthesis,
+      "enableHeuristicLendSynthesis"
+    );
   }
 
   if (record.manualCandidates !== undefined) {

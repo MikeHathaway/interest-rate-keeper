@@ -125,6 +125,9 @@ export interface KeeperConfig {
   minExecutableActionQuoteToken: bigint;
   maxGasCostWei?: bigint;
   recheckBeforeSubmit: boolean;
+  addQuoteBucketIndex?: number;
+  addQuoteExpirySeconds?: number;
+  enableHeuristicLendSynthesis?: boolean;
   logPath?: string;
   manualCandidates?: PlanCandidate[];
 }

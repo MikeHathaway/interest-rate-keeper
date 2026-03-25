@@ -19,6 +19,12 @@ This is still an early implementation. The core keeper loop exists and the live 
 
 Today, the snapshot builder reads real pool state and predicts the next Ajna rate move, but candidate steering actions still come from `manualCandidates` in config when you want the planner to choose `LEND`, `BORROW`, or `LEND_AND_BORROW`.
 
+There is now one partial exception:
+
+- heuristic `ADD_QUOTE` synthesis can be enabled explicitly with `enableHeuristicLendSynthesis`
+
+That path is useful for live planning and dry-run validation, but it is still heuristic rather than a fully validated onchain threshold synthesizer.
+
 ## Requirements
 
 - Node.js `>=20.5.0`
@@ -107,6 +113,9 @@ Optional live-execution fields:
 - `logPath`
 - `manualCandidates`
 - `maxGasCostWei`
+- `addQuoteBucketIndex`
+- `addQuoteExpirySeconds`
+- `enableHeuristicLendSynthesis`
 
 ## Live Execution Notes
 
@@ -141,6 +150,7 @@ The Base integration test is intended to stay close to real deployed Ajna behavi
 - it creates a fresh pool through that real factory
 - it advances time past the 12-hour update window
 - it runs the keeper cycle and verifies that `UPDATE_INTEREST` changes the rate as expected
+- it also proves heuristic `ADD_QUOTE` plan discovery against a real borrowed pool state on a Base fork
 
 Run it with:
 
@@ -152,5 +162,6 @@ BASE_RPC_URL=https://mainnet.base.org npm run test:integration:base
 
 - The planner does not yet synthesize the minimum directional threshold directly from live Ajna pool state.
 - `manualCandidates` are still the bridge for live steering plans.
+- Heuristic lend synthesis is opt-in and currently validated for live planning/dry-run discovery, not for blind live execution in borrowed pools.
 - Token approvals are checked, not managed.
-- The current fork integration test proves factory creation and interest updates, but not yet a full computed `LEND` or `BORROW` steering cycle.
+- The current fork integration tests prove factory creation, real interest updates, and heuristic live-plan discovery, but not yet a fully validated live-executed computed `LEND` or `BORROW` steering cycle.

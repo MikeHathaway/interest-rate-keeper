@@ -7,9 +7,11 @@ import {
 } from "viem";
 
 import { ajnaPoolAbi } from "./abi.js";
+import { buildTargetBand, distanceToTargetBand } from "../planner.js";
 import { type SnapshotSource } from "../snapshot.js";
 import {
   type KeeperConfig,
+  type PlanCandidate,
   type PoolSnapshot,
   type RateMoveOutcome
 } from "../types.js";
@@ -23,6 +25,7 @@ const INCREASE_COEFFICIENT_WAD = 1_100_000_000_000_000_000n;
 const DECREASE_COEFFICIENT_WAD = 900_000_000_000_000_000n;
 const MAX_RATE_WAD = 4n * WAD;
 const MIN_RATE_WAD = 1_000_000_000_000_000n;
+const DEFAULT_ADD_QUOTE_EXPIRY_SECONDS = 60 * 60;
 
 function wmul(left: bigint, right: bigint): bigint {
   if (left === 0n || right === 0n) {
@@ -158,6 +161,131 @@ export function classifyAjnaNextRate(state: AjnaRateState): AjnaRatePrediction {
   };
 }
 
+function predictionChanged(
+  baseline: AjnaRatePrediction,
+  candidate: AjnaRatePrediction
+): boolean {
+  return (
+    baseline.predictedOutcome !== candidate.predictedOutcome ||
+    baseline.predictedNextRateWad !== candidate.predictedNextRateWad
+  );
+}
+
+function addQuoteToRateState(
+  state: AjnaRateState,
+  quoteTokenAmount: bigint,
+  quoteTokenScale: bigint
+): AjnaRateState {
+  return {
+    ...state,
+    depositEmaWad: state.depositEmaWad + quoteTokenAmount * quoteTokenScale
+  };
+}
+
+export function synthesizeAjnaLendCandidate(
+  state: AjnaRateState,
+  config: KeeperConfig,
+  options: {
+    quoteTokenScale: bigint;
+    nowTimestamp: number;
+    baselinePrediction?: AjnaRatePrediction;
+  }
+): PlanCandidate | undefined {
+  if (config.addQuoteBucketIndex === undefined || options.quoteTokenScale <= 0n) {
+    return undefined;
+  }
+
+  const targetBand = buildTargetBand(config);
+  const currentRateBps = toRateBps(state.currentRateWad);
+  if (currentRateBps <= targetBand.maxRateBps) {
+    return undefined;
+  }
+
+  const baselinePrediction = options.baselinePrediction ?? classifyAjnaNextRate(state);
+  const currentDistance = distanceToTargetBand(currentRateBps, targetBand);
+  const minimumAmount = config.minExecutableActionQuoteToken > 0n
+    ? config.minExecutableActionQuoteToken
+    : 1n;
+  const maxAmount = config.maxQuoteTokenExposure;
+
+  if (minimumAmount > maxAmount) {
+    return undefined;
+  }
+
+  function evaluate(quoteTokenAmount: bigint): {
+    prediction: AjnaRatePrediction;
+    improvesConvergence: boolean;
+  } {
+    const prediction = classifyAjnaNextRate(
+      addQuoteToRateState(state, quoteTokenAmount, options.quoteTokenScale)
+    );
+    const predictedDistance = distanceToTargetBand(
+      prediction.predictedNextRateBps,
+      targetBand
+    );
+
+    return {
+      prediction,
+      improvesConvergence:
+        predictionChanged(baselinePrediction, prediction) &&
+        predictedDistance < currentDistance
+    };
+  }
+
+  let lowerBound = minimumAmount - 1n;
+  let upperBound = minimumAmount;
+  let upperEvaluation = evaluate(upperBound);
+
+  while (!upperEvaluation.improvesConvergence) {
+    lowerBound = upperBound;
+    if (upperBound === maxAmount) {
+      return undefined;
+    }
+
+    upperBound = upperBound * 2n;
+    if (upperBound > maxAmount) {
+      upperBound = maxAmount;
+    }
+    upperEvaluation = evaluate(upperBound);
+  }
+
+  while (upperBound - lowerBound > 1n) {
+    const middle = lowerBound + (upperBound - lowerBound) / 2n;
+    const middleEvaluation = evaluate(middle);
+    if (middleEvaluation.improvesConvergence) {
+      upperBound = middle;
+      upperEvaluation = middleEvaluation;
+    } else {
+      lowerBound = middle;
+    }
+  }
+
+  const expiry =
+    options.nowTimestamp + (config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS);
+
+  return {
+    id: `auto-lend:add-quote:${upperBound.toString()}`,
+    intent: "LEND",
+    minimumExecutionSteps: [
+      {
+        type: "ADD_QUOTE",
+        amount: upperBound,
+        bucketIndex: config.addQuoteBucketIndex,
+        expiry,
+        note: "auto-synthesized add-quote threshold"
+      }
+    ],
+    predictedOutcome: upperEvaluation.prediction.predictedOutcome,
+    predictedRateBpsAfterNextUpdate: upperEvaluation.prediction.predictedNextRateBps,
+    resultingDistanceToTargetBps: distanceToTargetBand(
+      upperEvaluation.prediction.predictedNextRateBps,
+      targetBand
+    ),
+    quoteTokenDelta: upperBound,
+    explanation: `auto add-quote threshold changes the next Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.prediction.predictedOutcome}`
+  };
+}
+
 export interface AjnaSnapshotSourceDependencies {
   publicClient?: PublicClient;
   now?: () => number;
@@ -214,47 +342,50 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
       collateralAddress,
       quoteTokenScale,
       poolType
-    ] = await this.publicClient.multicall({
-      allowFailure: false,
-      blockNumber: block.number,
-      contracts: [
-        {
-          address: this.poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "interestRateInfo"
-        },
-        {
-          address: this.poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "debtInfo"
-        },
-        {
-          address: this.poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "emasInfo"
-        },
-        {
-          address: this.poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "quoteTokenAddress"
-        },
-        {
-          address: this.poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "collateralAddress"
-        },
-        {
-          address: this.poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "quoteTokenScale"
-        },
-        {
-          address: this.poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "poolType"
-        }
-      ]
-    });
+    ] = await Promise.all([
+      this.publicClient.readContract({
+        address: this.poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "interestRateInfo",
+        blockNumber: block.number
+      }),
+      this.publicClient.readContract({
+        address: this.poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "debtInfo",
+        blockNumber: block.number
+      }),
+      this.publicClient.readContract({
+        address: this.poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "emasInfo",
+        blockNumber: block.number
+      }),
+      this.publicClient.readContract({
+        address: this.poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "quoteTokenAddress",
+        blockNumber: block.number
+      }),
+      this.publicClient.readContract({
+        address: this.poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "collateralAddress",
+        blockNumber: block.number
+      }),
+      this.publicClient.readContract({
+        address: this.poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "quoteTokenScale",
+        blockNumber: block.number
+      }),
+      this.publicClient.readContract({
+        address: this.poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "poolType",
+        blockNumber: block.number
+      })
+    ]);
 
     const prediction = classifyAjnaNextRate({
       currentRateWad,
@@ -266,6 +397,27 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
       lastInterestRateUpdateTimestamp: Number(interestRateUpdateTimestamp),
       nowTimestamp: nowSeconds
     });
+    const rateState: AjnaRateState = {
+      currentRateWad,
+      currentDebtWad,
+      debtEmaWad,
+      depositEmaWad,
+      debtColEmaWad,
+      lupt0DebtEmaWad,
+      lastInterestRateUpdateTimestamp: Number(interestRateUpdateTimestamp),
+      nowTimestamp: nowSeconds
+    };
+    const autoCandidates: PlanCandidate[] = [];
+    if (this.config.enableHeuristicLendSynthesis) {
+      const lendCandidate = synthesizeAjnaLendCandidate(rateState, this.config, {
+        quoteTokenScale,
+        nowTimestamp: nowSeconds,
+        baselinePrediction: prediction
+      });
+      if (lendCandidate) {
+        autoCandidates.push(lendCandidate);
+      }
+    }
 
     const snapshotFingerprint = keccak256(
       stringToHex(
@@ -293,7 +445,10 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
       currentRateBps: toRateBps(currentRateWad),
       predictedNextOutcome: prediction.predictedOutcome,
       predictedNextRateBps: prediction.predictedNextRateBps,
-      candidates: structuredClone(this.config.manualCandidates ?? []),
+      candidates: [
+        ...autoCandidates,
+        ...structuredClone(this.config.manualCandidates ?? [])
+      ],
       metadata: {
         poolAddress: this.poolAddress,
         quoteTokenAddress,
@@ -307,7 +462,8 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
         debtEmaWad: debtEmaWad.toString(),
         depositEmaWad: depositEmaWad.toString(),
         debtColEmaWad: debtColEmaWad.toString(),
-        lupt0DebtEmaWad: lupt0DebtEmaWad.toString()
+        lupt0DebtEmaWad: lupt0DebtEmaWad.toString(),
+        autoCandidateCount: autoCandidates.length
       }
     };
   }

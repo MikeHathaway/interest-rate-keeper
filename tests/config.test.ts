@@ -11,6 +11,9 @@ describe("resolveKeeperConfig", () => {
       toleranceBps: 1000,
       poolAddress: "0x1111111111111111111111111111111111111111",
       rpcUrl: "https://base.example.invalid",
+      addQuoteBucketIndex: 3000,
+      addQuoteExpirySeconds: 7200,
+      enableHeuristicLendSynthesis: true,
       maxQuoteTokenExposure: "1000000",
       maxBorrowExposure: "500000"
     });
@@ -20,6 +23,9 @@ describe("resolveKeeperConfig", () => {
     expect(config.maxQuoteTokenExposure).toBe(1000000n);
     expect(config.poolAddress).toBe("0x1111111111111111111111111111111111111111");
     expect(config.rpcUrl).toBe("https://base.example.invalid");
+    expect(config.addQuoteBucketIndex).toBe(3000);
+    expect(config.addQuoteExpirySeconds).toBe(7200);
+    expect(config.enableHeuristicLendSynthesis).toBe(true);
   });
 
   it("parses manual candidates", () => {
