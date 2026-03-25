@@ -367,7 +367,7 @@ describeIf("Base factory fork integration", () => {
   );
 
   it(
-    "discovers a heuristic ADD_QUOTE steering plan against a real borrowed pool state",
+    "rejects due-cycle lend steering in exact simulation mode while heuristic discovery still finds a dry-run plan",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
       const artifact = await ensureMockArtifact();
@@ -385,11 +385,13 @@ describeIf("Base factory fork integration", () => {
       let matched:
         | {
             poolAddress: `0x${string}`;
-            config: KeeperConfig;
+            heuristicConfig: KeeperConfig;
             chainNow: number;
-            snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+            exactSnapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+            heuristicSnapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
           }
         | undefined;
+      let stepUpScenarioCount = 0;
 
       for (const [index, scenario] of scenarios.entries()) {
         const collateralToken = await deployMockToken(
@@ -414,7 +416,7 @@ describeIf("Base factory fork integration", () => {
             artifact,
             tokenAddress,
             account.address,
-            10_000n * 10n ** 18n
+            1_000_000n * 10n ** 18n
           );
         }
 
@@ -430,7 +432,7 @@ describeIf("Base factory fork integration", () => {
           publicClient,
           quoteToken,
           poolAddress,
-          20_000n * 10n ** 18n,
+          1_000_000n * 10n ** 18n,
           artifact.abi
         );
         await approveToken(
@@ -479,7 +481,7 @@ describeIf("Base factory fork integration", () => {
         });
 
         const chainNow = Number((await publicClient.getBlock()).timestamp);
-        const config = resolveKeeperConfig({
+        const baselineConfig = resolveKeeperConfig({
           chainId: 8453,
           poolAddress,
           poolId: `8453:${poolAddress.toLowerCase()}`,
@@ -488,19 +490,16 @@ describeIf("Base factory fork integration", () => {
           toleranceBps: 50,
           toleranceMode: "relative",
           completionPolicy: "next_move_would_overshoot",
-          executionBufferBps: 10_000,
-          maxQuoteTokenExposure: "50000000000000000000000",
+          executionBufferBps: 0,
+          maxQuoteTokenExposure: "1000000000000000000000000",
           maxBorrowExposure: "5000000000000000000000",
           snapshotAgeMaxSeconds: 3600,
           minTimeBeforeRateWindowSeconds: 120,
           minExecutableActionQuoteToken: "1",
-          recheckBeforeSubmit: true,
-          addQuoteBucketIndex: 3000,
-          addQuoteExpirySeconds: 3600,
-          enableHeuristicLendSynthesis: true
+          recheckBeforeSubmit: true
         });
 
-        const snapshot = await new AjnaRpcSnapshotSource(config, {
+        const snapshot = await new AjnaRpcSnapshotSource(baselineConfig, {
           publicClient,
           now: () => chainNow
         }).getSnapshot();
@@ -526,39 +525,105 @@ describeIf("Base factory fork integration", () => {
           });
 
           evaluationChainNow = Number((await publicClient.getBlock()).timestamp);
-          evaluationSnapshot = await new AjnaRpcSnapshotSource(config, {
+          evaluationSnapshot = await new AjnaRpcSnapshotSource(baselineConfig, {
             publicClient,
             now: () => evaluationChainNow
           }).getSnapshot();
         }
 
         if (
-          evaluationSnapshot.currentRateBps > config.targetRateBps &&
-          evaluationSnapshot.predictedNextOutcome === "STEP_UP" &&
-          evaluationSnapshot.candidates.some((candidate) => candidate.intent === "LEND")
+          evaluationSnapshot.currentRateBps > baselineConfig.targetRateBps &&
+          evaluationSnapshot.predictedNextOutcome === "STEP_UP"
         ) {
+          stepUpScenarioCount += 1;
+          const exactConfig = resolveKeeperConfig({
+            chainId: 8453,
+            poolAddress,
+            poolId: `8453:${poolAddress.toLowerCase()}`,
+            rpcUrl: LOCAL_RPC_URL,
+            targetRateBps: 800,
+            toleranceBps: 50,
+            toleranceMode: "relative",
+            completionPolicy: "next_move_would_overshoot",
+            executionBufferBps: 0,
+            maxQuoteTokenExposure: "1000000000000000000000000",
+            maxBorrowExposure: "5000000000000000000000",
+            snapshotAgeMaxSeconds: 3600,
+            minTimeBeforeRateWindowSeconds: 120,
+            minExecutableActionQuoteToken: "1",
+            recheckBeforeSubmit: true,
+            addQuoteBucketIndex: 3000,
+            addQuoteExpirySeconds: 3600,
+            enableSimulationBackedLendSynthesis: true,
+            simulationSenderAddress: account.address
+          });
+          const exactSnapshot = await new AjnaRpcSnapshotSource(exactConfig, {
+            publicClient,
+            now: () => evaluationChainNow
+          }).getSnapshot();
+
+          if (exactSnapshot.candidates.some((candidate) => candidate.intent === "LEND")) {
+            continue;
+          }
+
+          const heuristicConfig = resolveKeeperConfig({
+            chainId: 8453,
+            poolAddress,
+            poolId: `8453:${poolAddress.toLowerCase()}`,
+            rpcUrl: LOCAL_RPC_URL,
+            targetRateBps: 800,
+            toleranceBps: 50,
+            toleranceMode: "relative",
+            completionPolicy: "next_move_would_overshoot",
+            executionBufferBps: 0,
+            maxQuoteTokenExposure: "1000000000000000000000000",
+            maxBorrowExposure: "5000000000000000000000",
+            snapshotAgeMaxSeconds: 3600,
+            minTimeBeforeRateWindowSeconds: 120,
+            minExecutableActionQuoteToken: "1",
+            recheckBeforeSubmit: true,
+            addQuoteBucketIndex: 3000,
+            addQuoteExpirySeconds: 3600,
+            enableHeuristicLendSynthesis: true
+          });
+          const heuristicSnapshot = await new AjnaRpcSnapshotSource(heuristicConfig, {
+            publicClient,
+            now: () => evaluationChainNow
+          }).getSnapshot();
+          if (!heuristicSnapshot.candidates.some((candidate) => candidate.intent === "LEND")) {
+            continue;
+          }
+
           matched = {
             poolAddress,
-            config,
+            heuristicConfig,
             chainNow: evaluationChainNow,
-            snapshot: evaluationSnapshot
+            exactSnapshot,
+            heuristicSnapshot
           };
           break;
         }
       }
 
-      expect(matched).toBeDefined();
-      expect(matched?.snapshot.predictedNextOutcome).toBe("STEP_UP");
-      expect(matched?.snapshot.candidates.some((candidate) => candidate.intent === "LEND")).toBe(
-        true
-      );
+      if (!matched) {
+        throw new Error(
+          `failed to find comparable step-up scenario; stepUpScenarios=${stepUpScenarioCount}`
+        );
+      }
+      expect(matched.exactSnapshot.predictedNextOutcome).toBe("STEP_UP");
+      expect(
+        matched.exactSnapshot.candidates.some((candidate) => candidate.intent === "LEND")
+      ).toBe(false);
+      expect(
+        matched.heuristicSnapshot.candidates.some((candidate) => candidate.intent === "LEND")
+      ).toBe(true);
 
-      let chainNow = matched!.chainNow;
-      const result = await runCycle(matched!.config, {
-        snapshotSource: new AjnaRpcSnapshotSource(matched!.config, {
-          publicClient,
-          now: () => chainNow
-        }),
+      const snapshotSource = new AjnaRpcSnapshotSource(matched.heuristicConfig, {
+        publicClient,
+        now: () => matched.chainNow
+      });
+      const result = await runCycle(matched.heuristicConfig, {
+        snapshotSource,
         executor: new DryRunExecutionBackend()
       });
 

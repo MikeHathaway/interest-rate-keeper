@@ -13,17 +13,19 @@ The detailed product and engineering decisions are in [DESIGN.md](./DESIGN.md). 
 
 ## Status
 
-This is still an early implementation. The core keeper loop exists and the live Ajna path is wired, but one important gap remains:
+This is still an early implementation. The core keeper loop exists and the live Ajna path is wired, but fully automatic steering is still incomplete:
 
-- automatic onchain threshold synthesis is not built yet
+- exact simulation-backed `ADD_QUOTE` synthesis now exists behind `enableSimulationBackedLendSynthesis`
+- heuristic `ADD_QUOTE` synthesis still exists behind `enableHeuristicLendSynthesis`
+- generalized automatic `BORROW` / `LEND_AND_BORROW` synthesis is still not built
 
-Today, the snapshot builder reads real pool state and predicts the next Ajna rate move, but candidate steering actions still come from `manualCandidates` in config when you want the planner to choose `LEND`, `BORROW`, or `LEND_AND_BORROW`.
+Today, the snapshot builder reads real pool state and predicts the next Ajna rate move. For steering candidates:
 
-There is now one partial exception:
+- `manualCandidates` are still the general bridge for live steering plans
+- simulation-backed `ADD_QUOTE` synthesis is an exact opt-in path that forks the current chain state and tests candidate quote deposits against real Ajna contract behavior
+- heuristic `ADD_QUOTE` synthesis remains useful for exploratory planning and dry-run validation
 
-- heuristic `ADD_QUOTE` synthesis can be enabled explicitly with `enableHeuristicLendSynthesis`
-
-That path is useful for live planning and dry-run validation, but it is still heuristic rather than a fully validated onchain threshold synthesizer.
+The current Base-fork evidence is important: exact simulation-backed synthesis did not find any same-cycle `LEND` candidate across the tested due-cycle borrowed-pool scenarios, while heuristic discovery still found dry-run candidates. So exact mode is currently best understood as a safety filter for due-cycle lend plans, not yet as a proven live same-cycle lend executor.
 
 ## Requirements
 
@@ -115,6 +117,8 @@ Optional live-execution fields:
 - `maxGasCostWei`
 - `addQuoteBucketIndex`
 - `addQuoteExpirySeconds`
+- `enableSimulationBackedLendSynthesis`
+- `simulationSenderAddress`
 - `enableHeuristicLendSynthesis`
 
 ## Live Execution Notes
@@ -150,7 +154,7 @@ The Base integration test is intended to stay close to real deployed Ajna behavi
 - it creates a fresh pool through that real factory
 - it advances time past the 12-hour update window
 - it runs the keeper cycle and verifies that `UPDATE_INTEREST` changes the rate as expected
-- it also proves heuristic `ADD_QUOTE` plan discovery against a real borrowed pool state on a Base fork
+- it also proves that exact simulation-backed due-cycle `LEND` synthesis stays silent on the tested borrowed-pool scenarios while heuristic discovery still finds a dry-run `ADD_QUOTE` plan
 
 Run it with:
 
@@ -162,6 +166,7 @@ BASE_RPC_URL=https://mainnet.base.org npm run test:integration:base
 
 - The planner does not yet synthesize the minimum directional threshold directly from live Ajna pool state.
 - `manualCandidates` are still the bridge for live steering plans.
+- Exact simulation-backed lend synthesis is opt-in and currently behaves as a conservative safety check for due-cycle borrowed-pool lend plans in the tested Base-fork scenarios.
 - Heuristic lend synthesis is opt-in and currently validated for live planning/dry-run discovery, not for blind live execution in borrowed pools.
 - Token approvals are checked, not managed.
-- The current fork integration tests prove factory creation, real interest updates, and heuristic live-plan discovery, but not yet a fully validated live-executed computed `LEND` or `BORROW` steering cycle.
+- The current fork integration tests prove factory creation, real interest updates, and the exact-vs-heuristic split for due-cycle lend planning, but not yet a fully validated live-executed computed `LEND` or `BORROW` steering cycle.

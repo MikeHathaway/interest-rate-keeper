@@ -242,6 +242,20 @@ export function resolveKeeperConfig(input: unknown): KeeperConfig {
     );
   }
 
+  if (record.enableSimulationBackedLendSynthesis !== undefined) {
+    config.enableSimulationBackedLendSynthesis = parseBoolean(
+      record.enableSimulationBackedLendSynthesis,
+      "enableSimulationBackedLendSynthesis"
+    );
+  }
+
+  if (record.simulationSenderAddress !== undefined) {
+    config.simulationSenderAddress = parseHexAddress(
+      record.simulationSenderAddress,
+      "simulationSenderAddress"
+    );
+  }
+
   if (record.enableHeuristicLendSynthesis !== undefined) {
     config.enableHeuristicLendSynthesis = parseBoolean(
       record.enableHeuristicLendSynthesis,

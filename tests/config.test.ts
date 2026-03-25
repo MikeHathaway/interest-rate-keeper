@@ -13,6 +13,8 @@ describe("resolveKeeperConfig", () => {
       rpcUrl: "https://base.example.invalid",
       addQuoteBucketIndex: 3000,
       addQuoteExpirySeconds: 7200,
+      enableSimulationBackedLendSynthesis: true,
+      simulationSenderAddress: "0x2222222222222222222222222222222222222222",
       enableHeuristicLendSynthesis: true,
       maxQuoteTokenExposure: "1000000",
       maxBorrowExposure: "500000"
@@ -25,6 +27,8 @@ describe("resolveKeeperConfig", () => {
     expect(config.rpcUrl).toBe("https://base.example.invalid");
     expect(config.addQuoteBucketIndex).toBe(3000);
     expect(config.addQuoteExpirySeconds).toBe(7200);
+    expect(config.enableSimulationBackedLendSynthesis).toBe(true);
+    expect(config.simulationSenderAddress).toBe("0x2222222222222222222222222222222222222222");
     expect(config.enableHeuristicLendSynthesis).toBe(true);
   });
 

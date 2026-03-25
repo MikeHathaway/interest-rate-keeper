@@ -127,6 +127,8 @@ export interface KeeperConfig {
   recheckBeforeSubmit: boolean;
   addQuoteBucketIndex?: number;
   addQuoteExpirySeconds?: number;
+  enableSimulationBackedLendSynthesis?: boolean;
+  simulationSenderAddress?: HexAddress;
   enableHeuristicLendSynthesis?: boolean;
   logPath?: string;
   manualCandidates?: PlanCandidate[];
