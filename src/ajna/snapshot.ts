@@ -115,13 +115,14 @@ interface AjnaPoolStateRead {
   blockTimestamp: number;
   rateState: AjnaRateState;
   prediction: AjnaRatePrediction;
+  immediatePrediction: AjnaRatePrediction;
   quoteTokenAddress: HexAddress;
   collateralAddress: HexAddress;
   quoteTokenScale: bigint;
   poolType: number;
 }
 
-export function classifyAjnaNextRate(state: AjnaRateState): AjnaRatePrediction {
+export function forecastAjnaNextEligibleRate(state: AjnaRateState): AjnaRatePrediction {
   const secondsUntilNextRateUpdate = secondsUntilRateUpdateEligibility(
     state.nowTimestamp,
     state.lastInterestRateUpdateTimestamp
@@ -135,15 +136,6 @@ export function classifyAjnaNextRate(state: AjnaRateState): AjnaRatePrediction {
       predictedOutcome: "RESET_TO_TEN",
       predictedNextRateWad: RESET_RATE_WAD,
       predictedNextRateBps: toRateBps(RESET_RATE_WAD),
-      secondsUntilNextRateUpdate
-    };
-  }
-
-  if (secondsUntilNextRateUpdate > 0) {
-    return {
-      predictedOutcome: "NO_CHANGE",
-      predictedNextRateWad: state.currentRateWad,
-      predictedNextRateBps: toRateBps(state.currentRateWad),
       secondsUntilNextRateUpdate
     };
   }
@@ -179,6 +171,24 @@ export function classifyAjnaNextRate(state: AjnaRateState): AjnaRatePrediction {
     predictedNextRateWad: nextRateWad,
     predictedNextRateBps: toRateBps(nextRateWad),
     secondsUntilNextRateUpdate
+  };
+}
+
+export function classifyAjnaNextRate(state: AjnaRateState): AjnaRatePrediction {
+  const eligiblePrediction = forecastAjnaNextEligibleRate(state);
+
+  if (
+    eligiblePrediction.predictedOutcome === "RESET_TO_TEN" ||
+    eligiblePrediction.secondsUntilNextRateUpdate <= 0
+  ) {
+    return eligiblePrediction;
+  }
+
+  return {
+    predictedOutcome: "NO_CHANGE",
+    predictedNextRateWad: state.currentRateWad,
+    predictedNextRateBps: toRateBps(state.currentRateWad),
+    secondsUntilNextRateUpdate: eligiblePrediction.secondsUntilNextRateUpdate
   };
 }
 
@@ -304,7 +314,8 @@ async function readAjnaPoolState(
     blockNumber: effectiveBlockNumber,
     blockTimestamp: Number(block.timestamp),
     rateState,
-    prediction: classifyAjnaNextRate(rateState),
+    prediction: forecastAjnaNextEligibleRate(rateState),
+    immediatePrediction: classifyAjnaNextRate(rateState),
     quoteTokenAddress,
     collateralAddress,
     quoteTokenScale,
@@ -346,6 +357,8 @@ function buildPoolSnapshot(
       poolType: readState.poolType,
       currentRateWad: readState.rateState.currentRateWad.toString(),
       predictedNextRateWad: readState.prediction.predictedNextRateWad.toString(),
+      immediatePredictedNextRateWad: readState.immediatePrediction.predictedNextRateWad.toString(),
+      immediatePredictedNextOutcome: readState.immediatePrediction.predictedOutcome,
       lastInterestRateUpdateTimestamp: readState.rateState.lastInterestRateUpdateTimestamp,
       currentDebtWad: readState.rateState.currentDebtWad.toString(),
       debtEmaWad: readState.rateState.debtEmaWad.toString(),
@@ -392,7 +405,7 @@ export function synthesizeAjnaLendCandidate(
     prediction: AjnaRatePrediction;
     improvesConvergence: boolean;
   } {
-    const prediction = classifyAjnaNextRate(
+    const prediction = forecastAjnaNextEligibleRate(
       addQuoteToRateState(state, quoteTokenAmount, options.quoteTokenScale)
     );
     const predictedDistance = distanceToTargetBand(
@@ -618,6 +631,25 @@ function resolveSimulationSenderAddress(config: KeeperConfig): HexAddress {
   return privateKeyToAccount(candidate as Hex).address as HexAddress;
 }
 
+function deriveRateMoveOutcome(
+  previousRateWad: bigint,
+  updatedRateWad: bigint
+): RateMoveOutcome {
+  if (updatedRateWad === RESET_RATE_WAD && previousRateWad > RESET_RATE_WAD) {
+    return "RESET_TO_TEN";
+  }
+
+  if (updatedRateWad > previousRateWad) {
+    return "STEP_UP";
+  }
+
+  if (updatedRateWad < previousRateWad) {
+    return "STEP_DOWN";
+  }
+
+  return "NO_CHANGE";
+}
+
 async function synthesizeAjnaLendCandidateViaSimulation(
   readState: AjnaPoolStateRead,
   config: KeeperConfig,
@@ -691,7 +723,9 @@ async function synthesizeAjnaLendCandidateViaSimulation(
         const evaluate = async (
           quoteTokenAmount: bigint
         ): Promise<{
-          prediction: AjnaRatePrediction;
+          predictedOutcome: RateMoveOutcome;
+          predictedRateWadAfterNextUpdate: bigint;
+          predictedRateBpsAfterNextUpdate: number;
           improvesConvergence: boolean;
         }> => {
           const snapshotId = await testClient.snapshot();
@@ -713,26 +747,77 @@ async function synthesizeAjnaLendCandidateViaSimulation(
             const receipt = await publicClient.waitForTransactionReceipt({ hash });
             if (receipt.status !== "success") {
               return {
-                prediction: baselinePrediction,
+                predictedOutcome: baselinePrediction.predictedOutcome,
+                predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
+                predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
                 improvesConvergence: false
               };
             }
 
-            const simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+            let simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+            if (simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate > 0) {
+              await testClient.increaseTime({
+                seconds: simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate
+              });
+              await testClient.mine({
+                blocks: 1
+              });
+              simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+            }
+
+            const updateHash = await walletClient.writeContract({
+              account: simulationSenderAddress,
+              chain: undefined,
+              address: options.poolAddress,
+              abi: ajnaPoolAbi,
+              functionName: "updateInterest",
+              args: []
+            });
+            const updateReceipt = await publicClient.waitForTransactionReceipt({
+              hash: updateHash
+            });
+            if (updateReceipt.status !== "success") {
+              return {
+                predictedOutcome: baselinePrediction.predictedOutcome,
+                predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
+                predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
+                improvesConvergence: false
+              };
+            }
+
+            const postUpdateReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+            const predictedRateWadAfterNextUpdate =
+              postUpdateReadState.rateState.currentRateWad;
+            const predictedRateBpsAfterNextUpdate = toRateBps(
+              predictedRateWadAfterNextUpdate
+            );
             const predictedDistance = distanceToTargetBand(
-              simulatedReadState.prediction.predictedNextRateBps,
+              predictedRateBpsAfterNextUpdate,
               targetBand
+            );
+            const predictedOutcome = deriveRateMoveOutcome(
+              readState.rateState.currentRateWad,
+              predictedRateWadAfterNextUpdate
             );
 
             return {
-              prediction: simulatedReadState.prediction,
+              predictedOutcome,
+              predictedRateWadAfterNextUpdate,
+              predictedRateBpsAfterNextUpdate,
               improvesConvergence:
-                predictionChanged(baselinePrediction, simulatedReadState.prediction) &&
+                predictionChanged(baselinePrediction, {
+                  predictedOutcome,
+                  predictedNextRateWad: predictedRateWadAfterNextUpdate,
+                  predictedNextRateBps: predictedRateBpsAfterNextUpdate,
+                  secondsUntilNextRateUpdate: 0
+                }) &&
                 predictedDistance < currentDistance
             };
           } catch {
             return {
-              prediction: baselinePrediction,
+              predictedOutcome: baselinePrediction.predictedOutcome,
+              predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
+              predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
               improvesConvergence: false
             };
           } finally {
@@ -784,14 +869,14 @@ async function synthesizeAjnaLendCandidateViaSimulation(
               note: "simulation-backed add-quote threshold"
             }
           ],
-          predictedOutcome: upperEvaluation.prediction.predictedOutcome,
-          predictedRateBpsAfterNextUpdate: upperEvaluation.prediction.predictedNextRateBps,
+          predictedOutcome: upperEvaluation.predictedOutcome,
+          predictedRateBpsAfterNextUpdate: upperEvaluation.predictedRateBpsAfterNextUpdate,
           resultingDistanceToTargetBps: distanceToTargetBand(
-            upperEvaluation.prediction.predictedNextRateBps,
+            upperEvaluation.predictedRateBpsAfterNextUpdate,
             targetBand
           ),
           quoteTokenDelta: upperBound,
-          explanation: `simulation-backed add-quote threshold changes the next Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.prediction.predictedOutcome}`
+          explanation: `simulation-backed add-quote threshold changes the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.predictedOutcome}`
         };
       } finally {
         await testClient.stopImpersonatingAccount({

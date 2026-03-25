@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   classifyAjnaNextRate,
+  forecastAjnaNextEligibleRate,
   synthesizeAjnaLendCandidate
 } from "../src/ajna/snapshot.js";
 import type { KeeperConfig } from "../src/types.js";
@@ -28,19 +29,23 @@ const baseConfig: KeeperConfig = {
 
 describe("classifyAjnaNextRate", () => {
   it("returns NO_CHANGE before the 12-hour update window opens", () => {
-    const prediction = classifyAjnaNextRate({
+    const state = {
       currentRateWad: 100_000_000_000_000_000n,
       currentDebtWad: 1_000n,
-      debtEmaWad: 500_000_000_000_000_000n,
+      debtEmaWad: 100_000_000_000_000_000n,
       depositEmaWad: 1_000_000_000_000_000_000n,
       debtColEmaWad: WAD,
       lupt0DebtEmaWad: WAD,
       lastInterestRateUpdateTimestamp: 10_000,
       nowTimestamp: 10_100
-    });
+    } as const;
+    const prediction = classifyAjnaNextRate(state);
+    const eligiblePrediction = forecastAjnaNextEligibleRate(state);
 
     expect(prediction.predictedOutcome).toBe("NO_CHANGE");
     expect(prediction.secondsUntilNextRateUpdate).toBeGreaterThan(0);
+    expect(eligiblePrediction.predictedOutcome).toBe("STEP_DOWN");
+    expect(eligiblePrediction.predictedNextRateBps).toBe(900);
   });
 
   it("returns RESET_TO_TEN for abandoned high-rate pools", () => {

@@ -24,6 +24,7 @@ Today, the snapshot builder reads real pool state and predicts the next Ajna rat
 - `manualCandidates` are still the general bridge for live steering plans
 - simulation-backed `ADD_QUOTE` synthesis is an exact opt-in path that forks the current chain state and tests candidate quote deposits against real Ajna contract behavior
 - heuristic `ADD_QUOTE` synthesis remains useful for exploratory planning and dry-run validation
+- snapshot `predictedNextOutcome` / `predictedNextRateBps` now describe the next eligible Ajna rate update, even when that update is not due yet
 
 The current Base-fork evidence is important: exact simulation-backed synthesis did not find any same-cycle `LEND` candidate across the tested due-cycle borrowed-pool scenarios, while heuristic discovery still found dry-run candidates. So exact mode is currently best understood as a safety filter for due-cycle lend plans, not yet as a proven live same-cycle lend executor.
 
@@ -155,6 +156,7 @@ The Base integration test is intended to stay close to real deployed Ajna behavi
 - it advances time past the 12-hour update window
 - it runs the keeper cycle and verifies that `UPDATE_INTEREST` changes the rate as expected
 - it also proves that exact simulation-backed due-cycle `LEND` synthesis stays silent on the tested borrowed-pool scenarios while heuristic discovery still finds a dry-run `ADD_QUOTE` plan
+- it proves the one-cycle-ahead forecast by checking that a post-update not-due snapshot predicts the next eligible rate update correctly on a later real `updateInterest`
 
 Run it with:
 
@@ -167,6 +169,7 @@ BASE_RPC_URL=https://mainnet.base.org npm run test:integration:base
 - The planner does not yet synthesize the minimum directional threshold directly from live Ajna pool state.
 - `manualCandidates` are still the bridge for live steering plans.
 - Exact simulation-backed lend synthesis is opt-in and currently behaves as a conservative safety check for due-cycle borrowed-pool lend plans in the tested Base-fork scenarios.
+- Exact simulation-backed lend synthesis also remains conservative in the tested pre-window post-update scenarios; the one-cycle-ahead forecast is validated, but exact pre-window `LEND` plans are still not appearing in those cases.
 - Heuristic lend synthesis is opt-in and currently validated for live planning/dry-run discovery, not for blind live execution in borrowed pools.
 - Token approvals are checked, not managed.
-- The current fork integration tests prove factory creation, real interest updates, and the exact-vs-heuristic split for due-cycle lend planning, but not yet a fully validated live-executed computed `LEND` or `BORROW` steering cycle.
+- The current fork integration tests prove factory creation, real interest updates, next-cycle forecasting, and the exact-vs-heuristic split for lend planning, but not yet a fully validated live-executed computed `LEND` or `BORROW` steering cycle.
