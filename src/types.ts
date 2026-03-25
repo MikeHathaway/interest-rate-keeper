@@ -104,6 +104,8 @@ export interface PoolSnapshot {
   currentRateBps: number;
   predictedNextOutcome: RateMoveOutcome;
   predictedNextRateBps: number;
+  planningRateBps?: number;
+  planningLookaheadUpdates?: number;
   candidates: PlanCandidate[];
   metadata?: Record<string, unknown>;
 }

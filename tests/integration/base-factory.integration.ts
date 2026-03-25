@@ -553,6 +553,200 @@ describeIf("Base factory fork integration", () => {
   );
 
   it(
+    "finds a multi-cycle borrow plan in a representative abandoned-pool state when lookahead is enabled",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const collateralToken = await deployMockToken(
+        walletClient,
+        publicClient,
+        artifact,
+        "Borrow Lookahead Collateral",
+        "BLC"
+      );
+      const quoteToken = await deployMockToken(
+        walletClient,
+        publicClient,
+        artifact,
+        "Borrow Lookahead Quote",
+        "BLQ"
+      );
+
+      for (const tokenAddress of [collateralToken, quoteToken]) {
+        await mintToken(
+          walletClient,
+          publicClient,
+          artifact,
+          tokenAddress,
+          account.address,
+          1_000_000n * 10n ** 18n
+        );
+      }
+
+      const poolAddress = await deployPoolThroughFactory(
+        walletClient,
+        publicClient,
+        collateralToken,
+        quoteToken
+      );
+
+      await approveToken(
+        walletClient,
+        publicClient,
+        quoteToken,
+        poolAddress,
+        1_000_000n * 10n ** 18n,
+        artifact.abi
+      );
+      await approveToken(
+        walletClient,
+        publicClient,
+        collateralToken,
+        poolAddress,
+        1_000_000n * 10n ** 18n,
+        artifact.abi
+      );
+
+      const latestBlock = await publicClient.getBlock();
+      const addQuoteHash = await walletClient.writeContract({
+        account,
+        chain: undefined,
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "addQuoteToken",
+        args: [1_000n * 10n ** 18n, 3_000n, latestBlock.timestamp + 3600n]
+      });
+      await publicClient.waitForTransactionReceipt({ hash: addQuoteHash });
+
+      let matched:
+        | {
+            chainNow: number;
+            config: KeeperConfig;
+            snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+          }
+        | undefined;
+
+      for (let preUpdates = 0; preUpdates < 6; preUpdates += 1) {
+        await testClient.increaseTime({
+          seconds: FORK_TIME_SKIP_SECONDS
+        });
+        await testClient.mine({
+          blocks: 1
+        });
+
+        const chainNow = Number((await publicClient.getBlock()).timestamp);
+        const baselineConfig = resolveKeeperConfig({
+          chainId: 8453,
+          poolAddress,
+          poolId: `8453:${poolAddress.toLowerCase()}`,
+          rpcUrl: LOCAL_RPC_URL,
+          targetRateBps: 1000,
+          toleranceBps: 50,
+          toleranceMode: "relative",
+          completionPolicy: "next_move_would_overshoot",
+          executionBufferBps: 0,
+          maxQuoteTokenExposure: "1000000000000000000000000",
+          maxBorrowExposure: "1000000000000000000000",
+          snapshotAgeMaxSeconds: 3600,
+          minTimeBeforeRateWindowSeconds: 120,
+          minExecutableActionQuoteToken: "1",
+          recheckBeforeSubmit: true
+        });
+        const baselineSnapshot = await new AjnaRpcSnapshotSource(baselineConfig, {
+          publicClient,
+          now: () => chainNow
+        }).getSnapshot();
+
+        if (
+          baselineSnapshot.currentRateBps < 1000 &&
+          baselineSnapshot.predictedNextOutcome !== "STEP_UP"
+        ) {
+          const config = resolveKeeperConfig({
+            chainId: 8453,
+            poolAddress,
+            poolId: `8453:${poolAddress.toLowerCase()}`,
+            rpcUrl: LOCAL_RPC_URL,
+            targetRateBps: 1300,
+            toleranceBps: 50,
+            toleranceMode: "relative",
+            completionPolicy: "next_move_would_overshoot",
+            executionBufferBps: 0,
+            maxQuoteTokenExposure: "1000000000000000000000000",
+            maxBorrowExposure: "1000000000000000000000",
+            snapshotAgeMaxSeconds: 3600,
+            minTimeBeforeRateWindowSeconds: 120,
+            minExecutableActionQuoteToken: "1",
+            recheckBeforeSubmit: true,
+            borrowerAddress: account.address,
+            simulationSenderAddress: account.address,
+            enableSimulationBackedBorrowSynthesis: true,
+            drawDebtLimitIndexes: [...STEERING_BUCKET_CANDIDATES],
+            drawDebtCollateralAmounts: [
+              "10000000000000000000",
+              "50000000000000000000",
+              "100000000000000000000",
+              "200000000000000000000",
+              "500000000000000000000"
+            ],
+            borrowSimulationLookaheadUpdates: 3
+          });
+          const snapshot = await new AjnaRpcSnapshotSource(config, {
+            publicClient,
+            now: () => chainNow
+          }).getSnapshot();
+
+          if (
+            snapshot.candidates.some((candidate) => candidate.intent === "BORROW") &&
+            snapshot.planningLookaheadUpdates === 3
+          ) {
+            matched = {
+              chainNow,
+              config,
+              snapshot
+            };
+          }
+
+          break;
+        }
+
+        const updateHash = await walletClient.writeContract({
+          account,
+          chain: undefined,
+          address: poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "updateInterest"
+        });
+        await publicClient.waitForTransactionReceipt({ hash: updateHash });
+      }
+
+      expect(matched).toBeDefined();
+      expect(matched?.snapshot.planningLookaheadUpdates).toBe(3);
+      expect(matched?.snapshot.planningRateBps).toBeLessThan(matched!.config.targetRateBps);
+      const borrowCandidate = matched?.snapshot.candidates.find(
+        (candidate) => candidate.intent === "BORROW"
+      );
+      expect(borrowCandidate?.planningLookaheadUpdates).toBe(3);
+      expect(borrowCandidate?.planningRateBps).toBeDefined();
+
+      const result = await runCycle(matched!.config, {
+        snapshotSource: new AjnaRpcSnapshotSource(matched!.config, {
+          publicClient,
+          now: () => matched!.chainNow
+        }),
+        executor: new DryRunExecutionBackend()
+      });
+
+      expect(result.status).toBe("EXECUTED");
+      expect(result.plan.intent).toBe("BORROW");
+      expect(result.plan.requiredSteps.some((step) => step.type === "DRAW_DEBT")).toBe(true);
+      expect(result.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")).toBe(true);
+    },
+    240_000
+  );
+
+  it(
     "finds a due-cycle lend plan in a representative borrowed-pool step-up state",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();

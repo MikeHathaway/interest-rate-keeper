@@ -186,4 +186,121 @@ describe("planCycle", () => {
     expect(plan.intent).toBe("BORROW");
     expect(plan.reason).toMatch(/two-update borrow path/);
   });
+
+  it("prefers a multi-cycle borrower plan over a passive one-step improvement", () => {
+    const config: KeeperConfig = {
+      ...baseConfig,
+      targetRateBps: 1300,
+      toleranceBps: 50
+    };
+
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 1000,
+        predictedNextOutcome: "STEP_UP",
+        predictedNextRateBps: 1100,
+        candidates: [
+          {
+            id: "multi-cycle-borrow",
+            intent: "BORROW",
+            minimumExecutionSteps: [
+              {
+                type: "DRAW_DEBT",
+                amount: 10n,
+                limitIndex: 3000
+              }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 1100,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 10n,
+            explanation: "two-update borrow path reaches the target band",
+            planningRateBps: 1295,
+            planningLookaheadUpdates: 2
+          }
+        ]
+      }),
+      config
+    );
+
+    expect(plan.intent).toBe("BORROW");
+    expect(plan.reason).toMatch(/two-update borrow path/);
+  });
+
+  it("does not spend capital when the passive path already lands in band", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 800,
+        predictedNextOutcome: "STEP_UP",
+        predictedNextRateBps: 950,
+        candidates: [
+          {
+            id: "borrow-but-unnecessary",
+            intent: "BORROW",
+            minimumExecutionSteps: [
+              {
+                type: "DRAW_DEBT",
+                amount: 10n,
+                limitIndex: 3000
+              }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 960,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 10n,
+            explanation: "borrow path also lands in band",
+            planningRateBps: 980,
+            planningLookaheadUpdates: 2
+          }
+        ]
+      }),
+      baseConfig
+    );
+
+    expect(plan.intent).toBe("NO_OP");
+    expect(plan.reason).toMatch(/already converges/);
+  });
+
+  it("prefers a borrower candidate that beats the passive multi-update baseline", () => {
+    const config: KeeperConfig = {
+      ...baseConfig,
+      targetRateBps: 1300,
+      toleranceBps: 50
+    };
+
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 900,
+        predictedNextOutcome: "STEP_DOWN",
+        predictedNextRateBps: 810,
+        planningRateBps: 656,
+        planningLookaheadUpdates: 3,
+        candidates: [
+          {
+            id: "borrow-lookahead",
+            intent: "BORROW",
+            minimumExecutionSteps: [
+              {
+                type: "DRAW_DEBT",
+                amount: 5n,
+                limitIndex: 3000,
+                collateralAmount: 10n
+              }
+            ],
+            predictedOutcome: "STEP_DOWN",
+            predictedRateBpsAfterNextUpdate: 810,
+            resultingDistanceToTargetBps: 483,
+            quoteTokenDelta: 5n,
+            explanation: "simulation-backed draw-debt threshold improves the 3-update path",
+            planningRateBps: 810,
+            planningLookaheadUpdates: 3
+          }
+        ]
+      }),
+      config
+    );
+
+    expect(plan.intent).toBe("BORROW");
+    expect(plan.reason).toMatch(/3-update path/);
+  });
 });
