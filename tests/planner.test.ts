@@ -152,4 +152,38 @@ describe("planCycle", () => {
       bufferPolicy: "none"
     });
   });
+
+  it("can choose a candidate using planningRateBps instead of only the next update rate", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 800,
+        predictedNextOutcome: "STEP_DOWN",
+        predictedNextRateBps: 700,
+        candidates: [
+          {
+            id: "multi-cycle-borrow",
+            intent: "BORROW",
+            minimumExecutionSteps: [
+              {
+                type: "DRAW_DEBT",
+                amount: 10n,
+                limitIndex: 3000
+              }
+            ],
+            predictedOutcome: "STEP_DOWN",
+            predictedRateBpsAfterNextUpdate: 700,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 10n,
+            explanation: "two-update borrow path reaches the band",
+            planningRateBps: 950,
+            planningLookaheadUpdates: 2
+          }
+        ]
+      }),
+      baseConfig
+    );
+
+    expect(plan.intent).toBe("BORROW");
+    expect(plan.reason).toMatch(/two-update borrow path/);
+  });
 });

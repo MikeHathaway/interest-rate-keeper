@@ -89,6 +89,8 @@ export interface PlanCandidate {
   resultingDistanceToTargetBps: number;
   quoteTokenDelta: bigint;
   explanation: string;
+  planningRateBps?: number;
+  planningLookaheadUpdates?: number;
 }
 
 export interface PoolSnapshot {
@@ -133,6 +135,7 @@ export interface KeeperConfig {
   drawDebtLimitIndex?: number;
   drawDebtLimitIndexes?: number[];
   drawDebtCollateralAmount?: bigint;
+  borrowSimulationLookaheadUpdates?: number;
   enableHeuristicLendSynthesis?: boolean;
   logPath?: string;
   manualCandidates?: PlanCandidate[];

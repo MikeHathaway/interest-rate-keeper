@@ -57,6 +57,23 @@ Notes:
 - `npm run test:integration:base` runs the Base-fork integration test in [`tests/integration/base-factory.integration.ts`](./tests/integration/base-factory.integration.ts).
 - The Base integration test uses `BASE_RPC_URL` if provided, otherwise it falls back to `https://mainnet.base.org`.
 
+## Env Files
+
+The CLI and Base-fork integration test now load `.env` automatically via `dotenv`. Existing shell environment variables still win, so you can always override values for a single command without editing the file.
+
+Start from:
+
+```bash
+cp .env.example .env
+```
+
+Typical local values:
+
+```dotenv
+BASE_RPC_URL=https://your-base-rpc.example
+AJNA_KEEPER_PRIVATE_KEY=0x...
+```
+
 ## CLI Usage
 
 Build first:
@@ -74,7 +91,6 @@ node dist/src/cli.js run --config ./keeper.config.json --dry-run
 Run against a live Ajna pool:
 
 ```bash
-AJNA_KEEPER_PRIVATE_KEY=0x... \
 node dist/src/cli.js run --config ./keeper.config.json
 ```
 
@@ -170,7 +186,7 @@ The Base integration test is intended to stay close to real deployed Ajna behavi
 Run it with:
 
 ```bash
-BASE_RPC_URL=https://mainnet.base.org npm run test:integration:base
+npm run test:integration:base
 ```
 
 ## Current Limitations

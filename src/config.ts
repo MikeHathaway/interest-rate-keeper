@@ -291,6 +291,13 @@ export function resolveKeeperConfig(input: unknown): KeeperConfig {
     config.drawDebtLimitIndexes = Array.from(new Set(parsedLimitIndexes));
   }
 
+  if (record.borrowSimulationLookaheadUpdates !== undefined) {
+    config.borrowSimulationLookaheadUpdates = parsePositiveInteger(
+      record.borrowSimulationLookaheadUpdates,
+      "borrowSimulationLookaheadUpdates"
+    );
+  }
+
   const drawDebtCollateralAmount = parseOptionalBigInt(
     record.drawDebtCollateralAmount,
     "drawDebtCollateralAmount"

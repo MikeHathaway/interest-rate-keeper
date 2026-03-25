@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
 
 import {
+  defineChain,
   createPublicClient,
   createTestClient,
   createWalletClient,
@@ -251,6 +252,10 @@ function compareCandidatePreference(left: PlanCandidate, right: PlanCandidate): 
   }
 
   return left.id.localeCompare(right.id);
+}
+
+function resolveBorrowSimulationLookaheadUpdates(config: KeeperConfig): number {
+  return config.borrowSimulationLookaheadUpdates ?? 1;
 }
 
 function buildSnapshotFingerprint(
@@ -626,6 +631,20 @@ async function withTemporaryAnvilFork<T>(
     await waitForPort(port);
 
     const rpcUrl = `http://127.0.0.1:${port}`;
+    const forkChain = defineChain({
+      id: options.chainId,
+      name: `fork-${options.chainId}`,
+      nativeCurrency: {
+        name: "Ether",
+        symbol: "ETH",
+        decimals: 18
+      },
+      rpcUrls: {
+        default: {
+          http: [rpcUrl]
+        }
+      }
+    });
     const publicClient = createPublicClient({
       transport: http(rpcUrl)
     });
@@ -634,6 +653,7 @@ async function withTemporaryAnvilFork<T>(
       transport: http(rpcUrl)
     });
     const walletClient = createWalletClient({
+      chain: forkChain,
       transport: http(rpcUrl)
     });
 
@@ -1079,6 +1099,7 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
   const simulationSenderAddress = resolveSimulationSenderAddress(config);
   const borrowerAddress = resolveSimulationBorrowerAddress(config, simulationSenderAddress);
   const collateralAmount = config.drawDebtCollateralAmount ?? 0n;
+  const lookaheadUpdates = resolveBorrowSimulationLookaheadUpdates(config);
 
   return withTemporaryAnvilFork(
     {
@@ -1117,20 +1138,22 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
           }
         }
 
-        let bestCandidate: PlanCandidate | undefined;
+        async function simulateBorrowPath(
+          drawDebt: {
+            amount: bigint;
+            limitIndex: number;
+          } | null
+        ): Promise<{
+          firstRateWadAfterNextUpdate: bigint;
+          firstRateBpsAfterNextUpdate: number;
+          firstOutcome: RateMoveOutcome;
+          terminalRateBps: number;
+          terminalDistanceToTargetBps: number;
+        }> {
+          const snapshotId = await testClient.snapshot();
 
-        for (const limitIndex of limitIndexes) {
-          const evaluate = async (
-            drawDebtAmount: bigint
-          ): Promise<{
-            predictedOutcome: RateMoveOutcome;
-            predictedRateWadAfterNextUpdate: bigint;
-            predictedRateBpsAfterNextUpdate: number;
-            improvesConvergence: boolean;
-          }> => {
-            const snapshotId = await testClient.snapshot();
-
-            try {
+          try {
+            if (drawDebt) {
               const drawDebtHash = await walletClient.writeContract({
                 account: simulationSenderAddress,
                 chain: undefined,
@@ -1139,8 +1162,8 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
                 functionName: "drawDebt",
                 args: [
                   borrowerAddress,
-                  drawDebtAmount,
-                  BigInt(limitIndex),
+                  drawDebt.amount,
+                  BigInt(drawDebt.limitIndex),
                   collateralAmount
                 ]
               });
@@ -1148,14 +1171,15 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
                 hash: drawDebtHash
               });
               if (drawDebtReceipt.status !== "success") {
-                return {
-                  predictedOutcome: baselinePrediction.predictedOutcome,
-                  predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
-                  predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
-                  improvesConvergence: false
-                };
+                throw new Error("drawDebt simulation reverted");
               }
+            }
 
+            let firstRateWadAfterNextUpdate = readState.rateState.currentRateWad;
+            let firstOutcome: RateMoveOutcome = "NO_CHANGE";
+            let terminalRateWad = readState.rateState.currentRateWad;
+
+            for (let updateIndex = 0; updateIndex < lookaheadUpdates; updateIndex += 1) {
               let simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
               if (simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate > 0) {
                 await testClient.increaseTime({
@@ -1179,51 +1203,81 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
                 hash: updateHash
               });
               if (updateReceipt.status !== "success") {
-                return {
-                  predictedOutcome: baselinePrediction.predictedOutcome,
-                  predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
-                  predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
-                  improvesConvergence: false
-                };
+                throw new Error("updateInterest simulation reverted");
               }
 
               const postUpdateReadState = await readAjnaPoolState(publicClient, options.poolAddress);
-              const predictedRateWadAfterNextUpdate =
-                postUpdateReadState.rateState.currentRateWad;
-              const predictedRateBpsAfterNextUpdate = toRateBps(
-                predictedRateWadAfterNextUpdate
-              );
-              const predictedDistance = distanceToTargetBand(
-                predictedRateBpsAfterNextUpdate,
+              terminalRateWad = postUpdateReadState.rateState.currentRateWad;
+
+              if (updateIndex === 0) {
+                firstRateWadAfterNextUpdate = terminalRateWad;
+                firstOutcome = deriveRateMoveOutcome(
+                  readState.rateState.currentRateWad,
+                  terminalRateWad
+                );
+              }
+            }
+
+            const firstRateBpsAfterNextUpdate = toRateBps(firstRateWadAfterNextUpdate);
+            const terminalRateBps = toRateBps(terminalRateWad);
+
+            return {
+              firstRateWadAfterNextUpdate,
+              firstRateBpsAfterNextUpdate,
+              firstOutcome,
+              terminalRateBps,
+              terminalDistanceToTargetBps: distanceToTargetBand(terminalRateBps, targetBand)
+            };
+          } finally {
+            await testClient.revert({ id: snapshotId });
+          }
+        }
+
+        const baselinePath = await simulateBorrowPath(null);
+        const baselineNextDistance = distanceToTargetBand(
+          baselinePath.firstRateBpsAfterNextUpdate,
+          targetBand
+        );
+        const baselineTerminalDistance = baselinePath.terminalDistanceToTargetBps;
+
+        let bestCandidate: PlanCandidate | undefined;
+
+        for (const limitIndex of limitIndexes) {
+          const evaluate = async (
+            drawDebtAmount: bigint
+          ): Promise<{
+            predictedOutcome: RateMoveOutcome;
+            predictedRateBpsAfterNextUpdate: number;
+            terminalRateBps: number;
+            terminalDistanceToTargetBps: number;
+            improvesConvergence: boolean;
+          }> => {
+            try {
+              const candidatePath = await simulateBorrowPath({
+                amount: drawDebtAmount,
+                limitIndex
+              });
+              const nextDistance = distanceToTargetBand(
+                candidatePath.firstRateBpsAfterNextUpdate,
                 targetBand
               );
-              const predictedOutcome = deriveRateMoveOutcome(
-                readState.rateState.currentRateWad,
-                predictedRateWadAfterNextUpdate
-              );
-
               return {
-                predictedOutcome,
-                predictedRateWadAfterNextUpdate,
-                predictedRateBpsAfterNextUpdate,
+                predictedOutcome: candidatePath.firstOutcome,
+                predictedRateBpsAfterNextUpdate: candidatePath.firstRateBpsAfterNextUpdate,
+                terminalRateBps: candidatePath.terminalRateBps,
+                terminalDistanceToTargetBps: candidatePath.terminalDistanceToTargetBps,
                 improvesConvergence:
-                  predictionChanged(baselinePrediction, {
-                    predictedOutcome,
-                    predictedNextRateWad: predictedRateWadAfterNextUpdate,
-                    predictedNextRateBps: predictedRateBpsAfterNextUpdate,
-                    secondsUntilNextRateUpdate: 0
-                  }) &&
-                  predictedDistance < baselineDistance
+                  nextDistance <= baselineNextDistance &&
+                  candidatePath.terminalDistanceToTargetBps < baselineTerminalDistance
               };
             } catch {
               return {
                 predictedOutcome: baselinePrediction.predictedOutcome,
-                predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
                 predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
+                terminalRateBps: baselinePath.terminalRateBps,
+                terminalDistanceToTargetBps: baselineTerminalDistance,
                 improvesConvergence: false
               };
-            } finally {
-              await testClient.revert({ id: snapshotId });
             }
           };
 
@@ -1274,13 +1328,17 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
             ],
             predictedOutcome: upperEvaluation.predictedOutcome,
             predictedRateBpsAfterNextUpdate: upperEvaluation.predictedRateBpsAfterNextUpdate,
-            resultingDistanceToTargetBps: distanceToTargetBand(
-              upperEvaluation.predictedRateBpsAfterNextUpdate,
-              targetBand
-            ),
+            resultingDistanceToTargetBps: upperEvaluation.terminalDistanceToTargetBps,
             quoteTokenDelta: upperBound,
-            explanation: `simulation-backed draw-debt threshold changes the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.predictedOutcome}`
+            explanation:
+              lookaheadUpdates > 1
+                ? `simulation-backed draw-debt threshold improves the ${lookaheadUpdates}-update path from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.predictedOutcome}`
+                : `simulation-backed draw-debt threshold changes the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.predictedOutcome}`
           };
+          if (lookaheadUpdates > 1) {
+            candidate.planningRateBps = upperEvaluation.terminalRateBps;
+            candidate.planningLookaheadUpdates = lookaheadUpdates;
+          }
 
           if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
             bestCandidate = candidate;

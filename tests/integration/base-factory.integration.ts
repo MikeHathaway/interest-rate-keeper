@@ -1,3 +1,5 @@
+import "dotenv/config";
+
 import { execFile as execFileCallback, spawn, type ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";

@@ -1,3 +1,5 @@
+import "dotenv/config";
+
 import { readFile } from "node:fs/promises";
 
 import { parseCliArgs, resolveKeeperConfig } from "./config.js";

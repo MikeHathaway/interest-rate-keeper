@@ -125,12 +125,12 @@ function candidateImprovesConvergence(
 ): boolean {
   const baselineDistance = distanceToTargetBand(snapshot.predictedNextRateBps, band);
   const candidateDistance = distanceToTargetBand(
-    candidate.predictedRateBpsAfterNextUpdate,
+    candidate.planningRateBps ?? candidate.predictedRateBpsAfterNextUpdate,
     band
   );
 
   return (
-    isRateInBand(candidate.predictedRateBpsAfterNextUpdate, band) ||
+    isRateInBand(candidate.planningRateBps ?? candidate.predictedRateBpsAfterNextUpdate, band) ||
     candidateDistance < baselineDistance
   );
 }
@@ -142,10 +142,20 @@ function chooseBestCandidate(
   return candidates
     .slice()
     .sort((left, right) => {
-      const leftInBand = isRateInBand(left.predictedRateBpsAfterNextUpdate, band) ? 0 : 1;
-      const rightInBand = isRateInBand(right.predictedRateBpsAfterNextUpdate, band) ? 0 : 1;
+      const leftInBand = isRateInBand(
+        left.planningRateBps ?? left.predictedRateBpsAfterNextUpdate,
+        band
+      )
+        ? 0
+        : 1;
+      const rightInBand = isRateInBand(
+        right.planningRateBps ?? right.predictedRateBpsAfterNextUpdate,
+        band
+      )
+        ? 0
+        : 1;
       if (leftInBand !== rightInBand) {
-        return leftInBand - rightInBand;
+      return leftInBand - rightInBand;
       }
 
       if (left.resultingDistanceToTargetBps !== right.resultingDistanceToTargetBps) {
