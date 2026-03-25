@@ -86,6 +86,14 @@ function parseIntegerArray(value: unknown, label: string): number[] {
   );
 }
 
+function parseBigIntArray(value: unknown, label: string): bigint[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be an array`);
+  }
+
+  return value.map((item, index) => parseBigIntValue(item, `${label}[${index}]`));
+}
+
 function parseOptionalBigInt(value: unknown, label: string): bigint | undefined {
   if (value === undefined || value === null || value === "") {
     return undefined;
@@ -307,6 +315,22 @@ export function resolveKeeperConfig(input: unknown): KeeperConfig {
       throw new Error("drawDebtCollateralAmount must not be negative");
     }
     config.drawDebtCollateralAmount = drawDebtCollateralAmount;
+  }
+
+  if (record.drawDebtCollateralAmounts !== undefined) {
+    const parsedCollateralAmounts = parseBigIntArray(
+      record.drawDebtCollateralAmounts,
+      "drawDebtCollateralAmounts"
+    );
+    if (parsedCollateralAmounts.length === 0) {
+      throw new Error("drawDebtCollateralAmounts must not be empty");
+    }
+    if (parsedCollateralAmounts.some((amount) => amount < 0n)) {
+      throw new Error("drawDebtCollateralAmounts must not contain negative values");
+    }
+    config.drawDebtCollateralAmounts = Array.from(new Set(parsedCollateralAmounts)).sort(
+      (left, right) => (left < right ? -1 : left > right ? 1 : 0)
+    );
   }
 
   if (record.enableHeuristicLendSynthesis !== undefined) {

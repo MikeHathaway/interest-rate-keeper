@@ -236,6 +236,35 @@ function resolveDrawDebtLimitIndexes(config: KeeperConfig): number[] {
   return Array.from(new Set(configured)).sort((left, right) => left - right);
 }
 
+function resolveDrawDebtCollateralAmounts(config: KeeperConfig): bigint[] {
+  const configured = [
+    ...(config.drawDebtCollateralAmounts ?? []),
+    ...(config.drawDebtCollateralAmount === undefined ? [] : [config.drawDebtCollateralAmount])
+  ];
+
+  if (configured.length === 0) {
+    return [0n];
+  }
+
+  return Array.from(new Set(configured)).sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0
+  );
+}
+
+function collateralAmountForCandidate(candidate: PlanCandidate): bigint {
+  return candidate.minimumExecutionSteps.reduce((total, step) => {
+    if (step.type === "DRAW_DEBT") {
+      return total + (step.collateralAmount ?? 0n);
+    }
+
+    if (step.type === "ADD_COLLATERAL") {
+      return total + step.amount;
+    }
+
+    return total;
+  }, 0n);
+}
+
 function compareCandidatePreference(left: PlanCandidate, right: PlanCandidate): number {
   const leftInBand = left.resultingDistanceToTargetBps === 0 ? 0 : 1;
   const rightInBand = right.resultingDistanceToTargetBps === 0 ? 0 : 1;
@@ -249,6 +278,12 @@ function compareCandidatePreference(left: PlanCandidate, right: PlanCandidate): 
 
   if (left.quoteTokenDelta !== right.quoteTokenDelta) {
     return left.quoteTokenDelta < right.quoteTokenDelta ? -1 : 1;
+  }
+
+  const leftCollateral = collateralAmountForCandidate(left);
+  const rightCollateral = collateralAmountForCandidate(right);
+  if (leftCollateral !== rightCollateral) {
+    return leftCollateral < rightCollateral ? -1 : 1;
   }
 
   return left.id.localeCompare(right.id);
@@ -983,85 +1018,100 @@ export function synthesizeAjnaBorrowCandidate(
     baselinePrediction.predictedNextRateBps,
     targetBand
   );
-  const limitIndex = limitIndexes[0]!;
   const minimumAmount =
     config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
   const maxAmount = config.maxBorrowExposure;
-  const collateralAmount = config.drawDebtCollateralAmount ?? 0n;
+  const collateralAmounts = resolveDrawDebtCollateralAmounts(config);
 
   if (minimumAmount > maxAmount) {
     return undefined;
   }
+  let bestCandidate: PlanCandidate | undefined;
 
-  function evaluate(drawDebtAmount: bigint): {
-    prediction: AjnaRatePrediction;
-    improvesConvergence: boolean;
-  } {
-    const prediction = forecastAjnaNextEligibleRate(
-      drawDebtIntoRateState(state, drawDebtAmount, collateralAmount)
-    );
-    const predictedDistance = distanceToTargetBand(
-      prediction.predictedNextRateBps,
-      targetBand
-    );
+  for (const limitIndex of limitIndexes) {
+    for (const collateralAmount of collateralAmounts) {
+      function evaluate(drawDebtAmount: bigint): {
+        prediction: AjnaRatePrediction;
+        improvesConvergence: boolean;
+      } {
+        const prediction = forecastAjnaNextEligibleRate(
+          drawDebtIntoRateState(state, drawDebtAmount, collateralAmount)
+        );
+        const predictedDistance = distanceToTargetBand(
+          prediction.predictedNextRateBps,
+          targetBand
+        );
 
-    return {
-      prediction,
-      improvesConvergence:
-        predictionChanged(baselinePrediction, prediction) &&
-        predictedDistance < baselineDistance
-    };
-  }
-
-  let lowerBound = minimumAmount - 1n;
-  let upperBound = minimumAmount;
-  let upperEvaluation = evaluate(upperBound);
-
-  while (!upperEvaluation.improvesConvergence) {
-    lowerBound = upperBound;
-    if (upperBound === maxAmount) {
-      return undefined;
-    }
-
-    upperBound = upperBound * 2n;
-    if (upperBound > maxAmount) {
-      upperBound = maxAmount;
-    }
-    upperEvaluation = evaluate(upperBound);
-  }
-
-  while (upperBound - lowerBound > 1n) {
-    const middle = lowerBound + (upperBound - lowerBound) / 2n;
-    const middleEvaluation = evaluate(middle);
-    if (middleEvaluation.improvesConvergence) {
-      upperBound = middle;
-      upperEvaluation = middleEvaluation;
-    } else {
-      lowerBound = middle;
-    }
-  }
-
-  return {
-    id: `auto-borrow:draw-debt:${upperBound.toString()}`,
-    intent: "BORROW",
-    minimumExecutionSteps: [
-      {
-        type: "DRAW_DEBT",
-        amount: upperBound,
-        limitIndex,
-        collateralAmount,
-        note: "auto-synthesized draw-debt threshold"
+        return {
+          prediction,
+          improvesConvergence:
+            predictionChanged(baselinePrediction, prediction) &&
+            predictedDistance < baselineDistance
+        };
       }
-    ],
-    predictedOutcome: upperEvaluation.prediction.predictedOutcome,
-    predictedRateBpsAfterNextUpdate: upperEvaluation.prediction.predictedNextRateBps,
-    resultingDistanceToTargetBps: distanceToTargetBand(
-      upperEvaluation.prediction.predictedNextRateBps,
-      targetBand
-    ),
-    quoteTokenDelta: upperBound,
-    explanation: `auto draw-debt threshold changes the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.prediction.predictedOutcome}`
-  };
+
+      let lowerBound = minimumAmount - 1n;
+      let upperBound = minimumAmount;
+      let upperEvaluation = evaluate(upperBound);
+
+      while (!upperEvaluation.improvesConvergence) {
+        lowerBound = upperBound;
+        if (upperBound === maxAmount) {
+          upperEvaluation = undefined as never;
+          break;
+        }
+
+        upperBound = upperBound * 2n;
+        if (upperBound > maxAmount) {
+          upperBound = maxAmount;
+        }
+        upperEvaluation = evaluate(upperBound);
+      }
+
+      if (!upperEvaluation?.improvesConvergence) {
+        continue;
+      }
+
+      while (upperBound - lowerBound > 1n) {
+        const middle = lowerBound + (upperBound - lowerBound) / 2n;
+        const middleEvaluation = evaluate(middle);
+        if (middleEvaluation.improvesConvergence) {
+          upperBound = middle;
+          upperEvaluation = middleEvaluation;
+        } else {
+          lowerBound = middle;
+        }
+      }
+
+      const candidate: PlanCandidate = {
+        id: `auto-borrow:${limitIndex}:${collateralAmount.toString()}:draw-debt:${upperBound.toString()}`,
+        intent: "BORROW",
+        minimumExecutionSteps: [
+          {
+            type: "DRAW_DEBT",
+            amount: upperBound,
+            limitIndex,
+            collateralAmount,
+            note: "auto-synthesized draw-debt threshold"
+          }
+        ],
+        predictedOutcome: upperEvaluation.prediction.predictedOutcome,
+        predictedRateBpsAfterNextUpdate: upperEvaluation.prediction.predictedNextRateBps,
+        resultingDistanceToTargetBps: distanceToTargetBand(
+          upperEvaluation.prediction.predictedNextRateBps,
+          targetBand
+        ),
+        quoteTokenDelta: upperBound,
+        explanation: `auto draw-debt threshold changes the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.prediction.predictedOutcome}`
+      };
+
+      if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
+        bestCandidate = candidate;
+      }
+    }
+  }
+
+  return bestCandidate;
 }
 
 async function synthesizeAjnaBorrowCandidateViaSimulation(
@@ -1098,7 +1148,7 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
 
   const simulationSenderAddress = resolveSimulationSenderAddress(config);
   const borrowerAddress = resolveSimulationBorrowerAddress(config, simulationSenderAddress);
-  const collateralAmount = config.drawDebtCollateralAmount ?? 0n;
+  const collateralAmounts = resolveDrawDebtCollateralAmounts(config);
   const lookaheadUpdates = resolveBorrowSimulationLookaheadUpdates(config);
 
   return withTemporaryAnvilFork(
@@ -1117,31 +1167,33 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
       });
 
       try {
-        if (collateralAmount > 0n) {
-          const [collateralBalance, collateralAllowance] = await Promise.all([
-            publicClient.readContract({
-              address: readState.collateralAddress,
-              abi: erc20Abi,
-              functionName: "balanceOf",
-              args: [simulationSenderAddress]
-            }),
-            publicClient.readContract({
-              address: readState.collateralAddress,
-              abi: erc20Abi,
-              functionName: "allowance",
-              args: [simulationSenderAddress, options.poolAddress]
-            })
-          ]);
-
-          if (collateralBalance < collateralAmount || collateralAllowance < collateralAmount) {
-            return undefined;
-          }
+        const [collateralBalance, collateralAllowance] = await Promise.all([
+          publicClient.readContract({
+            address: readState.collateralAddress,
+            abi: erc20Abi,
+            functionName: "balanceOf",
+            args: [simulationSenderAddress]
+          }),
+          publicClient.readContract({
+            address: readState.collateralAddress,
+            abi: erc20Abi,
+            functionName: "allowance",
+            args: [simulationSenderAddress, options.poolAddress]
+          })
+        ]);
+        const maxAvailableCollateral = smallestBigInt(collateralBalance, collateralAllowance);
+        const candidateCollateralAmounts = collateralAmounts.filter(
+          (collateralAmount) => collateralAmount <= maxAvailableCollateral
+        );
+        if (candidateCollateralAmounts.length === 0) {
+          return undefined;
         }
 
         async function simulateBorrowPath(
           drawDebt: {
             amount: bigint;
             limitIndex: number;
+            collateralAmount: bigint;
           } | null
         ): Promise<{
           firstRateWadAfterNextUpdate: bigint;
@@ -1164,7 +1216,7 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
                   borrowerAddress,
                   drawDebt.amount,
                   BigInt(drawDebt.limitIndex),
-                  collateralAmount
+                  drawDebt.collateralAmount
                 ]
               });
               const drawDebtReceipt = await publicClient.waitForTransactionReceipt({
@@ -1243,6 +1295,7 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
         let bestCandidate: PlanCandidate | undefined;
 
         for (const limitIndex of limitIndexes) {
+          for (const collateralAmount of candidateCollateralAmounts) {
           const evaluate = async (
             drawDebtAmount: bigint
           ): Promise<{
@@ -1255,7 +1308,8 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
             try {
               const candidatePath = await simulateBorrowPath({
                 amount: drawDebtAmount,
-                limitIndex
+                limitIndex,
+                collateralAmount
               });
               const nextDistance = distanceToTargetBand(
                 candidatePath.firstRateBpsAfterNextUpdate,
@@ -1315,7 +1369,7 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
           }
 
           const candidate: PlanCandidate = {
-            id: `sim-borrow:${limitIndex}:draw-debt:${upperBound.toString()}`,
+            id: `sim-borrow:${limitIndex}:${collateralAmount.toString()}:draw-debt:${upperBound.toString()}`,
             intent: "BORROW",
             minimumExecutionSteps: [
               {
@@ -1343,6 +1397,7 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
           if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
             bestCandidate = candidate;
           }
+        }
         }
 
         return bestCandidate;

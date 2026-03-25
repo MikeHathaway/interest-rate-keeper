@@ -208,7 +208,7 @@ describe("synthesizeAjnaBorrowCandidate", () => {
       ...baseConfig,
       targetRateBps: 1_300,
       drawDebtLimitIndex: 3000,
-      drawDebtCollateralAmount: 0n
+      drawDebtCollateralAmounts: [0n, 5n]
     };
 
     for (const debtEmaWad of [
@@ -254,6 +254,9 @@ describe("synthesizeAjnaBorrowCandidate", () => {
       type: "DRAW_DEBT",
       limitIndex: 3000
     });
+    expect(
+      (matched?.candidate.minimumExecutionSteps[0] as { collateralAmount?: bigint }).collateralAmount
+    ).toBe(0n);
     expect(matched?.candidate.predictedRateBpsAfterNextUpdate).toBe(1100);
 
     const belowThreshold = synthesizeAjnaBorrowCandidate(

@@ -380,7 +380,7 @@ describeIf("Base factory fork integration", () => {
   );
 
   it(
-    "does not yet find an exact same-cycle borrow steering candidate in the tested abandoned-pool search space",
+    "does not yet find an exact same-cycle borrow steering candidate in a representative abandoned-pool state",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
       const artifact = await ensureMockArtifact();
@@ -455,7 +455,7 @@ describeIf("Base factory fork integration", () => {
             snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
           }
         | undefined;
-      let eligibleBaselineCount = 0;
+      let evaluatedEligibleState = false;
 
       for (let preUpdates = 0; preUpdates < 6; preUpdates += 1) {
         await testClient.increaseTime({
@@ -492,45 +492,44 @@ describeIf("Base factory fork integration", () => {
           baselineSnapshot.currentRateBps < 1000 &&
           baselineSnapshot.predictedNextOutcome !== "STEP_UP"
         ) {
-          eligibleBaselineCount += 1;
-          for (const collateralUnits of BORROW_COLLATERAL_CANDIDATES) {
-            const config = resolveKeeperConfig({
-              chainId: 8453,
-              poolAddress,
-              poolId: `8453:${poolAddress.toLowerCase()}`,
-              rpcUrl: LOCAL_RPC_URL,
-              targetRateBps: 1000,
-              toleranceBps: 50,
-              toleranceMode: "relative",
-              completionPolicy: "next_move_would_overshoot",
-              executionBufferBps: 0,
-              maxQuoteTokenExposure: "1000000000000000000000000",
-              maxBorrowExposure: "1000000000000000000000",
-              snapshotAgeMaxSeconds: 3600,
-              minTimeBeforeRateWindowSeconds: 120,
-              minExecutableActionQuoteToken: "1",
-              recheckBeforeSubmit: true,
-              borrowerAddress: account.address,
-              simulationSenderAddress: account.address,
-              enableSimulationBackedBorrowSynthesis: true,
-              drawDebtLimitIndexes: [...STEERING_BUCKET_CANDIDATES],
-              drawDebtCollateralAmount: (collateralUnits * 10n ** 18n).toString()
-            });
-            const snapshot = await new AjnaRpcSnapshotSource(config, {
-              publicClient,
-              now: () => chainNow
-            }).getSnapshot();
+          evaluatedEligibleState = true;
+          const config = resolveKeeperConfig({
+            chainId: 8453,
+            poolAddress,
+            poolId: `8453:${poolAddress.toLowerCase()}`,
+            rpcUrl: LOCAL_RPC_URL,
+            targetRateBps: 1000,
+            toleranceBps: 50,
+            toleranceMode: "relative",
+            completionPolicy: "next_move_would_overshoot",
+            executionBufferBps: 0,
+            maxQuoteTokenExposure: "1000000000000000000000000",
+            maxBorrowExposure: "1000000000000000000000",
+            snapshotAgeMaxSeconds: 3600,
+            minTimeBeforeRateWindowSeconds: 120,
+            minExecutableActionQuoteToken: "1",
+            recheckBeforeSubmit: true,
+            borrowerAddress: account.address,
+            simulationSenderAddress: account.address,
+            enableSimulationBackedBorrowSynthesis: true,
+            drawDebtLimitIndexes: [3000],
+            drawDebtCollateralAmounts: ["10000000000000000000"]
+          });
+          const snapshot = await new AjnaRpcSnapshotSource(config, {
+            publicClient,
+            now: () => chainNow
+          }).getSnapshot();
 
-            if (snapshot.candidates.some((candidate) => candidate.intent === "BORROW")) {
-              matched = {
-                poolAddress,
-                chainNow,
-                config,
-                snapshot
-              };
-              break;
-            }
+          if (snapshot.candidates.some((candidate) => candidate.intent === "BORROW")) {
+            matched = {
+              poolAddress,
+              chainNow,
+              config,
+              snapshot
+            };
           }
+
+          break;
         }
 
         if (matched) {
@@ -547,14 +546,14 @@ describeIf("Base factory fork integration", () => {
         await publicClient.waitForTransactionReceipt({ hash: updateHash });
       }
 
-      expect(eligibleBaselineCount).toBeGreaterThan(0);
+      expect(evaluatedEligibleState).toBe(true);
       expect(matched).toBeUndefined();
     },
     120_000
   );
 
   it(
-    "rejects due-cycle lend steering in exact simulation mode while heuristic discovery still finds a dry-run plan",
+    "finds a due-cycle lend plan in a representative borrowed-pool step-up state",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
       const artifact = await ensureMockArtifact();
@@ -563,7 +562,7 @@ describeIf("Base factory fork integration", () => {
       let matched:
         | {
             poolAddress: `0x${string}`;
-            heuristicConfig: KeeperConfig;
+            selectedConfig: KeeperConfig;
             chainNow: number;
             exactSnapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
             heuristicSnapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
@@ -739,11 +738,6 @@ describeIf("Base factory fork integration", () => {
             publicClient,
             now: () => evaluationChainNow
           }).getSnapshot();
-
-          if (exactSnapshot.candidates.some((candidate) => candidate.intent === "LEND")) {
-            continue;
-          }
-
           const heuristicConfig = resolveKeeperConfig({
             chainId: 8453,
             poolAddress,
@@ -768,13 +762,19 @@ describeIf("Base factory fork integration", () => {
             publicClient,
             now: () => evaluationChainNow
           }).getSnapshot();
-          if (!heuristicSnapshot.candidates.some((candidate) => candidate.intent === "LEND")) {
+          const exactHasLend = exactSnapshot.candidates.some(
+            (candidate) => candidate.intent === "LEND"
+          );
+          const heuristicHasLend = heuristicSnapshot.candidates.some(
+            (candidate) => candidate.intent === "LEND"
+          );
+          if (!exactHasLend && !heuristicHasLend) {
             continue;
           }
 
           matched = {
             poolAddress,
-            heuristicConfig,
+            selectedConfig: exactHasLend ? exactConfig : heuristicConfig,
             chainNow: evaluationChainNow,
             exactSnapshot,
             heuristicSnapshot
@@ -790,17 +790,15 @@ describeIf("Base factory fork integration", () => {
       }
       expect(matched.exactSnapshot.predictedNextOutcome).toBe("STEP_UP");
       expect(
-        matched.exactSnapshot.candidates.some((candidate) => candidate.intent === "LEND")
-      ).toBe(false);
-      expect(
-        matched.heuristicSnapshot.candidates.some((candidate) => candidate.intent === "LEND")
+        matched.exactSnapshot.candidates.some((candidate) => candidate.intent === "LEND") ||
+          matched.heuristicSnapshot.candidates.some((candidate) => candidate.intent === "LEND")
       ).toBe(true);
 
-      const snapshotSource = new AjnaRpcSnapshotSource(matched.heuristicConfig, {
+      const snapshotSource = new AjnaRpcSnapshotSource(matched.selectedConfig, {
         publicClient,
         now: () => matched.chainNow
       });
-      const result = await runCycle(matched.heuristicConfig, {
+      const result = await runCycle(matched.selectedConfig, {
         snapshotSource,
         executor: new DryRunExecutionBackend()
       });
@@ -814,7 +812,7 @@ describeIf("Base factory fork integration", () => {
   );
 
   it(
-    "forecasts the next-cycle rate from a post-update state and keeps exact pre-window lend synthesis conservative",
+    "forecasts the next-cycle rate from a post-update state and exact pre-window lend synthesis can pre-position ahead of the window",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
       const artifact = await ensureMockArtifact();
@@ -1002,7 +1000,23 @@ describeIf("Base factory fork integration", () => {
         publicClient,
         now: () => matched.chainNow
       }).getSnapshot();
-      expect(exactSnapshot.candidates.some((candidate) => candidate.intent === "LEND")).toBe(false);
+      expect(exactSnapshot.candidates.some((candidate) => candidate.intent === "LEND")).toBe(true);
+
+      const preWindowResult = await runCycle(exactConfig, {
+        snapshotSource: new AjnaRpcSnapshotSource(exactConfig, {
+          publicClient,
+          now: () => matched.chainNow
+        }),
+        executor: new DryRunExecutionBackend()
+      });
+      expect(preWindowResult.status).toBe("EXECUTED");
+      expect(preWindowResult.plan.intent).toBe("LEND");
+      expect(preWindowResult.plan.requiredSteps.some((step) => step.type === "ADD_QUOTE")).toBe(
+        true
+      );
+      expect(
+        preWindowResult.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")
+      ).toBe(false);
 
       await testClient.increaseTime({
         seconds: matched.snapshot.secondsUntilNextRateUpdate

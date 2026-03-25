@@ -135,6 +135,7 @@ export interface KeeperConfig {
   drawDebtLimitIndex?: number;
   drawDebtLimitIndexes?: number[];
   drawDebtCollateralAmount?: bigint;
+  drawDebtCollateralAmounts?: bigint[];
   borrowSimulationLookaheadUpdates?: number;
   enableHeuristicLendSynthesis?: boolean;
   logPath?: string;

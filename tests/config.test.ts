@@ -19,6 +19,7 @@ describe("resolveKeeperConfig", () => {
       drawDebtLimitIndex: 3100,
       drawDebtLimitIndexes: [2800, 3000, 3100],
       drawDebtCollateralAmount: "2500000000000000000",
+      drawDebtCollateralAmounts: ["1000000000000000000", "2500000000000000000"],
       borrowSimulationLookaheadUpdates: 2,
       enableHeuristicLendSynthesis: true,
       maxQuoteTokenExposure: "1000000",
@@ -38,6 +39,10 @@ describe("resolveKeeperConfig", () => {
     expect(config.drawDebtLimitIndex).toBe(3100);
     expect(config.drawDebtLimitIndexes).toEqual([2800, 3000, 3100]);
     expect(config.drawDebtCollateralAmount).toBe(2500000000000000000n);
+    expect(config.drawDebtCollateralAmounts).toEqual([
+      1000000000000000000n,
+      2500000000000000000n
+    ]);
     expect(config.borrowSimulationLookaheadUpdates).toBe(2);
     expect(config.enableHeuristicLendSynthesis).toBe(true);
   });
