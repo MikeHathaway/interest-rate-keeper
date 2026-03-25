@@ -1,0 +1,10 @@
+New pools in the Ajna Protocol have a difficult time finding product-market-fit due to the 10% maximum starting interest rate. This makes it difficult to attract lenders in cases where the desired rate is greater than 10% or during periods of low-risk 10%+ yields.
+
+This tool would also be helpful to restore pools that have had their rates pushed so far out of range that the pool became abandoned due to lack of interested parties who could push the rate back.
+
+This request is for a tool that can adjust the interest rate of a new or low-liquidity pool. It would do so by taking both a lend and borrow position in order to create the conditions required for rate changes.
+
+As a secondary goal, it should also be able to automatically update interest rates of selected pools, as is done here: https://github.com/gunboatsss/AjnaPoker
+
+
+This keeper bot should be able to run both as a standalone bot on a VPS, as well as be used with KeeperHub: https://docs.keeperhub.com/

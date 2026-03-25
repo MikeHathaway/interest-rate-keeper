@@ -1,0 +1,26 @@
+{
+  "name": "interest-rate-keeper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Ajna interest rate keeper",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:integration:base": "RUN_BASE_FORK_TESTS=1 vitest run --config vitest.integration.config.ts tests/integration/base-factory.integration.ts"
+  },
+  "engines": {
+    "node": ">=20.5.0"
+  },
+  "dependencies": {
+    "viem": "^2.23.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

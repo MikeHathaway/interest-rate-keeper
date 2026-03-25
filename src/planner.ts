@@ -1,0 +1,242 @@
+import {
+  type CyclePlan,
+  type ExecutionStep,
+  type KeeperConfig,
+  type PlanCandidate,
+  type PoolSnapshot,
+  type TargetBand,
+  type UpdateInterestStep
+} from "./types.js";
+
+const UPDATE_INTEREST_STEP: UpdateInterestStep = {
+  type: "UPDATE_INTEREST",
+  bufferPolicy: "none"
+};
+
+function calculateRelativeTolerance(targetRateBps: number, toleranceBps: number): number {
+  return Math.ceil((targetRateBps * toleranceBps) / 10_000);
+}
+
+export function buildTargetBand(config: KeeperConfig): TargetBand {
+  const tolerance =
+    config.toleranceMode === "relative"
+      ? calculateRelativeTolerance(config.targetRateBps, config.toleranceBps)
+      : config.toleranceBps;
+
+  return {
+    minRateBps: Math.max(0, config.targetRateBps - tolerance),
+    maxRateBps: config.targetRateBps + tolerance
+  };
+}
+
+export function isRateInBand(rateBps: number, band: TargetBand): boolean {
+  return rateBps >= band.minRateBps && rateBps <= band.maxRateBps;
+}
+
+export function distanceToTargetBand(rateBps: number, band: TargetBand): number {
+  if (rateBps < band.minRateBps) {
+    return band.minRateBps - rateBps;
+  }
+
+  if (rateBps > band.maxRateBps) {
+    return rateBps - band.maxRateBps;
+  }
+
+  return 0;
+}
+
+function nextMoveWouldOvershoot(snapshot: PoolSnapshot, band: TargetBand): boolean {
+  if (snapshot.currentRateBps < band.minRateBps) {
+    return snapshot.predictedNextRateBps > band.maxRateBps;
+  }
+
+  if (snapshot.currentRateBps > band.maxRateBps) {
+    return snapshot.predictedNextRateBps < band.minRateBps;
+  }
+
+  return false;
+}
+
+function rateUpdateIsDue(snapshot: PoolSnapshot): boolean {
+  return snapshot.secondsUntilNextRateUpdate <= 0;
+}
+
+function naturallyImprovesConvergence(snapshot: PoolSnapshot, band: TargetBand): boolean {
+  const currentDistance = distanceToTargetBand(snapshot.currentRateBps, band);
+  const nextDistance = distanceToTargetBand(snapshot.predictedNextRateBps, band);
+  return nextDistance < currentDistance || isRateInBand(snapshot.predictedNextRateBps, band);
+}
+
+function defaultBufferPolicy(step: ExecutionStep): "apply" | "none" {
+  switch (step.type) {
+    case "ADD_QUOTE":
+    case "DRAW_DEBT":
+    case "ADD_COLLATERAL":
+      return "apply";
+    case "UPDATE_INTEREST":
+      return "none";
+    default:
+      return "none";
+  }
+}
+
+function applyBuffer(amount: bigint, bufferBps: number): bigint {
+  if (amount <= 0n || bufferBps <= 0) {
+    return amount;
+  }
+
+  const delta = (amount * BigInt(bufferBps) + 9_999n) / 10_000n;
+  return amount + (delta > 0n ? delta : 1n);
+}
+
+function withExecutionBuffer(step: ExecutionStep, config: KeeperConfig): ExecutionStep {
+  const policy = step.bufferPolicy ?? defaultBufferPolicy(step);
+  if (policy === "none") {
+    return step;
+  }
+
+  switch (step.type) {
+    case "ADD_QUOTE":
+      return { ...step, amount: applyBuffer(step.amount, config.executionBufferBps) };
+    case "DRAW_DEBT":
+      return { ...step, amount: applyBuffer(step.amount, config.executionBufferBps) };
+    case "ADD_COLLATERAL":
+      return { ...step, amount: applyBuffer(step.amount, config.executionBufferBps) };
+    default:
+      return step;
+  }
+}
+
+function maybeAppendUpdateInterest(
+  steps: ExecutionStep[],
+  snapshot: PoolSnapshot
+): ExecutionStep[] {
+  if (!rateUpdateIsDue(snapshot)) {
+    return steps;
+  }
+
+  return [...steps, UPDATE_INTEREST_STEP];
+}
+
+function candidateImprovesConvergence(
+  candidate: PlanCandidate,
+  snapshot: PoolSnapshot,
+  band: TargetBand
+): boolean {
+  const currentDistance = distanceToTargetBand(snapshot.currentRateBps, band);
+  const candidateDistance = distanceToTargetBand(
+    candidate.predictedRateBpsAfterNextUpdate,
+    band
+  );
+
+  return (
+    isRateInBand(candidate.predictedRateBpsAfterNextUpdate, band) ||
+    candidateDistance < currentDistance
+  );
+}
+
+function chooseBestCandidate(
+  candidates: PlanCandidate[],
+  band: TargetBand
+): PlanCandidate | undefined {
+  return candidates
+    .slice()
+    .sort((left, right) => {
+      const leftInBand = isRateInBand(left.predictedRateBpsAfterNextUpdate, band) ? 0 : 1;
+      const rightInBand = isRateInBand(right.predictedRateBpsAfterNextUpdate, band) ? 0 : 1;
+      if (leftInBand !== rightInBand) {
+        return leftInBand - rightInBand;
+      }
+
+      if (left.resultingDistanceToTargetBps !== right.resultingDistanceToTargetBps) {
+        return left.resultingDistanceToTargetBps - right.resultingDistanceToTargetBps;
+      }
+
+      if (left.minimumExecutionSteps.length !== right.minimumExecutionSteps.length) {
+        return left.minimumExecutionSteps.length - right.minimumExecutionSteps.length;
+      }
+
+      if (left.quoteTokenDelta !== right.quoteTokenDelta) {
+        return left.quoteTokenDelta < right.quoteTokenDelta ? -1 : 1;
+      }
+
+      return left.id.localeCompare(right.id);
+    })[0];
+}
+
+export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePlan {
+  const targetBand = buildTargetBand(config);
+
+  if (isRateInBand(snapshot.currentRateBps, targetBand)) {
+    return {
+      intent: "NO_OP",
+      reason: "current rate is already inside the target band",
+      targetBand,
+      requiredSteps: [],
+      predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
+      predictedRateBpsAfterNextUpdate: snapshot.predictedNextRateBps,
+      quoteTokenDelta: 0n
+    };
+  }
+
+  if (
+    naturallyImprovesConvergence(snapshot, targetBand) &&
+    config.completionPolicy === "next_move_would_overshoot" &&
+    nextMoveWouldOvershoot(snapshot, targetBand)
+  ) {
+    return {
+      intent: "NO_OP",
+      reason: "next protocol move already converges and would overshoot the target band",
+      targetBand,
+      requiredSteps: [],
+      predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
+      predictedRateBpsAfterNextUpdate: snapshot.predictedNextRateBps,
+      quoteTokenDelta: 0n
+    };
+  }
+
+  if (naturallyImprovesConvergence(snapshot, targetBand)) {
+    return {
+      intent: "NO_OP",
+      reason: rateUpdateIsDue(snapshot)
+        ? "pool is already positioned for a convergent interest update"
+        : "next protocol move already converges toward the target band",
+      targetBand,
+      requiredSteps: maybeAppendUpdateInterest([], snapshot),
+      predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
+      predictedRateBpsAfterNextUpdate: snapshot.predictedNextRateBps,
+      quoteTokenDelta: 0n
+    };
+  }
+
+  const viableCandidates = snapshot.candidates.filter((candidate) =>
+    candidateImprovesConvergence(candidate, snapshot, targetBand)
+  );
+
+  const selected = chooseBestCandidate(viableCandidates, targetBand);
+  if (!selected) {
+    return {
+      intent: "NO_OP",
+      reason: "no candidate changes the next-rate outcome in a way that improves convergence",
+      targetBand,
+      requiredSteps: [],
+      predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
+      predictedRateBpsAfterNextUpdate: snapshot.predictedNextRateBps,
+      quoteTokenDelta: 0n
+    };
+  }
+
+  return {
+    intent: selected.intent,
+    reason: selected.explanation,
+    targetBand,
+    selectedCandidateId: selected.id,
+    requiredSteps: maybeAppendUpdateInterest(
+      selected.minimumExecutionSteps.map((step) => withExecutionBuffer(step, config)),
+      snapshot
+    ),
+    predictedOutcomeAfterPlan: selected.predictedOutcome,
+    predictedRateBpsAfterNextUpdate: selected.predictedRateBpsAfterNextUpdate,
+    quoteTokenDelta: selected.quoteTokenDelta
+  };
+}
