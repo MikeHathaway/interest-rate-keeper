@@ -130,6 +130,7 @@ export interface KeeperConfig {
   maxGasCostWei?: bigint;
   recheckBeforeSubmit: boolean;
   addQuoteBucketIndex?: number;
+  addQuoteBucketIndexes?: number[];
   addQuoteExpirySeconds?: number;
   enableSimulationBackedLendSynthesis?: boolean;
   enableSimulationBackedBorrowSynthesis?: boolean;

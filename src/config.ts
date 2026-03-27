@@ -253,6 +253,19 @@ export function resolveKeeperConfig(input: unknown): KeeperConfig {
     );
   }
 
+  if (record.addQuoteBucketIndexes !== undefined) {
+    const parsedBucketIndexes = parseIntegerArray(
+      record.addQuoteBucketIndexes,
+      "addQuoteBucketIndexes"
+    );
+    if (parsedBucketIndexes.length === 0) {
+      throw new Error("addQuoteBucketIndexes must not be empty");
+    }
+    config.addQuoteBucketIndexes = Array.from(new Set(parsedBucketIndexes)).sort(
+      (left, right) => left - right
+    );
+  }
+
   if (record.addQuoteExpirySeconds !== undefined) {
     config.addQuoteExpirySeconds = parsePositiveInteger(
       record.addQuoteExpirySeconds,

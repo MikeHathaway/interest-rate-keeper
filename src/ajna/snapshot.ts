@@ -18,6 +18,8 @@ import { ajnaPoolAbi, erc20Abi } from "./abi.js";
 import { buildTargetBand, distanceToTargetBand } from "../planner.js";
 import { type SnapshotSource } from "../snapshot.js";
 import {
+  type AddQuoteStep,
+  type DrawDebtStep,
   type HexAddress,
   type KeeperConfig,
   type PlanCandidate,
@@ -242,6 +244,15 @@ function resolveDrawDebtLimitIndexes(config: KeeperConfig): number[] {
   return Array.from(new Set(configured)).sort((left, right) => left - right);
 }
 
+function resolveAddQuoteBucketIndexes(config: KeeperConfig): number[] {
+  const configured = [
+    ...(config.addQuoteBucketIndexes ?? []),
+    ...(config.addQuoteBucketIndex === undefined ? [] : [config.addQuoteBucketIndex])
+  ];
+
+  return Array.from(new Set(configured)).sort((left, right) => left - right);
+}
+
 function resolveDrawDebtCollateralAmounts(config: KeeperConfig): bigint[] {
   const configured = [
     ...(config.drawDebtCollateralAmounts ?? []),
@@ -253,6 +264,131 @@ function resolveDrawDebtCollateralAmounts(config: KeeperConfig): bigint[] {
   }
 
   return Array.from(new Set(configured)).sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0
+  );
+}
+
+function extractDrawDebtStep(candidate: PlanCandidate | undefined): DrawDebtStep | undefined {
+  const drawDebtStep = candidate?.minimumExecutionSteps.find(
+    (step): step is DrawDebtStep => step.type === "DRAW_DEBT"
+  );
+
+  return drawDebtStep;
+}
+
+function extractAddQuoteStep(candidate: PlanCandidate | undefined): AddQuoteStep | undefined {
+  const addQuoteStep = candidate?.minimumExecutionSteps.find(
+    (step): step is AddQuoteStep => step.type === "ADD_QUOTE"
+  );
+
+  return addQuoteStep;
+}
+
+function buildDualBorrowSearchAmounts(
+  minimumAmount: bigint,
+  maximumAmount: bigint,
+  anchorAmount: bigint
+): bigint[] {
+  const clampedAnchor =
+    anchorAmount < minimumAmount
+      ? minimumAmount
+      : anchorAmount > maximumAmount
+        ? maximumAmount
+        : anchorAmount;
+
+  const values = new Set<bigint>([minimumAmount, clampedAnchor, maximumAmount]);
+  let down = clampedAnchor;
+  for (let step = 0; step < 3; step += 1) {
+    if (down <= minimumAmount) {
+      break;
+    }
+
+    down = down / 2n;
+    if (down >= minimumAmount) {
+      values.add(down);
+    }
+  }
+
+  let up = clampedAnchor;
+  for (let step = 0; step < 4; step += 1) {
+    if (up >= maximumAmount) {
+      break;
+    }
+
+    up = up * 2n;
+    if (up > maximumAmount) {
+      up = maximumAmount;
+    }
+    values.add(up);
+  }
+
+  return Array.from(values).sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0
+  );
+}
+
+function buildBroadBorrowSearchAmounts(
+  minimumAmount: bigint,
+  maximumAmount: bigint
+): bigint[] {
+  const values = new Set<bigint>([minimumAmount, maximumAmount]);
+
+  for (const denominator of [1024n, 256n, 64n, 16n, 4n, 2n]) {
+    const fraction = maximumAmount / denominator;
+    if (fraction >= minimumAmount && fraction <= maximumAmount) {
+      values.add(fraction);
+    }
+  }
+
+  let scaled = minimumAmount;
+  for (let step = 0; step < 6; step += 1) {
+    if (scaled >= maximumAmount) {
+      break;
+    }
+
+    scaled = scaled * 10n;
+    if (scaled > maximumAmount) {
+      scaled = maximumAmount;
+    }
+    values.add(scaled);
+  }
+
+  return Array.from(values).sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0
+  );
+}
+
+function buildAnchoredSearchAmounts(
+  minimumAmount: bigint,
+  maximumAmount: bigint,
+  anchorAmounts: Array<bigint | undefined>,
+  options: {
+    includeBroadSearch?: boolean;
+  } = {}
+): bigint[] {
+  const values = new Set<bigint>();
+
+  for (const anchorAmount of anchorAmounts) {
+    if (anchorAmount === undefined) {
+      continue;
+    }
+
+    for (const amount of buildDualBorrowSearchAmounts(
+      minimumAmount,
+      maximumAmount,
+      anchorAmount
+    )) {
+      values.add(amount);
+    }
+  }
+
+  if (values.size === 0 || options.includeBroadSearch !== false) {
+    for (const amount of buildBroadBorrowSearchAmounts(minimumAmount, maximumAmount)) {
+      values.add(amount);
+    }
+  }
+
+  return Array.from(values).sort((left, right) =>
     left < right ? -1 : left > right ? 1 : 0
   );
 }
@@ -478,11 +614,11 @@ export function synthesizeAjnaLendCandidate(
     baselinePrediction?: AjnaRatePrediction;
   }
 ): PlanCandidate | undefined {
-  if (config.addQuoteBucketIndex === undefined || options.quoteTokenScale <= 0n) {
+  const addQuoteBucketIndexes = resolveAddQuoteBucketIndexes(config);
+  if (addQuoteBucketIndexes.length === 0 || options.quoteTokenScale <= 0n) {
     return undefined;
   }
 
-  const addQuoteBucketIndex = config.addQuoteBucketIndex;
   const targetBand = buildTargetBand(config);
   const currentRateBps = toRateBps(state.currentRateWad);
   if (currentRateBps <= targetBand.maxRateBps) {
@@ -501,6 +637,8 @@ export function synthesizeAjnaLendCandidate(
   if (minimumAmount > maxAmount) {
     return undefined;
   }
+
+  let bestCandidate: PlanCandidate | undefined;
 
   function evaluate(quoteTokenAmount: bigint): {
     prediction: AjnaRatePrediction;
@@ -522,58 +660,71 @@ export function synthesizeAjnaLendCandidate(
     };
   }
 
-  let lowerBound = minimumAmount - 1n;
-  let upperBound = minimumAmount;
-  let upperEvaluation = evaluate(upperBound);
+  for (const addQuoteBucketIndex of addQuoteBucketIndexes) {
+    let lowerBound = minimumAmount - 1n;
+    let upperBound = minimumAmount;
+    let upperEvaluation = evaluate(upperBound);
 
-  while (!upperEvaluation.improvesConvergence) {
-    lowerBound = upperBound;
-    if (upperBound === maxAmount) {
-      return undefined;
-    }
-
-    upperBound = upperBound * 2n;
-    if (upperBound > maxAmount) {
-      upperBound = maxAmount;
-    }
-    upperEvaluation = evaluate(upperBound);
-  }
-
-  while (upperBound - lowerBound > 1n) {
-    const middle = lowerBound + (upperBound - lowerBound) / 2n;
-    const middleEvaluation = evaluate(middle);
-    if (middleEvaluation.improvesConvergence) {
-      upperBound = middle;
-      upperEvaluation = middleEvaluation;
-    } else {
-      lowerBound = middle;
-    }
-  }
-
-  const expiry =
-    options.nowTimestamp + (config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS);
-
-  return {
-    id: `auto-lend:add-quote:${upperBound.toString()}`,
-    intent: "LEND",
-    minimumExecutionSteps: [
-      {
-        type: "ADD_QUOTE",
-        amount: upperBound,
-        bucketIndex: addQuoteBucketIndex,
-        expiry,
-        note: "auto-synthesized add-quote threshold"
+    while (!upperEvaluation.improvesConvergence) {
+      lowerBound = upperBound;
+      if (upperBound === maxAmount) {
+        upperEvaluation = undefined as never;
+        break;
       }
-    ],
-    predictedOutcome: upperEvaluation.prediction.predictedOutcome,
-    predictedRateBpsAfterNextUpdate: upperEvaluation.prediction.predictedNextRateBps,
-    resultingDistanceToTargetBps: distanceToTargetBand(
-      upperEvaluation.prediction.predictedNextRateBps,
-      targetBand
-    ),
-    quoteTokenDelta: upperBound,
-    explanation: `auto add-quote threshold changes the next Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.prediction.predictedOutcome}`
-  };
+
+      upperBound = upperBound * 2n;
+      if (upperBound > maxAmount) {
+        upperBound = maxAmount;
+      }
+      upperEvaluation = evaluate(upperBound);
+    }
+
+    if (!upperEvaluation?.improvesConvergence) {
+      continue;
+    }
+
+    while (upperBound - lowerBound > 1n) {
+      const middle = lowerBound + (upperBound - lowerBound) / 2n;
+      const middleEvaluation = evaluate(middle);
+      if (middleEvaluation.improvesConvergence) {
+        upperBound = middle;
+        upperEvaluation = middleEvaluation;
+      } else {
+        lowerBound = middle;
+      }
+    }
+
+    const expiry =
+      options.nowTimestamp + (config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS);
+
+    const candidate: PlanCandidate = {
+      id: `auto-lend:${addQuoteBucketIndex}:add-quote:${upperBound.toString()}`,
+      intent: "LEND",
+      minimumExecutionSteps: [
+        {
+          type: "ADD_QUOTE",
+          amount: upperBound,
+          bucketIndex: addQuoteBucketIndex,
+          expiry,
+          note: "auto-synthesized add-quote threshold"
+        }
+      ],
+      predictedOutcome: upperEvaluation.prediction.predictedOutcome,
+      predictedRateBpsAfterNextUpdate: upperEvaluation.prediction.predictedNextRateBps,
+      resultingDistanceToTargetBps: distanceToTargetBand(
+        upperEvaluation.prediction.predictedNextRateBps,
+        targetBand
+      ),
+      quoteTokenDelta: upperBound,
+      explanation: `auto add-quote threshold changes the next Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.prediction.predictedOutcome}`
+    };
+
+    if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
+      bestCandidate = candidate;
+    }
+  }
+
+  return bestCandidate;
 }
 
 async function findOpenPort(): Promise<number> {
@@ -775,11 +926,11 @@ async function synthesizeAjnaLendCandidateViaSimulation(
     baselinePrediction?: AjnaRatePrediction;
   }
 ): Promise<PlanCandidate | undefined> {
-  if (config.addQuoteBucketIndex === undefined) {
+  const addQuoteBucketIndexes = resolveAddQuoteBucketIndexes(config);
+  if (addQuoteBucketIndexes.length === 0) {
     return undefined;
   }
 
-  const addQuoteBucketIndex = config.addQuoteBucketIndex;
   const targetBand = buildTargetBand(config);
   const currentRateBps = toRateBps(readState.rateState.currentRateWad);
   if (currentRateBps <= targetBand.maxRateBps) {
@@ -838,165 +989,179 @@ async function synthesizeAjnaLendCandidateViaSimulation(
         const expiryOffset = BigInt(
           config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS
         );
+        let bestCandidate: PlanCandidate | undefined;
 
-        const evaluate = async (
-          quoteTokenAmount: bigint
-        ): Promise<{
-          predictedOutcome: RateMoveOutcome;
-          predictedRateWadAfterNextUpdate: bigint;
-          predictedRateBpsAfterNextUpdate: number;
-          improvesConvergence: boolean;
-        }> => {
-          const snapshotId = await testClient.snapshot();
+        for (const addQuoteBucketIndex of addQuoteBucketIndexes) {
+          const evaluate = async (
+            quoteTokenAmount: bigint
+          ): Promise<{
+            predictedOutcome: RateMoveOutcome;
+            predictedRateWadAfterNextUpdate: bigint;
+            predictedRateBpsAfterNextUpdate: number;
+            improvesConvergence: boolean;
+          }> => {
+            const snapshotId = await testClient.snapshot();
 
-          try {
-            const simulationBlock = await publicClient.getBlock({ blockTag: "latest" });
-            const hash = await walletClient.writeContract({
-              account: simulationSenderAddress,
-              chain: undefined,
-              address: options.poolAddress,
-              abi: ajnaPoolAbi,
-              functionName: "addQuoteToken",
-              args: [
-                quoteTokenAmount,
-                BigInt(addQuoteBucketIndex),
-                simulationBlock.timestamp + expiryOffset
-              ]
-            });
-            const receipt = await publicClient.waitForTransactionReceipt({ hash });
-            if (receipt.status !== "success") {
+            try {
+              const simulationBlock = await publicClient.getBlock({ blockTag: "latest" });
+              const hash = await walletClient.writeContract({
+                account: simulationSenderAddress,
+                chain: undefined,
+                address: options.poolAddress,
+                abi: ajnaPoolAbi,
+                functionName: "addQuoteToken",
+                args: [
+                  quoteTokenAmount,
+                  BigInt(addQuoteBucketIndex),
+                  simulationBlock.timestamp + expiryOffset
+                ]
+              });
+              const receipt = await publicClient.waitForTransactionReceipt({ hash });
+              if (receipt.status !== "success") {
+                return {
+                  predictedOutcome: baselinePrediction.predictedOutcome,
+                  predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
+                  predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
+                  improvesConvergence: false
+                };
+              }
+
+              let simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              if (simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate > 0) {
+                await testClient.increaseTime({
+                  seconds: simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate
+                });
+                await testClient.mine({
+                  blocks: 1
+                });
+                simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              }
+
+              const updateHash = await walletClient.writeContract({
+                account: simulationSenderAddress,
+                chain: undefined,
+                address: options.poolAddress,
+                abi: ajnaPoolAbi,
+                functionName: "updateInterest",
+                args: []
+              });
+              const updateReceipt = await publicClient.waitForTransactionReceipt({
+                hash: updateHash
+              });
+              if (updateReceipt.status !== "success") {
+                return {
+                  predictedOutcome: baselinePrediction.predictedOutcome,
+                  predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
+                  predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
+                  improvesConvergence: false
+                };
+              }
+
+              const postUpdateReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              const predictedRateWadAfterNextUpdate =
+                postUpdateReadState.rateState.currentRateWad;
+              const predictedRateBpsAfterNextUpdate = toRateBps(
+                predictedRateWadAfterNextUpdate
+              );
+              const predictedDistance = distanceToTargetBand(
+                predictedRateBpsAfterNextUpdate,
+                targetBand
+              );
+              const predictedOutcome = deriveRateMoveOutcome(
+                readState.rateState.currentRateWad,
+                predictedRateWadAfterNextUpdate
+              );
+
+              return {
+                predictedOutcome,
+                predictedRateWadAfterNextUpdate,
+                predictedRateBpsAfterNextUpdate,
+                improvesConvergence:
+                  predictionChanged(baselinePrediction, {
+                    predictedOutcome,
+                    predictedNextRateWad: predictedRateWadAfterNextUpdate,
+                    predictedNextRateBps: predictedRateBpsAfterNextUpdate,
+                    secondsUntilNextRateUpdate: 0
+                  }) &&
+                  predictedDistance < baselineDistance
+              };
+            } catch {
               return {
                 predictedOutcome: baselinePrediction.predictedOutcome,
                 predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
                 predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
                 improvesConvergence: false
               };
+            } finally {
+              await testClient.revert({ id: snapshotId });
+            }
+          };
+
+          let lowerBound = minimumAmount - 1n;
+          let upperBound = minimumAmount;
+          let upperEvaluation = await evaluate(upperBound);
+
+          while (!upperEvaluation.improvesConvergence) {
+            lowerBound = upperBound;
+            if (upperBound === maxAmount) {
+              upperEvaluation = undefined as never;
+              break;
             }
 
-            let simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
-            if (simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate > 0) {
-              await testClient.increaseTime({
-                seconds: simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate
-              });
-              await testClient.mine({
-                blocks: 1
-              });
-              simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+            upperBound = upperBound * 2n;
+            if (upperBound > maxAmount) {
+              upperBound = maxAmount;
             }
+            upperEvaluation = await evaluate(upperBound);
+          }
 
-            const updateHash = await walletClient.writeContract({
-              account: simulationSenderAddress,
-              chain: undefined,
-              address: options.poolAddress,
-              abi: ajnaPoolAbi,
-              functionName: "updateInterest",
-              args: []
-            });
-            const updateReceipt = await publicClient.waitForTransactionReceipt({
-              hash: updateHash
-            });
-            if (updateReceipt.status !== "success") {
-              return {
-                predictedOutcome: baselinePrediction.predictedOutcome,
-                predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
-                predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
-                improvesConvergence: false
-              };
+          if (!upperEvaluation?.improvesConvergence) {
+            continue;
+          }
+
+          while (upperBound - lowerBound > 1n) {
+            const middle = lowerBound + (upperBound - lowerBound) / 2n;
+            const middleEvaluation = await evaluate(middle);
+            if (middleEvaluation.improvesConvergence) {
+              upperBound = middle;
+              upperEvaluation = middleEvaluation;
+            } else {
+              lowerBound = middle;
             }
+          }
 
-            const postUpdateReadState = await readAjnaPoolState(publicClient, options.poolAddress);
-            const predictedRateWadAfterNextUpdate =
-              postUpdateReadState.rateState.currentRateWad;
-            const predictedRateBpsAfterNextUpdate = toRateBps(
-              predictedRateWadAfterNextUpdate
-            );
-            const predictedDistance = distanceToTargetBand(
-              predictedRateBpsAfterNextUpdate,
+          const expiry =
+            readState.rateState.nowTimestamp +
+            (config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS);
+
+          const candidate: PlanCandidate = {
+            id: `sim-lend:${addQuoteBucketIndex}:add-quote:${upperBound.toString()}`,
+            intent: "LEND",
+            minimumExecutionSteps: [
+              {
+                type: "ADD_QUOTE",
+                amount: upperBound,
+                bucketIndex: addQuoteBucketIndex,
+                expiry,
+                note: "simulation-backed add-quote threshold"
+              }
+            ],
+            predictedOutcome: upperEvaluation.predictedOutcome,
+            predictedRateBpsAfterNextUpdate: upperEvaluation.predictedRateBpsAfterNextUpdate,
+            resultingDistanceToTargetBps: distanceToTargetBand(
+              upperEvaluation.predictedRateBpsAfterNextUpdate,
               targetBand
-            );
-            const predictedOutcome = deriveRateMoveOutcome(
-              readState.rateState.currentRateWad,
-              predictedRateWadAfterNextUpdate
-            );
+            ),
+            quoteTokenDelta: upperBound,
+            explanation: `simulation-backed add-quote threshold changes the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.predictedOutcome}`
+          };
 
-            return {
-              predictedOutcome,
-              predictedRateWadAfterNextUpdate,
-              predictedRateBpsAfterNextUpdate,
-              improvesConvergence:
-                predictionChanged(baselinePrediction, {
-                  predictedOutcome,
-                  predictedNextRateWad: predictedRateWadAfterNextUpdate,
-                  predictedNextRateBps: predictedRateBpsAfterNextUpdate,
-                  secondsUntilNextRateUpdate: 0
-                }) &&
-                predictedDistance < baselineDistance
-            };
-          } catch {
-            return {
-              predictedOutcome: baselinePrediction.predictedOutcome,
-              predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
-              predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
-              improvesConvergence: false
-            };
-          } finally {
-            await testClient.revert({ id: snapshotId });
-          }
-        };
-
-        let lowerBound = minimumAmount - 1n;
-        let upperBound = minimumAmount;
-        let upperEvaluation = await evaluate(upperBound);
-
-        while (!upperEvaluation.improvesConvergence) {
-          lowerBound = upperBound;
-          if (upperBound === maxAmount) {
-            return undefined;
-          }
-
-          upperBound = upperBound * 2n;
-          if (upperBound > maxAmount) {
-            upperBound = maxAmount;
-          }
-          upperEvaluation = await evaluate(upperBound);
-        }
-
-        while (upperBound - lowerBound > 1n) {
-          const middle = lowerBound + (upperBound - lowerBound) / 2n;
-          const middleEvaluation = await evaluate(middle);
-          if (middleEvaluation.improvesConvergence) {
-            upperBound = middle;
-            upperEvaluation = middleEvaluation;
-          } else {
-            lowerBound = middle;
+          if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
+            bestCandidate = candidate;
           }
         }
 
-        const expiry =
-          readState.rateState.nowTimestamp +
-          (config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS);
-
-        return {
-          id: `sim-lend:add-quote:${upperBound.toString()}`,
-          intent: "LEND",
-          minimumExecutionSteps: [
-            {
-              type: "ADD_QUOTE",
-              amount: upperBound,
-              bucketIndex: addQuoteBucketIndex,
-              expiry,
-              note: "simulation-backed add-quote threshold"
-            }
-          ],
-          predictedOutcome: upperEvaluation.predictedOutcome,
-          predictedRateBpsAfterNextUpdate: upperEvaluation.predictedRateBpsAfterNextUpdate,
-          resultingDistanceToTargetBps: distanceToTargetBand(
-            upperEvaluation.predictedRateBpsAfterNextUpdate,
-            targetBand
-          ),
-          quoteTokenDelta: upperBound,
-          explanation: `simulation-backed add-quote threshold changes the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.predictedOutcome}`
-        };
+        return bestCandidate;
       } finally {
         await testClient.stopImpersonatingAccount({
           address: simulationSenderAddress
@@ -1126,6 +1291,211 @@ export function synthesizeAjnaBorrowCandidate(
       if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
         bestCandidate = candidate;
       }
+    }
+  }
+
+  return bestCandidate;
+}
+
+export function synthesizeAjnaLendAndBorrowCandidate(
+  state: AjnaRateState,
+  config: KeeperConfig,
+  options: {
+    quoteTokenScale: bigint;
+    nowTimestamp: number;
+    baselinePrediction?: AjnaRatePrediction;
+    anchorBorrowCandidate?: PlanCandidate;
+  }
+): PlanCandidate | undefined {
+  const addQuoteBucketIndexes = resolveAddQuoteBucketIndexes(config);
+  if (addQuoteBucketIndexes.length === 0 || options.quoteTokenScale <= 0n) {
+    return undefined;
+  }
+
+  const targetBand = buildTargetBand(config);
+  const currentRateBps = toRateBps(state.currentRateWad);
+  if (currentRateBps >= targetBand.minRateBps) {
+    return undefined;
+  }
+
+  const baselinePrediction = options.baselinePrediction ?? forecastAjnaNextEligibleRate(state);
+  const baselineDistance = distanceToTargetBand(
+    baselinePrediction.predictedNextRateBps,
+    targetBand
+  );
+  const minimumAmount =
+    config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
+  const maxQuoteAmount = config.maxQuoteTokenExposure;
+  const maxBorrowAmount = config.maxBorrowExposure;
+
+  if (minimumAmount > maxQuoteAmount || minimumAmount > maxBorrowAmount) {
+    return undefined;
+  }
+
+  const anchorBorrowCandidate =
+    options.anchorBorrowCandidate ??
+    synthesizeAjnaBorrowCandidate(state, config, { baselinePrediction });
+  const anchorDrawDebtStep = extractDrawDebtStep(anchorBorrowCandidate);
+  if (!anchorDrawDebtStep) {
+    return undefined;
+  }
+
+  const collateralAmount = anchorDrawDebtStep.collateralAmount ?? 0n;
+
+  function evaluateBorrowOnly(drawDebtAmount: bigint): {
+    prediction: AjnaRatePrediction;
+    distance: number;
+  } {
+    const prediction = forecastAjnaNextEligibleRate(
+      drawDebtIntoRateState(state, drawDebtAmount, collateralAmount)
+    );
+    return {
+      prediction,
+      distance: distanceToTargetBand(prediction.predictedNextRateBps, targetBand)
+    };
+  }
+
+  function evaluateCombined(
+    drawDebtAmount: bigint,
+    quoteTokenAmount: bigint
+  ): {
+    prediction: AjnaRatePrediction;
+    distance: number;
+    improvesConvergence: boolean;
+  } {
+    const prediction = forecastAjnaNextEligibleRate(
+      addQuoteToRateState(
+        drawDebtIntoRateState(state, drawDebtAmount, collateralAmount),
+        quoteTokenAmount,
+        options.quoteTokenScale
+      )
+    );
+    const distance = distanceToTargetBand(prediction.predictedNextRateBps, targetBand);
+
+    return {
+      prediction,
+      distance,
+      improvesConvergence:
+        predictionChanged(baselinePrediction, prediction) && distance < baselineDistance
+    };
+  }
+
+  let overshootBorrowAmount =
+    anchorDrawDebtStep.amount >= minimumAmount ? anchorDrawDebtStep.amount : minimumAmount;
+  let overshootBorrowEvaluation = evaluateBorrowOnly(overshootBorrowAmount);
+
+  if (overshootBorrowEvaluation.prediction.predictedNextRateBps <= targetBand.maxRateBps) {
+    let lowerBorrowAmount = overshootBorrowAmount;
+    let upperBorrowAmount = overshootBorrowAmount;
+    let upperBorrowEvaluation = overshootBorrowEvaluation;
+
+    while (upperBorrowEvaluation.prediction.predictedNextRateBps <= targetBand.maxRateBps) {
+      lowerBorrowAmount = upperBorrowAmount;
+      if (upperBorrowAmount === maxBorrowAmount) {
+        return undefined;
+      }
+
+      upperBorrowAmount = upperBorrowAmount * 2n;
+      if (upperBorrowAmount > maxBorrowAmount) {
+        upperBorrowAmount = maxBorrowAmount;
+      }
+      upperBorrowEvaluation = evaluateBorrowOnly(upperBorrowAmount);
+    }
+
+    while (upperBorrowAmount - lowerBorrowAmount > 1n) {
+      const middleBorrowAmount =
+        lowerBorrowAmount + (upperBorrowAmount - lowerBorrowAmount) / 2n;
+      const middleBorrowEvaluation = evaluateBorrowOnly(middleBorrowAmount);
+      if (middleBorrowEvaluation.prediction.predictedNextRateBps > targetBand.maxRateBps) {
+        upperBorrowAmount = middleBorrowAmount;
+        upperBorrowEvaluation = middleBorrowEvaluation;
+      } else {
+        lowerBorrowAmount = middleBorrowAmount;
+      }
+    }
+
+    overshootBorrowAmount = upperBorrowAmount;
+    overshootBorrowEvaluation = upperBorrowEvaluation;
+  }
+
+  if (overshootBorrowEvaluation.distance === 0) {
+    return undefined;
+  }
+
+  function dualCandidateCondition(evaluation: {
+    prediction: AjnaRatePrediction;
+    distance: number;
+    improvesConvergence: boolean;
+  }): boolean {
+    return (
+      evaluation.improvesConvergence &&
+      evaluation.distance < overshootBorrowEvaluation.distance &&
+      evaluation.prediction.predictedNextRateBps <= targetBand.maxRateBps
+    );
+  }
+
+  let lowerQuoteAmount = minimumAmount - 1n;
+  let upperQuoteAmount = minimumAmount;
+  let upperQuoteEvaluation = evaluateCombined(overshootBorrowAmount, upperQuoteAmount);
+
+  while (!dualCandidateCondition(upperQuoteEvaluation)) {
+    lowerQuoteAmount = upperQuoteAmount;
+    if (upperQuoteAmount === maxQuoteAmount) {
+      return undefined;
+    }
+
+    upperQuoteAmount = upperQuoteAmount * 2n;
+    if (upperQuoteAmount > maxQuoteAmount) {
+      upperQuoteAmount = maxQuoteAmount;
+    }
+    upperQuoteEvaluation = evaluateCombined(overshootBorrowAmount, upperQuoteAmount);
+  }
+
+  while (upperQuoteAmount - lowerQuoteAmount > 1n) {
+    const middleQuoteAmount =
+      lowerQuoteAmount + (upperQuoteAmount - lowerQuoteAmount) / 2n;
+    const middleQuoteEvaluation = evaluateCombined(overshootBorrowAmount, middleQuoteAmount);
+    if (dualCandidateCondition(middleQuoteEvaluation)) {
+      upperQuoteAmount = middleQuoteAmount;
+      upperQuoteEvaluation = middleQuoteEvaluation;
+    } else {
+      lowerQuoteAmount = middleQuoteAmount;
+    }
+  }
+
+  const expiry =
+    options.nowTimestamp + (config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS);
+  let bestCandidate: PlanCandidate | undefined;
+
+  for (const addQuoteBucketIndex of addQuoteBucketIndexes) {
+    const candidate: PlanCandidate = {
+      id: `auto-dual:${addQuoteBucketIndex}:${anchorDrawDebtStep.limitIndex}:${collateralAmount.toString()}:add-quote:${upperQuoteAmount.toString()}:draw-debt:${overshootBorrowAmount.toString()}`,
+      intent: "LEND_AND_BORROW",
+      minimumExecutionSteps: [
+        {
+          type: "ADD_QUOTE",
+          amount: upperQuoteAmount,
+          bucketIndex: addQuoteBucketIndex,
+          expiry,
+          note: "auto-synthesized add-quote threshold for dual-side steering"
+        },
+        {
+          type: "DRAW_DEBT",
+          amount: overshootBorrowAmount,
+          limitIndex: anchorDrawDebtStep.limitIndex,
+          collateralAmount,
+          note: "auto-synthesized draw-debt threshold for dual-side steering"
+        }
+      ],
+      predictedOutcome: upperQuoteEvaluation.prediction.predictedOutcome,
+      predictedRateBpsAfterNextUpdate: upperQuoteEvaluation.prediction.predictedNextRateBps,
+      resultingDistanceToTargetBps: upperQuoteEvaluation.distance,
+      quoteTokenDelta: upperQuoteAmount + overshootBorrowAmount,
+      explanation: `auto add-quote + draw-debt path tempers a borrow overshoot from ${overshootBorrowEvaluation.prediction.predictedOutcome} to ${upperQuoteEvaluation.prediction.predictedOutcome}`
+    };
+
+    if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
+      bestCandidate = candidate;
     }
   }
 
@@ -1436,6 +1806,504 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
   );
 }
 
+async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
+  readState: AjnaPoolStateRead,
+  config: KeeperConfig,
+  options: {
+    poolAddress: HexAddress;
+    rpcUrl: string;
+    baselinePrediction?: AjnaRatePrediction;
+    anchorBorrowCandidate?: PlanCandidate;
+    singleActionCandidates?: PlanCandidate[];
+  }
+): Promise<PlanCandidate | undefined> {
+  const addQuoteBucketIndexes = resolveAddQuoteBucketIndexes(config);
+  if (addQuoteBucketIndexes.length === 0) {
+    return undefined;
+  }
+
+  const targetBand = buildTargetBand(config);
+  const currentRateBps = toRateBps(readState.rateState.currentRateWad);
+  if (currentRateBps >= targetBand.minRateBps) {
+    return undefined;
+  }
+
+  const baselinePrediction = options.baselinePrediction ?? readState.prediction;
+  const simulationSenderAddress = resolveSimulationSenderAddress(config);
+  const borrowerAddress = resolveSimulationBorrowerAddress(config, simulationSenderAddress);
+  const heuristicDualCandidate = synthesizeAjnaLendAndBorrowCandidate(
+    readState.rateState,
+    config,
+    {
+      quoteTokenScale: readState.quoteTokenScale,
+      nowTimestamp: readState.rateState.nowTimestamp,
+      baselinePrediction,
+      ...(options.anchorBorrowCandidate === undefined
+        ? {}
+        : { anchorBorrowCandidate: options.anchorBorrowCandidate })
+    }
+  );
+  const heuristicAnchorBorrowCandidate =
+    options.anchorBorrowCandidate ??
+    synthesizeAjnaBorrowCandidate(readState.rateState, config, {
+      baselinePrediction
+    });
+  const singleActionAddQuoteSteps = (options.singleActionCandidates ?? [])
+    .map((candidate) => extractAddQuoteStep(candidate))
+    .filter((step): step is AddQuoteStep => step !== undefined);
+  const singleActionDrawDebtSteps = (options.singleActionCandidates ?? [])
+    .map((candidate) => extractDrawDebtStep(candidate))
+    .filter((step): step is DrawDebtStep => step !== undefined);
+  const anchorDrawDebtStep = extractDrawDebtStep(heuristicAnchorBorrowCandidate);
+  const anchorDualDrawDebtStep = extractDrawDebtStep(heuristicDualCandidate);
+  const anchorDualAddQuoteStep = extractAddQuoteStep(heuristicDualCandidate);
+  const lookaheadUpdates =
+    heuristicAnchorBorrowCandidate?.planningLookaheadUpdates ??
+    resolveBorrowSimulationLookaheadUpdates(config);
+  const minimumAmount =
+    config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
+  const maxBorrowAmount = config.maxBorrowExposure;
+  if (minimumAmount > maxBorrowAmount) {
+    return undefined;
+  }
+
+  return withTemporaryAnvilFork(
+    {
+      rpcUrl: options.rpcUrl,
+      chainId: config.chainId,
+      blockNumber: readState.blockNumber
+    },
+    async ({ publicClient, testClient, walletClient }) => {
+      await testClient.impersonateAccount({
+        address: simulationSenderAddress
+      });
+      await testClient.setBalance({
+        address: simulationSenderAddress,
+        value: 10n ** 24n
+      });
+
+      try {
+        const [
+          quoteTokenBalance,
+          quoteTokenAllowance,
+          collateralBalance,
+          collateralAllowance
+        ] = await Promise.all([
+          publicClient.readContract({
+            address: readState.quoteTokenAddress,
+            abi: erc20Abi,
+            functionName: "balanceOf",
+            args: [simulationSenderAddress]
+          }),
+          publicClient.readContract({
+            address: readState.quoteTokenAddress,
+            abi: erc20Abi,
+            functionName: "allowance",
+            args: [simulationSenderAddress, options.poolAddress]
+          }),
+          publicClient.readContract({
+            address: readState.collateralAddress,
+            abi: erc20Abi,
+            functionName: "balanceOf",
+            args: [simulationSenderAddress]
+          }),
+          publicClient.readContract({
+            address: readState.collateralAddress,
+            abi: erc20Abi,
+            functionName: "allowance",
+            args: [simulationSenderAddress, options.poolAddress]
+          })
+        ]);
+
+        const maxAvailableQuote = smallestBigInt(
+          config.maxQuoteTokenExposure,
+          quoteTokenBalance,
+          quoteTokenAllowance
+        );
+        if (minimumAmount > maxAvailableQuote) {
+          return undefined;
+        }
+        const maxAvailableCollateral = smallestBigInt(collateralBalance, collateralAllowance);
+        const candidateCollateralAmounts = resolveDrawDebtCollateralAmounts(config).filter(
+          (collateralAmount) => collateralAmount <= maxAvailableCollateral
+        );
+        if (candidateCollateralAmounts.length === 0) {
+          return undefined;
+        }
+
+        async function simulatePath(
+          actions:
+            | {
+                addQuoteAmount?: bigint;
+                addQuoteBucketIndex?: number;
+                drawDebtAmount?: bigint;
+                limitIndex?: number;
+                collateralAmount?: bigint;
+                expiry?: number;
+              }
+            | null
+        ): Promise<{
+          firstRateWadAfterNextUpdate: bigint;
+          firstRateBpsAfterNextUpdate: number;
+          firstOutcome: RateMoveOutcome;
+          terminalRateBps: number;
+          terminalDistanceToTargetBps: number;
+        }> {
+          const snapshotId = await testClient.snapshot();
+
+          try {
+            if (actions?.addQuoteAmount !== undefined && actions.addQuoteAmount > 0n) {
+              if (actions.addQuoteBucketIndex === undefined) {
+                throw new Error("dual-side simulation requires an addQuote bucket index");
+              }
+              const addQuoteHash = await walletClient.writeContract({
+                account: simulationSenderAddress,
+                chain: undefined,
+                address: options.poolAddress,
+                abi: ajnaPoolAbi,
+                functionName: "addQuoteToken",
+                args: [
+                  actions.addQuoteAmount,
+                  BigInt(actions.addQuoteBucketIndex),
+                  BigInt(actions.expiry ?? readState.rateState.nowTimestamp)
+                ]
+              });
+              const addQuoteReceipt = await publicClient.waitForTransactionReceipt({
+                hash: addQuoteHash
+              });
+              if (addQuoteReceipt.status !== "success") {
+                throw new Error("addQuoteToken simulation reverted");
+              }
+            }
+
+            if (actions?.drawDebtAmount !== undefined && actions.drawDebtAmount > 0n) {
+              if (actions.limitIndex === undefined) {
+                throw new Error("dual-side simulation requires a drawDebt limit index");
+              }
+              const drawDebtHash = await walletClient.writeContract({
+                account: simulationSenderAddress,
+                chain: undefined,
+                address: options.poolAddress,
+                abi: ajnaPoolAbi,
+                functionName: "drawDebt",
+                args: [
+                  borrowerAddress,
+                  actions.drawDebtAmount,
+                  BigInt(actions.limitIndex),
+                  actions.collateralAmount ?? 0n
+                ]
+              });
+              const drawDebtReceipt = await publicClient.waitForTransactionReceipt({
+                hash: drawDebtHash
+              });
+              if (drawDebtReceipt.status !== "success") {
+                throw new Error("drawDebt simulation reverted");
+              }
+            }
+
+            let firstRateWadAfterNextUpdate = readState.rateState.currentRateWad;
+            let firstOutcome: RateMoveOutcome = "NO_CHANGE";
+            let terminalRateWad = readState.rateState.currentRateWad;
+
+            for (let updateIndex = 0; updateIndex < lookaheadUpdates; updateIndex += 1) {
+              let simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              if (simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate > 0) {
+                await testClient.increaseTime({
+                  seconds: simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate
+                });
+                await testClient.mine({
+                  blocks: 1
+                });
+                simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              }
+
+              const updateHash = await walletClient.writeContract({
+                account: simulationSenderAddress,
+                chain: undefined,
+                address: options.poolAddress,
+                abi: ajnaPoolAbi,
+                functionName: "updateInterest",
+                args: []
+              });
+              const updateReceipt = await publicClient.waitForTransactionReceipt({
+                hash: updateHash
+              });
+              if (updateReceipt.status !== "success") {
+                throw new Error("updateInterest simulation reverted");
+              }
+
+              const postUpdateReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              terminalRateWad = postUpdateReadState.rateState.currentRateWad;
+
+              if (updateIndex === 0) {
+                firstRateWadAfterNextUpdate = terminalRateWad;
+                firstOutcome = deriveRateMoveOutcome(
+                  readState.rateState.currentRateWad,
+                  terminalRateWad
+                );
+              }
+            }
+
+            const firstRateBpsAfterNextUpdate = toRateBps(firstRateWadAfterNextUpdate);
+            const terminalRateBps = toRateBps(terminalRateWad);
+
+            return {
+              firstRateWadAfterNextUpdate,
+              firstRateBpsAfterNextUpdate,
+              firstOutcome,
+              terminalRateBps,
+              terminalDistanceToTargetBps: distanceToTargetBand(terminalRateBps, targetBand)
+            };
+          } finally {
+            await testClient.revert({ id: snapshotId });
+          }
+        }
+
+        const baselinePath = await simulatePath(null);
+        const baselineNextDistance = distanceToTargetBand(
+          baselinePath.firstRateBpsAfterNextUpdate,
+          targetBand
+        );
+        const singleActionCandidates = options.singleActionCandidates ?? [];
+        const bestSingleActionNextDistance = singleActionCandidates.reduce(
+          (bestDistance, candidate) =>
+            Math.min(
+              bestDistance,
+              distanceToTargetBand(candidate.predictedRateBpsAfterNextUpdate, targetBand)
+            ),
+          Number.POSITIVE_INFINITY
+        );
+        const bestSingleActionTerminalDistance = singleActionCandidates.reduce(
+          (bestDistance, candidate) => Math.min(bestDistance, candidate.resultingDistanceToTargetBps),
+          Number.POSITIVE_INFINITY
+        );
+        const comparisonNextDistance = Math.min(
+          baselineNextDistance,
+          bestSingleActionNextDistance
+        );
+        const comparisonTerminalDistance = Math.min(
+          baselinePath.terminalDistanceToTargetBps,
+          bestSingleActionTerminalDistance
+        );
+        const expiry =
+          readState.rateState.nowTimestamp +
+          (config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS);
+
+        let bestCandidate: PlanCandidate | undefined;
+
+        for (const addQuoteBucketIndex of addQuoteBucketIndexes) {
+          for (const limitIndex of resolveDrawDebtLimitIndexes(config)) {
+            for (const collateralAmount of candidateCollateralAmounts) {
+              const borrowSeedAmounts = buildAnchoredSearchAmounts(
+              minimumAmount,
+              maxBorrowAmount,
+              [
+                anchorDualDrawDebtStep &&
+                anchorDualDrawDebtStep.limitIndex === limitIndex &&
+                (anchorDualDrawDebtStep.collateralAmount ?? 0n) === collateralAmount
+                  ? anchorDualDrawDebtStep.amount
+                  : undefined,
+                anchorDrawDebtStep &&
+                anchorDrawDebtStep.limitIndex === limitIndex &&
+                (anchorDrawDebtStep.collateralAmount ?? 0n) === collateralAmount
+                  ? anchorDrawDebtStep.amount
+                  : undefined,
+                  ...singleActionDrawDebtSteps
+                    .filter(
+                      (step) =>
+                        step.limitIndex === limitIndex &&
+                        (step.collateralAmount ?? 0n) === collateralAmount
+                    )
+                    .map((step) => step.amount)
+              ],
+              {
+                includeBroadSearch: false
+              }
+            );
+              for (const drawDebtAmount of borrowSeedAmounts) {
+                const quoteSeedAmounts = buildAnchoredSearchAmounts(
+                minimumAmount,
+                maxAvailableQuote,
+                [
+                    anchorDualAddQuoteStep?.bucketIndex === addQuoteBucketIndex
+                      ? anchorDualAddQuoteStep.amount
+                      : undefined,
+                    ...singleActionAddQuoteSteps
+                      .filter((step) => step.bucketIndex === addQuoteBucketIndex)
+                      .map((step) => step.amount),
+                  drawDebtAmount
+                ],
+                {
+                  includeBroadSearch: false
+                }
+              );
+
+                const evaluateQuoteAmount = async (
+                quoteAmount: bigint
+              ): Promise<{
+                candidatePath?: {
+                  firstRateWadAfterNextUpdate: bigint;
+                  firstRateBpsAfterNextUpdate: number;
+                  firstOutcome: RateMoveOutcome;
+                  terminalRateBps: number;
+                  terminalDistanceToTargetBps: number;
+                };
+                improvesConvergence: boolean;
+              }> => {
+                  try {
+                    const candidatePath = await simulatePath({
+                      addQuoteAmount: quoteAmount,
+                      addQuoteBucketIndex,
+                      drawDebtAmount,
+                      limitIndex,
+                      collateralAmount,
+                      expiry
+                    });
+                  const nextDistance = distanceToTargetBand(
+                    candidatePath.firstRateBpsAfterNextUpdate,
+                    targetBand
+                  );
+                  const candidatePrediction: AjnaRatePrediction = {
+                    predictedOutcome: candidatePath.firstOutcome,
+                    predictedNextRateWad: candidatePath.firstRateWadAfterNextUpdate,
+                    predictedNextRateBps: candidatePath.firstRateBpsAfterNextUpdate,
+                    secondsUntilNextRateUpdate: 0
+                  };
+
+                    return {
+                      candidatePath,
+                      improvesConvergence:
+                        ((nextDistance < comparisonNextDistance &&
+                          candidatePath.terminalDistanceToTargetBps <=
+                            comparisonTerminalDistance) ||
+                          (candidatePath.terminalDistanceToTargetBps <
+                            comparisonTerminalDistance &&
+                            nextDistance <= comparisonNextDistance)) &&
+                        (lookaheadUpdates > 1 ||
+                          nextDistance < comparisonNextDistance ||
+                          predictionChanged(baselinePrediction, candidatePrediction))
+                    };
+                  } catch {
+                    return {
+                      improvesConvergence: false
+                    };
+                  }
+                };
+
+              let lowerQuoteAmount = minimumAmount - 1n;
+              let upperQuoteAmount: bigint | undefined;
+              let upperQuoteEvaluation:
+                | {
+                    candidatePath?: {
+                      firstRateWadAfterNextUpdate: bigint;
+                      firstRateBpsAfterNextUpdate: number;
+                      firstOutcome: RateMoveOutcome;
+                      terminalRateBps: number;
+                      terminalDistanceToTargetBps: number;
+                    };
+                    improvesConvergence: boolean;
+                  }
+                | undefined;
+
+              let previousSeedAmount = minimumAmount - 1n;
+              for (const seedQuoteAmount of quoteSeedAmounts) {
+                const seedEvaluation = await evaluateQuoteAmount(seedQuoteAmount);
+                if (seedEvaluation.improvesConvergence) {
+                  lowerQuoteAmount = previousSeedAmount;
+                  upperQuoteAmount = seedQuoteAmount;
+                  upperQuoteEvaluation = seedEvaluation;
+                  break;
+                }
+
+                previousSeedAmount = seedQuoteAmount;
+              }
+
+              if (upperQuoteAmount === undefined || !upperQuoteEvaluation?.improvesConvergence) {
+                continue;
+              }
+
+              while (true) {
+                const currentUpperQuoteAmount: bigint | undefined = upperQuoteAmount;
+                if (currentUpperQuoteAmount === undefined) {
+                  break;
+                }
+                if (currentUpperQuoteAmount - lowerQuoteAmount <= 1n) {
+                  break;
+                }
+
+                const middleQuoteAmount: bigint =
+                  lowerQuoteAmount + (currentUpperQuoteAmount - lowerQuoteAmount) / 2n;
+                const middleQuoteEvaluation = await evaluateQuoteAmount(middleQuoteAmount);
+                if (middleQuoteEvaluation.improvesConvergence) {
+                  upperQuoteAmount = middleQuoteAmount;
+                  upperQuoteEvaluation = middleQuoteEvaluation;
+                } else {
+                  lowerQuoteAmount = middleQuoteAmount;
+                }
+              }
+
+              if (
+                upperQuoteAmount === undefined ||
+                !upperQuoteEvaluation?.candidatePath
+              ) {
+                continue;
+              }
+              const finalQuoteAmount = upperQuoteAmount;
+
+              const candidate: PlanCandidate = {
+                id: `sim-dual:${addQuoteBucketIndex}:${limitIndex}:${collateralAmount.toString()}:add-quote:${finalQuoteAmount.toString()}:draw-debt:${drawDebtAmount.toString()}`,
+                intent: "LEND_AND_BORROW",
+                minimumExecutionSteps: [
+                  {
+                    type: "ADD_QUOTE",
+                    amount: finalQuoteAmount,
+                    bucketIndex: addQuoteBucketIndex,
+                    expiry,
+                    note: "simulation-backed add-quote threshold for dual-side steering"
+                  },
+                  {
+                    type: "DRAW_DEBT",
+                    amount: drawDebtAmount,
+                    limitIndex,
+                    collateralAmount,
+                    note: "simulation-backed draw-debt threshold for dual-side steering"
+                  }
+                ],
+                predictedOutcome: upperQuoteEvaluation.candidatePath.firstOutcome,
+                predictedRateBpsAfterNextUpdate:
+                  upperQuoteEvaluation.candidatePath.firstRateBpsAfterNextUpdate,
+                resultingDistanceToTargetBps:
+                  upperQuoteEvaluation.candidatePath.terminalDistanceToTargetBps,
+                quoteTokenDelta: finalQuoteAmount + drawDebtAmount,
+                explanation:
+                  lookaheadUpdates > 1
+                    ? `simulation-backed add-quote + draw-debt path improves the ${lookaheadUpdates}-update path beyond the best single-action path`
+                    : `simulation-backed add-quote + draw-debt path improves the next eligible move beyond the best single-action path`
+              };
+
+              if (lookaheadUpdates > 1) {
+                candidate.planningRateBps = upperQuoteEvaluation.candidatePath.terminalRateBps;
+                candidate.planningLookaheadUpdates = lookaheadUpdates;
+              }
+
+              if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
+                bestCandidate = candidate;
+              }
+            }
+          }
+        }
+        }
+
+        return bestCandidate;
+      } finally {
+        await testClient.stopImpersonatingAccount({
+          address: simulationSenderAddress
+        });
+      }
+    }
+  );
+}
+
 export interface AjnaSnapshotSourceDependencies {
   publicClient?: PublicClient;
   now?: () => number;
@@ -1504,9 +2372,11 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
       if (!this.simulationCandidateCache.has(snapshotFingerprint)) {
         const synthesizedCandidates: PlanCandidate[] = [];
         const rpcUrl = assertLiveReadConfig(this.config).rpcUrl;
+        let lendCandidate: PlanCandidate | undefined;
+        let borrowCandidate: PlanCandidate | undefined;
 
         if (this.config.enableSimulationBackedLendSynthesis) {
-          const lendCandidate = await synthesizeAjnaLendCandidateViaSimulation(
+          lendCandidate = await synthesizeAjnaLendCandidateViaSimulation(
             readState,
             this.config,
             {
@@ -1530,12 +2400,34 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
               baselinePrediction: readState.prediction
             }
           );
-          if (borrowResult?.candidate) {
-            synthesizedCandidates.push(borrowResult.candidate);
+          borrowCandidate = borrowResult?.candidate;
+          if (borrowCandidate) {
+            synthesizedCandidates.push(borrowCandidate);
           }
           if (borrowResult?.baselinePlanningRateBps !== undefined) {
             planningRateBps = borrowResult.baselinePlanningRateBps;
             planningLookaheadUpdates = borrowResult.planningLookaheadUpdates;
+          }
+
+          if (this.config.enableSimulationBackedLendSynthesis) {
+            const dualCandidate = await synthesizeAjnaLendAndBorrowCandidateViaSimulation(
+              readState,
+              this.config,
+              {
+                poolAddress: this.poolAddress,
+                rpcUrl,
+                baselinePrediction: readState.prediction,
+                ...(borrowCandidate === undefined
+                  ? {}
+                  : { anchorBorrowCandidate: borrowCandidate }),
+                singleActionCandidates: [lendCandidate, borrowCandidate].filter(
+                  (candidate): candidate is PlanCandidate => candidate !== undefined
+                )
+              }
+            );
+            if (dualCandidate) {
+              synthesizedCandidates.push(dualCandidate);
+            }
           }
         }
 
@@ -1557,6 +2449,20 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
       });
       if (lendCandidate) {
         autoCandidates.push(lendCandidate);
+        autoCandidateSource = "heuristic";
+      }
+
+      const dualCandidate = synthesizeAjnaLendAndBorrowCandidate(
+        readState.rateState,
+        this.config,
+        {
+          quoteTokenScale: readState.quoteTokenScale,
+          nowTimestamp: readState.rateState.nowTimestamp,
+          baselinePrediction: readState.prediction
+        }
+      );
+      if (dualCandidate) {
+        autoCandidates.push(dualCandidate);
         autoCandidateSource = "heuristic";
       }
     }

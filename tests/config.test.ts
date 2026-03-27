@@ -12,6 +12,7 @@ describe("resolveKeeperConfig", () => {
       poolAddress: "0x1111111111111111111111111111111111111111",
       rpcUrl: "https://base.example.invalid",
       addQuoteBucketIndex: 3000,
+      addQuoteBucketIndexes: [2800, 3000, 3200],
       addQuoteExpirySeconds: 7200,
       enableSimulationBackedLendSynthesis: true,
       enableSimulationBackedBorrowSynthesis: true,
@@ -32,6 +33,7 @@ describe("resolveKeeperConfig", () => {
     expect(config.poolAddress).toBe("0x1111111111111111111111111111111111111111");
     expect(config.rpcUrl).toBe("https://base.example.invalid");
     expect(config.addQuoteBucketIndex).toBe(3000);
+    expect(config.addQuoteBucketIndexes).toEqual([2800, 3000, 3200]);
     expect(config.addQuoteExpirySeconds).toBe(7200);
     expect(config.enableSimulationBackedLendSynthesis).toBe(true);
     expect(config.enableSimulationBackedBorrowSynthesis).toBe(true);

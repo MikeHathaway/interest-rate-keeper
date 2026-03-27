@@ -21,12 +21,16 @@ import { base } from "viem/chains";
 import {
   ajnaErc20PoolFactoryAbi,
   ajnaPoolAbi,
+  forecastAjnaNextEligibleRate,
   BASE_AJNA_DEPLOYMENT,
   AjnaRpcSnapshotSource,
   createAjnaExecutionBackend,
   DryRunExecutionBackend,
+  planCycle,
   resolveKeeperConfig,
   runCycle,
+  synthesizeAjnaLendAndBorrowCandidate,
+  type AjnaRateState,
   type KeeperConfig
 } from "../../src/index.js";
 
@@ -50,6 +54,12 @@ const STEERING_SCENARIOS = [
   { initialQuoteAmount: 1_000n, borrowAmount: 950n, collateralAmount: 1_500n },
   { initialQuoteAmount: 1_000n, borrowAmount: 990n, collateralAmount: 2_000n }
 ] as const;
+const REPRESENTATIVE_DUAL_TARGET_OFFSETS_BPS = [50, 100] as const;
+const REPRESENTATIVE_DUAL_TOLERANCES_BPS = [25] as const;
+const REPRESENTATIVE_DUAL_LOOKAHEAD_UPDATES = [1, 3] as const;
+const REPRESENTATIVE_DUAL_COLLATERAL_AMOUNTS = [10n * 10n ** 18n] as const;
+const MAX_EXACT_DUAL_VALIDATIONS_WITH_PURE_MATCH = 4;
+const MAX_EXACT_DUAL_VALIDATIONS_WITHOUT_PURE_MATCH = 2;
 
 function repoRoot(): string {
   return dirname(dirname(dirname(fileURLToPath(import.meta.url))));
@@ -86,23 +96,34 @@ async function ensureMockArtifact(): Promise<{
   abi: unknown[];
   bytecode: `0x${string}`;
 }> {
-  await execFile("forge", ["build"], {
-    cwd: repoRoot()
-  });
+  mockArtifactPromise ??= (async () => {
+    await execFile("forge", ["build"], {
+      cwd: repoRoot()
+    });
 
-  const artifact = JSON.parse(await readFile(artifactPath(), "utf8")) as {
-    abi: unknown[];
-    bytecode: { object: string };
-  };
-  const object = artifact.bytecode.object.startsWith("0x")
-    ? artifact.bytecode.object
-    : `0x${artifact.bytecode.object}`;
+    const artifact = JSON.parse(await readFile(artifactPath(), "utf8")) as {
+      abi: unknown[];
+      bytecode: { object: string };
+    };
+    const object = artifact.bytecode.object.startsWith("0x")
+      ? artifact.bytecode.object
+      : `0x${artifact.bytecode.object}`;
 
-  return {
-    abi: artifact.abi,
-    bytecode: object as `0x${string}`
-  };
+    return {
+      abi: artifact.abi,
+      bytecode: object as `0x${string}`
+    };
+  })();
+
+  return mockArtifactPromise;
 }
+
+let mockArtifactPromise:
+  | Promise<{
+      abi: unknown[];
+      bytecode: `0x${string}`;
+    }>
+  | undefined;
 
 async function deployMockToken(
   walletClient: any,
@@ -237,10 +258,515 @@ async function readCurrentRateBps(
   return Number((updatedRate * 10_000n) / 1_000_000_000_000_000_000n);
 }
 
+async function createQuoteOnlyBorrowFixture(
+  account: { address: `0x${string}` },
+  publicClient: any,
+  walletClient: any,
+  artifact: { abi: unknown[]; bytecode: `0x${string}` }
+): Promise<`0x${string}`> {
+  const collateralToken = await deployMockToken(
+    walletClient,
+    publicClient,
+    artifact,
+    "Borrow Lookahead Collateral",
+    "BLC"
+  );
+  const quoteToken = await deployMockToken(
+    walletClient,
+    publicClient,
+    artifact,
+    "Borrow Lookahead Quote",
+    "BLQ"
+  );
+
+  for (const tokenAddress of [collateralToken, quoteToken]) {
+    await mintToken(
+      walletClient,
+      publicClient,
+      artifact,
+      tokenAddress,
+      account.address,
+      1_000_000n * 10n ** 18n
+    );
+  }
+
+  const poolAddress = await deployPoolThroughFactory(
+    walletClient,
+    publicClient,
+    collateralToken,
+    quoteToken
+  );
+
+  await approveToken(
+    walletClient,
+    publicClient,
+    quoteToken,
+    poolAddress,
+    1_000_000n * 10n ** 18n,
+    artifact.abi
+  );
+  await approveToken(
+    walletClient,
+    publicClient,
+    collateralToken,
+    poolAddress,
+    1_000_000n * 10n ** 18n,
+    artifact.abi
+  );
+
+  const latestBlock = await publicClient.getBlock();
+  const addQuoteHash = await walletClient.writeContract({
+    account,
+    chain: undefined,
+    address: poolAddress,
+    abi: ajnaPoolAbi,
+    functionName: "addQuoteToken",
+    args: [1_000n * 10n ** 18n, 3_000n, latestBlock.timestamp + 3600n]
+  });
+  await publicClient.waitForTransactionReceipt({ hash: addQuoteHash });
+
+  return poolAddress;
+}
+
+async function moveToFirstBorrowLookaheadState(
+  account: { address: `0x${string}` },
+  publicClient: any,
+  walletClient: any,
+  testClient: any,
+  poolAddress: `0x${string}`
+): Promise<number> {
+  await testClient.increaseTime({
+    seconds: FORK_TIME_SKIP_SECONDS
+  });
+  await testClient.mine({
+    blocks: 1
+  });
+
+  const updateHash = await walletClient.writeContract({
+    account,
+    chain: undefined,
+    address: poolAddress,
+    abi: ajnaPoolAbi,
+    functionName: "updateInterest"
+  });
+  await publicClient.waitForTransactionReceipt({ hash: updateHash });
+
+  await testClient.increaseTime({
+    seconds: FORK_TIME_SKIP_SECONDS
+  });
+  await testClient.mine({
+    blocks: 1
+  });
+
+  return Number((await publicClient.getBlock()).timestamp);
+}
+
+async function findRepresentativeBorrowedStepUpState(
+  account: { address: `0x${string}` },
+  publicClient: any,
+  walletClient: any,
+  testClient: any,
+  artifact: { abi: unknown[]; bytecode: `0x${string}` }
+): Promise<
+  | {
+      poolAddress: `0x${string}`;
+      chainNow: number;
+      baselineSnapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+    }
+  | undefined
+> {
+  for (const [index, scenario] of STEERING_SCENARIOS.entries()) {
+    const collateralToken = await deployMockToken(
+      walletClient,
+      publicClient,
+      artifact,
+      `Dual Steering Collateral ${index}`,
+      `DSC${index}`
+    );
+    const quoteToken = await deployMockToken(
+      walletClient,
+      publicClient,
+      artifact,
+      `Dual Steering Quote ${index}`,
+      `DSQ${index}`
+    );
+
+    for (const tokenAddress of [collateralToken, quoteToken]) {
+      await mintToken(
+        walletClient,
+        publicClient,
+        artifact,
+        tokenAddress,
+        account.address,
+        1_000_000n * 10n ** 18n
+      );
+    }
+
+    const poolAddress = await deployPoolThroughFactory(
+      walletClient,
+      publicClient,
+      collateralToken,
+      quoteToken
+    );
+
+    await approveToken(
+      walletClient,
+      publicClient,
+      quoteToken,
+      poolAddress,
+      1_000_000n * 10n ** 18n,
+      artifact.abi
+    );
+    await approveToken(
+      walletClient,
+      publicClient,
+      collateralToken,
+      poolAddress,
+      5_000n * 10n ** 18n,
+      artifact.abi
+    );
+
+    const latestBlock = await publicClient.getBlock();
+    const initialQuoteAmount = scenario.initialQuoteAmount * 10n ** 18n;
+    const borrowAmount = scenario.borrowAmount * 10n ** 18n;
+    const collateralAmount = scenario.collateralAmount * 10n ** 18n;
+
+    try {
+      const addQuoteHash = await walletClient.writeContract({
+        account,
+        chain: undefined,
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "addQuoteToken",
+        args: [initialQuoteAmount, 3_000n, latestBlock.timestamp + 3600n]
+      });
+      await publicClient.waitForTransactionReceipt({ hash: addQuoteHash });
+
+      const drawDebtHash = await walletClient.writeContract({
+        account,
+        chain: undefined,
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "drawDebt",
+        args: [account.address, borrowAmount, 3_000n, collateralAmount]
+      });
+      await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
+    } catch {
+      continue;
+    }
+
+    await testClient.increaseTime({
+      seconds: FORK_TIME_SKIP_SECONDS
+    });
+    await testClient.mine({
+      blocks: 1
+    });
+
+    let chainNow = Number((await publicClient.getBlock()).timestamp);
+    const baselineConfig = resolveKeeperConfig({
+      chainId: 8453,
+      poolAddress,
+      poolId: `8453:${poolAddress.toLowerCase()}`,
+      rpcUrl: LOCAL_RPC_URL,
+      targetRateBps: 800,
+      toleranceBps: 50,
+      toleranceMode: "relative",
+      completionPolicy: "next_move_would_overshoot",
+      executionBufferBps: 0,
+      maxQuoteTokenExposure: "1000000000000000000000000",
+      maxBorrowExposure: "5000000000000000000000",
+      snapshotAgeMaxSeconds: 3600,
+      minTimeBeforeRateWindowSeconds: 120,
+      minExecutableActionQuoteToken: "1",
+      recheckBeforeSubmit: true
+    });
+
+    let snapshot = await new AjnaRpcSnapshotSource(baselineConfig, {
+      publicClient,
+      now: () => chainNow
+    }).getSnapshot();
+
+    if (snapshot.predictedNextOutcome === "STEP_DOWN") {
+      const updateHash = await walletClient.writeContract({
+        account,
+        chain: undefined,
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "updateInterest"
+      });
+      await publicClient.waitForTransactionReceipt({ hash: updateHash });
+
+      await testClient.increaseTime({
+        seconds: FORK_TIME_SKIP_SECONDS
+      });
+      await testClient.mine({
+        blocks: 1
+      });
+
+      chainNow = Number((await publicClient.getBlock()).timestamp);
+      snapshot = await new AjnaRpcSnapshotSource(baselineConfig, {
+        publicClient,
+        now: () => chainNow
+      }).getSnapshot();
+    }
+
+    if (snapshot.currentRateBps > baselineConfig.targetRateBps && snapshot.predictedNextOutcome === "STEP_UP") {
+      return {
+        poolAddress,
+        chainNow,
+        baselineSnapshot: snapshot
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function requireSnapshotMetadataValue(
+  snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>,
+  key: string
+): string | number {
+  const value = snapshot.metadata?.[key];
+  if (typeof value !== "string" && typeof value !== "number") {
+    throw new Error(`snapshot metadata is missing ${key}`);
+  }
+
+  return value;
+}
+
+function extractAjnaRateState(
+  snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>,
+  chainNow: number
+): AjnaRateState {
+  return {
+    currentRateWad: BigInt(String(requireSnapshotMetadataValue(snapshot, "currentRateWad"))),
+    currentDebtWad: BigInt(String(requireSnapshotMetadataValue(snapshot, "currentDebtWad"))),
+    debtEmaWad: BigInt(String(requireSnapshotMetadataValue(snapshot, "debtEmaWad"))),
+    depositEmaWad: BigInt(String(requireSnapshotMetadataValue(snapshot, "depositEmaWad"))),
+    debtColEmaWad: BigInt(String(requireSnapshotMetadataValue(snapshot, "debtColEmaWad"))),
+    lupt0DebtEmaWad: BigInt(String(requireSnapshotMetadataValue(snapshot, "lupt0DebtEmaWad"))),
+    lastInterestRateUpdateTimestamp: Number(requireSnapshotMetadataValue(snapshot, "lastInterestRateUpdateTimestamp")),
+    nowTimestamp: chainNow
+  };
+}
+
+function extractQuoteTokenScale(
+  snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>
+): bigint {
+  return BigInt(String(requireSnapshotMetadataValue(snapshot, "quoteTokenScale")));
+}
+
+async function findExactDualCandidateFromSnapshot(
+  publicClient: any,
+  account: { address: `0x${string}` },
+  poolAddress: `0x${string}`,
+  chainNow: number,
+  baselineSnapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>
+): Promise<{
+  attemptedConfigCount: number;
+  match?: {
+    config: KeeperConfig;
+    baselineSnapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+    exactSnapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+    dualCandidate: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>["candidates"][number];
+  };
+}> {
+  const rateState = extractAjnaRateState(baselineSnapshot, chainNow);
+  const quoteTokenScale = extractQuoteTokenScale(baselineSnapshot);
+  const baselinePrediction = forecastAjnaNextEligibleRate(rateState);
+  const targetRateCandidates = Array.from(
+    new Set(
+      REPRESENTATIVE_DUAL_TARGET_OFFSETS_BPS
+        .map((offsetBps) => baselineSnapshot.currentRateBps + offsetBps)
+        .filter((targetRateBps) => targetRateBps > baselineSnapshot.currentRateBps)
+    )
+  );
+  const candidateConfigs = targetRateCandidates
+    .flatMap((targetRateBps) =>
+      REPRESENTATIVE_DUAL_TOLERANCES_BPS.flatMap((toleranceBps) =>
+        REPRESENTATIVE_DUAL_LOOKAHEAD_UPDATES.flatMap((lookahead) =>
+          REPRESENTATIVE_DUAL_COLLATERAL_AMOUNTS.map((collateralAmount) => ({
+            config: resolveKeeperConfig({
+              chainId: 8453,
+              poolAddress,
+              poolId: `8453:${poolAddress.toLowerCase()}`,
+              rpcUrl: LOCAL_RPC_URL,
+              targetRateBps,
+              toleranceBps,
+              toleranceMode: "absolute",
+              completionPolicy: "next_move_would_overshoot",
+              executionBufferBps: 0,
+              maxQuoteTokenExposure: "1000000000000000000000000",
+              maxBorrowExposure: "1000000000000000000000",
+              snapshotAgeMaxSeconds: 3600,
+              minTimeBeforeRateWindowSeconds: 120,
+              minExecutableActionQuoteToken: "1",
+              recheckBeforeSubmit: true,
+              borrowerAddress: account.address,
+              simulationSenderAddress: account.address,
+              enableSimulationBackedLendSynthesis: true,
+              enableSimulationBackedBorrowSynthesis: true,
+              addQuoteBucketIndex: 3000,
+              addQuoteBucketIndexes: [...STEERING_BUCKET_CANDIDATES],
+              addQuoteExpirySeconds: 3600,
+              drawDebtLimitIndexes: [3000],
+              drawDebtCollateralAmounts: [collateralAmount],
+              borrowSimulationLookaheadUpdates: lookahead
+            })
+          }))
+        )
+      )
+    );
+  const rankedConfigs = candidateConfigs
+    .map(({ config }) => ({
+      config,
+      pureCandidate: synthesizeAjnaLendAndBorrowCandidate(rateState, config, {
+        quoteTokenScale,
+        nowTimestamp: chainNow,
+        baselinePrediction
+      })
+    }))
+    .sort((left, right) => {
+      if (left.pureCandidate && right.pureCandidate) {
+        if (
+          left.pureCandidate.resultingDistanceToTargetBps !==
+          right.pureCandidate.resultingDistanceToTargetBps
+        ) {
+          return (
+            left.pureCandidate.resultingDistanceToTargetBps -
+            right.pureCandidate.resultingDistanceToTargetBps
+          );
+        }
+
+        if (left.pureCandidate.quoteTokenDelta !== right.pureCandidate.quoteTokenDelta) {
+          return left.pureCandidate.quoteTokenDelta < right.pureCandidate.quoteTokenDelta ? -1 : 1;
+        }
+      }
+
+      if (left.pureCandidate) {
+        return -1;
+      }
+
+      if (right.pureCandidate) {
+        return 1;
+      }
+
+      return left.config.targetRateBps - right.config.targetRateBps;
+    });
+  const configsToValidate = (() => {
+    const pureMatches = rankedConfigs.filter(({ pureCandidate }) => pureCandidate !== undefined);
+    if (pureMatches.length > 0) {
+      return pureMatches.slice(0, MAX_EXACT_DUAL_VALIDATIONS_WITH_PURE_MATCH);
+    }
+
+    return rankedConfigs.slice(0, MAX_EXACT_DUAL_VALIDATIONS_WITHOUT_PURE_MATCH);
+  })();
+  let firstDualMatch:
+    | {
+        config: KeeperConfig;
+        baselineSnapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+        exactSnapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+        dualCandidate: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>["candidates"][number];
+      }
+    | undefined;
+
+  for (const { config } of configsToValidate) {
+    const exactSnapshot = await new AjnaRpcSnapshotSource(config, {
+      publicClient,
+      now: () => chainNow
+    }).getSnapshot();
+    const dualCandidate = exactSnapshot.candidates.find(
+      (candidate) => candidate.intent === "LEND_AND_BORROW"
+    );
+    if (dualCandidate) {
+      const candidateMatch = {
+        config,
+        baselineSnapshot,
+        exactSnapshot,
+        dualCandidate
+      };
+      if (!firstDualMatch) {
+        firstDualMatch = candidateMatch;
+      }
+
+      if (planCycle(exactSnapshot, config).intent === "LEND_AND_BORROW") {
+        return {
+          attemptedConfigCount: configsToValidate.length,
+          match: candidateMatch
+        };
+      }
+
+      continue;
+    }
+  }
+
+  if (firstDualMatch) {
+    return {
+      attemptedConfigCount: configsToValidate.length,
+      match: firstDualMatch
+    };
+  }
+
+  return {
+    attemptedConfigCount: configsToValidate.length
+  };
+}
+
+async function findExactDualCandidateConfig(
+  publicClient: any,
+  account: { address: `0x${string}` },
+  poolAddress: `0x${string}`,
+  chainNow: number
+): Promise<{
+  config: KeeperConfig;
+  baselineSnapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+  exactSnapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+  dualCandidate: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>["candidates"][number];
+  attemptedConfigCount: number;
+}> {
+  const baselineConfig = resolveKeeperConfig({
+    chainId: 8453,
+    poolAddress,
+    poolId: `8453:${poolAddress.toLowerCase()}`,
+    rpcUrl: LOCAL_RPC_URL,
+    targetRateBps: 1000,
+    toleranceBps: 50,
+    toleranceMode: "relative",
+    completionPolicy: "next_move_would_overshoot",
+    executionBufferBps: 0,
+    maxQuoteTokenExposure: "1000000000000000000000000",
+    maxBorrowExposure: "1000000000000000000000",
+    snapshotAgeMaxSeconds: 3600,
+    minTimeBeforeRateWindowSeconds: 120,
+    minExecutableActionQuoteToken: "1",
+    recheckBeforeSubmit: true
+  });
+  const baselineSnapshot = await new AjnaRpcSnapshotSource(baselineConfig, {
+    publicClient,
+    now: () => chainNow
+  }).getSnapshot();
+  const match = await findExactDualCandidateFromSnapshot(
+    publicClient,
+    account,
+    poolAddress,
+    chainNow,
+    baselineSnapshot
+  );
+  if (match.match) {
+    return {
+      ...match.match,
+      attemptedConfigCount: match.attemptedConfigCount
+    };
+  }
+
+  throw new Error("failed to validate an exact dual candidate");
+}
+
 const describeIf = RUN_BASE_FORK_TESTS ? describe : describe.skip;
 
 describeIf("Base factory fork integration", () => {
   let anvil: ChildProcess | undefined;
+  let anvilStderr = "";
 
   beforeAll(async () => {
     const forkUrl = process.env.BASE_RPC_URL ?? "https://mainnet.base.org";
@@ -257,12 +783,26 @@ describeIf("Base factory fork integration", () => {
       ],
       {
         cwd: repoRoot(),
-        stdio: "pipe"
+        stdio: ["ignore", "ignore", "pipe"]
       }
     );
+    anvil.stderr?.setEncoding("utf8");
+    anvil.stderr?.on("data", (chunk: string) => {
+      anvilStderr = `${anvilStderr}${chunk}`.slice(-8_000);
+    });
 
-    await waitForPort(TEST_PORT);
-  }, 30_000);
+    try {
+      await waitForPort(TEST_PORT, 60_000);
+    } catch (error) {
+      if (anvilStderr.trim().length > 0) {
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}\n${anvilStderr.trim()}`
+        );
+      }
+
+      throw error;
+    }
+  }, 70_000);
 
   afterAll(() => {
     anvil?.kill("SIGTERM");
@@ -386,168 +926,73 @@ describeIf("Base factory fork integration", () => {
       const artifact = await ensureMockArtifact();
       process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
 
-      const collateralToken = await deployMockToken(
-        walletClient,
-        publicClient,
-        artifact,
-        "Borrow Steering Collateral",
-        "BSC"
-      );
-      const quoteToken = await deployMockToken(
-        walletClient,
-        publicClient,
-        artifact,
-        "Borrow Steering Quote",
-        "BSQ"
-      );
-
-      for (const tokenAddress of [collateralToken, quoteToken]) {
-        await mintToken(
-          walletClient,
-          publicClient,
-          artifact,
-          tokenAddress,
-          account.address,
-          1_000_000n * 10n ** 18n
-        );
-      }
-
-      const poolAddress = await deployPoolThroughFactory(
-        walletClient,
-        publicClient,
-        collateralToken,
-        quoteToken
-      );
-
-      await approveToken(
-        walletClient,
-        publicClient,
-        quoteToken,
-        poolAddress,
-        1_000_000n * 10n ** 18n,
-        artifact.abi
-      );
-      await approveToken(
-        walletClient,
-        publicClient,
-        collateralToken,
-        poolAddress,
-        1_000_000n * 10n ** 18n,
-        artifact.abi
-      );
-
-      const latestBlock = await publicClient.getBlock();
-      const addQuoteHash = await walletClient.writeContract({
+      const poolAddress = await createQuoteOnlyBorrowFixture(
         account,
-        chain: undefined,
-        address: poolAddress,
-        abi: ajnaPoolAbi,
-        functionName: "addQuoteToken",
-        args: [1_000n * 10n ** 18n, 3_000n, latestBlock.timestamp + 3600n]
+        publicClient,
+        walletClient,
+        artifact
+      );
+      const chainNow = await moveToFirstBorrowLookaheadState(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        poolAddress
+      );
+
+      const baselineConfig = resolveKeeperConfig({
+        chainId: 8453,
+        poolAddress,
+        poolId: `8453:${poolAddress.toLowerCase()}`,
+        rpcUrl: LOCAL_RPC_URL,
+        targetRateBps: 1000,
+        toleranceBps: 50,
+        toleranceMode: "relative",
+        completionPolicy: "next_move_would_overshoot",
+        executionBufferBps: 0,
+        maxQuoteTokenExposure: "1000000000000000000000000",
+        maxBorrowExposure: "1000000000000000000000",
+        snapshotAgeMaxSeconds: 3600,
+        minTimeBeforeRateWindowSeconds: 120,
+        minExecutableActionQuoteToken: "1",
+        recheckBeforeSubmit: true
       });
-      await publicClient.waitForTransactionReceipt({ hash: addQuoteHash });
+      const baselineSnapshot = await new AjnaRpcSnapshotSource(baselineConfig, {
+        publicClient,
+        now: () => chainNow
+      }).getSnapshot();
 
-      let matched:
-        | {
-            poolAddress: `0x${string}`;
-            chainNow: number;
-            config: KeeperConfig;
-            snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
-          }
-        | undefined;
-      let evaluatedEligibleState = false;
+      expect(baselineSnapshot.currentRateBps).toBe(900);
+      expect(baselineSnapshot.predictedNextOutcome).not.toBe("STEP_UP");
 
-      for (let preUpdates = 0; preUpdates < 6; preUpdates += 1) {
-        await testClient.increaseTime({
-          seconds: FORK_TIME_SKIP_SECONDS
-        });
-        await testClient.mine({
-          blocks: 1
-        });
+      const config = resolveKeeperConfig({
+        chainId: 8453,
+        poolAddress,
+        poolId: `8453:${poolAddress.toLowerCase()}`,
+        rpcUrl: LOCAL_RPC_URL,
+        targetRateBps: 1000,
+        toleranceBps: 50,
+        toleranceMode: "relative",
+        completionPolicy: "next_move_would_overshoot",
+        executionBufferBps: 0,
+        maxQuoteTokenExposure: "1000000000000000000000000",
+        maxBorrowExposure: "1000000000000000000000",
+        snapshotAgeMaxSeconds: 3600,
+        minTimeBeforeRateWindowSeconds: 120,
+        minExecutableActionQuoteToken: "1",
+        recheckBeforeSubmit: true,
+        borrowerAddress: account.address,
+        simulationSenderAddress: account.address,
+        enableSimulationBackedBorrowSynthesis: true,
+        drawDebtLimitIndexes: [3000],
+        drawDebtCollateralAmounts: ["10000000000000000000"]
+      });
+      const snapshot = await new AjnaRpcSnapshotSource(config, {
+        publicClient,
+        now: () => chainNow
+      }).getSnapshot();
 
-        const chainNow = Number((await publicClient.getBlock()).timestamp);
-        const baselineConfig = resolveKeeperConfig({
-          chainId: 8453,
-          poolAddress,
-          poolId: `8453:${poolAddress.toLowerCase()}`,
-          rpcUrl: LOCAL_RPC_URL,
-          targetRateBps: 1000,
-          toleranceBps: 50,
-          toleranceMode: "relative",
-          completionPolicy: "next_move_would_overshoot",
-          executionBufferBps: 0,
-          maxQuoteTokenExposure: "1000000000000000000000000",
-          maxBorrowExposure: "1000000000000000000000",
-          snapshotAgeMaxSeconds: 3600,
-          minTimeBeforeRateWindowSeconds: 120,
-          minExecutableActionQuoteToken: "1",
-          recheckBeforeSubmit: true
-        });
-        const baselineSnapshot = await new AjnaRpcSnapshotSource(baselineConfig, {
-          publicClient,
-          now: () => chainNow
-        }).getSnapshot();
-
-        if (
-          baselineSnapshot.currentRateBps < 1000 &&
-          baselineSnapshot.predictedNextOutcome !== "STEP_UP"
-        ) {
-          evaluatedEligibleState = true;
-          const config = resolveKeeperConfig({
-            chainId: 8453,
-            poolAddress,
-            poolId: `8453:${poolAddress.toLowerCase()}`,
-            rpcUrl: LOCAL_RPC_URL,
-            targetRateBps: 1000,
-            toleranceBps: 50,
-            toleranceMode: "relative",
-            completionPolicy: "next_move_would_overshoot",
-            executionBufferBps: 0,
-            maxQuoteTokenExposure: "1000000000000000000000000",
-            maxBorrowExposure: "1000000000000000000000",
-            snapshotAgeMaxSeconds: 3600,
-            minTimeBeforeRateWindowSeconds: 120,
-            minExecutableActionQuoteToken: "1",
-            recheckBeforeSubmit: true,
-            borrowerAddress: account.address,
-            simulationSenderAddress: account.address,
-            enableSimulationBackedBorrowSynthesis: true,
-            drawDebtLimitIndexes: [3000],
-            drawDebtCollateralAmounts: ["10000000000000000000"]
-          });
-          const snapshot = await new AjnaRpcSnapshotSource(config, {
-            publicClient,
-            now: () => chainNow
-          }).getSnapshot();
-
-          if (snapshot.candidates.some((candidate) => candidate.intent === "BORROW")) {
-            matched = {
-              poolAddress,
-              chainNow,
-              config,
-              snapshot
-            };
-          }
-
-          break;
-        }
-
-        if (matched) {
-          break;
-        }
-
-        const updateHash = await walletClient.writeContract({
-          account,
-          chain: undefined,
-          address: poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "updateInterest"
-        });
-        await publicClient.waitForTransactionReceipt({ hash: updateHash });
-      }
-
-      expect(evaluatedEligibleState).toBe(true);
-      expect(matched).toBeUndefined();
+      expect(snapshot.candidates.some((candidate) => candidate.intent === "BORROW")).toBe(false);
     },
     120_000
   );
@@ -559,181 +1004,59 @@ describeIf("Base factory fork integration", () => {
       const artifact = await ensureMockArtifact();
       process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
 
-      const collateralToken = await deployMockToken(
-        walletClient,
-        publicClient,
-        artifact,
-        "Borrow Lookahead Collateral",
-        "BLC"
-      );
-      const quoteToken = await deployMockToken(
-        walletClient,
-        publicClient,
-        artifact,
-        "Borrow Lookahead Quote",
-        "BLQ"
-      );
-
-      for (const tokenAddress of [collateralToken, quoteToken]) {
-        await mintToken(
-          walletClient,
-          publicClient,
-          artifact,
-          tokenAddress,
-          account.address,
-          1_000_000n * 10n ** 18n
-        );
-      }
-
-      const poolAddress = await deployPoolThroughFactory(
-        walletClient,
-        publicClient,
-        collateralToken,
-        quoteToken
-      );
-
-      await approveToken(
-        walletClient,
-        publicClient,
-        quoteToken,
-        poolAddress,
-        1_000_000n * 10n ** 18n,
-        artifact.abi
-      );
-      await approveToken(
-        walletClient,
-        publicClient,
-        collateralToken,
-        poolAddress,
-        1_000_000n * 10n ** 18n,
-        artifact.abi
-      );
-
-      const latestBlock = await publicClient.getBlock();
-      const addQuoteHash = await walletClient.writeContract({
+      const poolAddress = await createQuoteOnlyBorrowFixture(
         account,
-        chain: undefined,
-        address: poolAddress,
-        abi: ajnaPoolAbi,
-        functionName: "addQuoteToken",
-        args: [1_000n * 10n ** 18n, 3_000n, latestBlock.timestamp + 3600n]
-      });
-      await publicClient.waitForTransactionReceipt({ hash: addQuoteHash });
-
-      let matched:
-        | {
-            chainNow: number;
-            config: KeeperConfig;
-            snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
-          }
-        | undefined;
-
-      for (let preUpdates = 0; preUpdates < 6; preUpdates += 1) {
-        await testClient.increaseTime({
-          seconds: FORK_TIME_SKIP_SECONDS
-        });
-        await testClient.mine({
-          blocks: 1
-        });
-
-        const chainNow = Number((await publicClient.getBlock()).timestamp);
-        const baselineConfig = resolveKeeperConfig({
-          chainId: 8453,
-          poolAddress,
-          poolId: `8453:${poolAddress.toLowerCase()}`,
-          rpcUrl: LOCAL_RPC_URL,
-          targetRateBps: 1000,
-          toleranceBps: 50,
-          toleranceMode: "relative",
-          completionPolicy: "next_move_would_overshoot",
-          executionBufferBps: 0,
-          maxQuoteTokenExposure: "1000000000000000000000000",
-          maxBorrowExposure: "1000000000000000000000",
-          snapshotAgeMaxSeconds: 3600,
-          minTimeBeforeRateWindowSeconds: 120,
-          minExecutableActionQuoteToken: "1",
-          recheckBeforeSubmit: true
-        });
-        const baselineSnapshot = await new AjnaRpcSnapshotSource(baselineConfig, {
-          publicClient,
-          now: () => chainNow
-        }).getSnapshot();
-
-        if (
-          baselineSnapshot.currentRateBps < 1000 &&
-          baselineSnapshot.predictedNextOutcome !== "STEP_UP"
-        ) {
-          const config = resolveKeeperConfig({
-            chainId: 8453,
-            poolAddress,
-            poolId: `8453:${poolAddress.toLowerCase()}`,
-            rpcUrl: LOCAL_RPC_URL,
-            targetRateBps: 1300,
-            toleranceBps: 50,
-            toleranceMode: "relative",
-            completionPolicy: "next_move_would_overshoot",
-            executionBufferBps: 0,
-            maxQuoteTokenExposure: "1000000000000000000000000",
-            maxBorrowExposure: "1000000000000000000000",
-            snapshotAgeMaxSeconds: 3600,
-            minTimeBeforeRateWindowSeconds: 120,
-            minExecutableActionQuoteToken: "1",
-            recheckBeforeSubmit: true,
-            borrowerAddress: account.address,
-            simulationSenderAddress: account.address,
-            enableSimulationBackedBorrowSynthesis: true,
-            drawDebtLimitIndexes: [...STEERING_BUCKET_CANDIDATES],
-            drawDebtCollateralAmounts: [
-              "10000000000000000000",
-              "50000000000000000000",
-              "100000000000000000000",
-              "200000000000000000000",
-              "500000000000000000000"
-            ],
-            borrowSimulationLookaheadUpdates: 3
-          });
-          const snapshot = await new AjnaRpcSnapshotSource(config, {
-            publicClient,
-            now: () => chainNow
-          }).getSnapshot();
-
-          if (
-            snapshot.candidates.some((candidate) => candidate.intent === "BORROW") &&
-            snapshot.planningLookaheadUpdates === 3
-          ) {
-            matched = {
-              chainNow,
-              config,
-              snapshot
-            };
-          }
-
-          break;
-        }
-
-        const updateHash = await walletClient.writeContract({
-          account,
-          chain: undefined,
-          address: poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "updateInterest"
-        });
-        await publicClient.waitForTransactionReceipt({ hash: updateHash });
-      }
-
-      expect(matched).toBeDefined();
-      expect(matched?.snapshot.planningLookaheadUpdates).toBe(3);
-      expect(matched?.snapshot.planningRateBps).toBeLessThan(matched!.config.targetRateBps);
-      const borrowCandidate = matched?.snapshot.candidates.find(
-        (candidate) => candidate.intent === "BORROW"
+        publicClient,
+        walletClient,
+        artifact
       );
+      const chainNow = await moveToFirstBorrowLookaheadState(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        poolAddress
+      );
+
+      const config = resolveKeeperConfig({
+        chainId: 8453,
+        poolAddress,
+        poolId: `8453:${poolAddress.toLowerCase()}`,
+        rpcUrl: LOCAL_RPC_URL,
+        targetRateBps: 1300,
+        toleranceBps: 50,
+        toleranceMode: "relative",
+        completionPolicy: "next_move_would_overshoot",
+        executionBufferBps: 0,
+        maxQuoteTokenExposure: "1000000000000000000000000",
+        maxBorrowExposure: "1000000000000000000000",
+        snapshotAgeMaxSeconds: 3600,
+        minTimeBeforeRateWindowSeconds: 120,
+        minExecutableActionQuoteToken: "1",
+        recheckBeforeSubmit: true,
+        borrowerAddress: account.address,
+        simulationSenderAddress: account.address,
+        enableSimulationBackedBorrowSynthesis: true,
+        drawDebtLimitIndexes: [3000],
+        drawDebtCollateralAmounts: ["10000000000000000000"],
+        borrowSimulationLookaheadUpdates: 3
+      });
+      const snapshot = await new AjnaRpcSnapshotSource(config, {
+        publicClient,
+        now: () => chainNow
+      }).getSnapshot();
+
+      expect(snapshot.planningLookaheadUpdates).toBe(3);
+      expect(snapshot.planningRateBps).toBeLessThan(config.targetRateBps);
+      const borrowCandidate = snapshot.candidates.find((candidate) => candidate.intent === "BORROW");
+      expect(borrowCandidate).toBeDefined();
       expect(borrowCandidate?.planningLookaheadUpdates).toBe(3);
       expect(borrowCandidate?.planningRateBps).toBeDefined();
 
-      const result = await runCycle(matched!.config, {
-        snapshotSource: new AjnaRpcSnapshotSource(matched!.config, {
+      const result = await runCycle(config, {
+        snapshotSource: new AjnaRpcSnapshotSource(config, {
           publicClient,
-          now: () => matched!.chainNow
+          now: () => chainNow
         }),
         executor: new DryRunExecutionBackend()
       });
@@ -742,6 +1065,139 @@ describeIf("Base factory fork integration", () => {
       expect(result.plan.intent).toBe("BORROW");
       expect(result.plan.requiredSteps.some((step) => step.type === "DRAW_DEBT")).toBe(true);
       expect(result.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")).toBe(true);
+    },
+    120_000
+  );
+
+  it(
+    "surfaces and naturally selects an exact LEND_AND_BORROW candidate in a representative Base-fork fixture with multi-bucket quote search",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const quoteOnlyPoolAddress = await createQuoteOnlyBorrowFixture(
+        account,
+        publicClient,
+        walletClient,
+        artifact
+      );
+      const quoteOnlyChainNow = await moveToFirstBorrowLookaheadState(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        quoteOnlyPoolAddress
+      );
+
+      let match:
+        | (NonNullable<Awaited<ReturnType<typeof findExactDualCandidateFromSnapshot>>["match"]> & {
+            poolAddress: `0x${string}`;
+            chainNow: number;
+          })
+        | undefined;
+      let attemptedConfigCount = 0;
+
+      const quoteOnlyBaselineConfig = resolveKeeperConfig({
+        chainId: 8453,
+        poolAddress: quoteOnlyPoolAddress,
+        poolId: `8453:${quoteOnlyPoolAddress.toLowerCase()}`,
+        rpcUrl: LOCAL_RPC_URL,
+        targetRateBps: 1000,
+        toleranceBps: 50,
+        toleranceMode: "relative",
+        completionPolicy: "next_move_would_overshoot",
+        executionBufferBps: 0,
+        maxQuoteTokenExposure: "1000000000000000000000000",
+        maxBorrowExposure: "1000000000000000000000",
+        snapshotAgeMaxSeconds: 3600,
+        minTimeBeforeRateWindowSeconds: 120,
+        minExecutableActionQuoteToken: "1",
+        recheckBeforeSubmit: true
+      });
+      const quoteOnlyBaselineSnapshot = await new AjnaRpcSnapshotSource(quoteOnlyBaselineConfig, {
+        publicClient,
+        now: () => quoteOnlyChainNow
+      }).getSnapshot();
+      const quoteOnlyMatch = await findExactDualCandidateFromSnapshot(
+        publicClient,
+        account,
+        quoteOnlyPoolAddress,
+        quoteOnlyChainNow,
+        quoteOnlyBaselineSnapshot
+      );
+      attemptedConfigCount += quoteOnlyMatch.attemptedConfigCount;
+      if (quoteOnlyMatch.match) {
+        match = {
+          ...quoteOnlyMatch.match,
+          poolAddress: quoteOnlyPoolAddress,
+          chainNow: quoteOnlyChainNow
+        };
+      }
+
+      if (!match) {
+        const representativeBorrowedState = await findRepresentativeBorrowedStepUpState(
+          account,
+          publicClient,
+          walletClient,
+          testClient,
+          artifact
+        );
+        if (representativeBorrowedState) {
+          const scenarioMatch = await findExactDualCandidateFromSnapshot(
+            publicClient,
+            account,
+            representativeBorrowedState.poolAddress,
+            representativeBorrowedState.chainNow,
+            representativeBorrowedState.baselineSnapshot
+          );
+          attemptedConfigCount += scenarioMatch.attemptedConfigCount;
+          if (scenarioMatch.match) {
+            match = {
+              ...scenarioMatch.match,
+              poolAddress: representativeBorrowedState.poolAddress,
+              chainNow: representativeBorrowedState.chainNow
+            };
+          }
+        }
+      }
+
+      if (!match) {
+        throw new Error(
+          `failed to find a representative exact dual candidate; attemptedConfigs=${attemptedConfigCount}`
+        );
+      }
+
+      expect(attemptedConfigCount).toBeGreaterThan(0);
+      expect(match.dualCandidate.intent).toBe("LEND_AND_BORROW");
+      expect(
+        match.dualCandidate.minimumExecutionSteps.some((step) => step.type === "ADD_QUOTE")
+      ).toBe(true);
+      expect(
+        match.dualCandidate.minimumExecutionSteps.some((step) => step.type === "DRAW_DEBT")
+      ).toBe(true);
+
+      const naturalPlan = planCycle(match.exactSnapshot, match.config);
+      expect(naturalPlan.intent).toBe("LEND_AND_BORROW");
+
+      const dualOnlySnapshot = {
+        ...match.exactSnapshot,
+        candidates: [match.dualCandidate]
+      };
+      const result = await runCycle(match.config, {
+        snapshotSource: {
+          getSnapshot: async () => dualOnlySnapshot
+        },
+        executor: createAjnaExecutionBackend(match.config)
+      });
+
+      expect(result.status).toBe("EXECUTED");
+      expect(result.plan.intent).toBe("LEND_AND_BORROW");
+      expect(result.plan.requiredSteps.some((step) => step.type === "ADD_QUOTE")).toBe(true);
+      expect(result.plan.requiredSteps.some((step) => step.type === "DRAW_DEBT")).toBe(true);
+      expect(result.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")).toBe(
+        true
+      );
     },
     240_000
   );
@@ -1002,7 +1458,7 @@ describeIf("Base factory fork integration", () => {
       expect(result.plan.requiredSteps.some((step) => step.type === "ADD_QUOTE")).toBe(true);
       expect(result.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")).toBe(true);
     },
-    120_000
+    240_000
   );
 
   it(
@@ -1231,7 +1687,7 @@ describeIf("Base factory fork integration", () => {
       const updatedRateBps = await readCurrentRateBps(publicClient, matched.poolAddress);
       expect(updatedRateBps).toBe(matched.snapshot.predictedNextRateBps);
     },
-    120_000
+    240_000
   );
 
   it(
