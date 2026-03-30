@@ -37,6 +37,10 @@ const DECREASE_COEFFICIENT_WAD = 900_000_000_000_000_000n;
 const MAX_RATE_WAD = 4n * WAD;
 const MIN_RATE_WAD = 1_000_000_000_000_000n;
 const DEFAULT_ADD_QUOTE_EXPIRY_SECONDS = 60 * 60;
+const EXACT_DUAL_MAX_BUCKETS = 3;
+const EXACT_DUAL_MAX_QUOTE_SAMPLES = 6;
+const EXACT_DUAL_MAX_BORROW_SAMPLES = 6;
+const EXACT_DUAL_MAX_PROMISING_BASINS = 3;
 
 function wmul(left: bigint, right: bigint): bigint {
   if (left === 0n || right === 0n) {
@@ -391,6 +395,275 @@ function buildAnchoredSearchAmounts(
   return Array.from(values).sort((left, right) =>
     left < right ? -1 : left > right ? 1 : 0
   );
+}
+
+const DEFAULT_MAX_PROMISING_DUAL_BASINS = 6;
+const DEFAULT_EXHAUSTIVE_DUAL_AXIS_SPAN = 64n;
+
+export interface DualSearchPoint {
+  quoteAmount: bigint;
+  drawDebtAmount: bigint;
+}
+
+export interface DualSearchMatch<T> extends DualSearchPoint {
+  evaluation: T;
+}
+
+function buildAxisSearchAmounts(
+  minimumAmount: bigint,
+  maximumAmount: bigint,
+  anchorAmounts: Array<bigint | undefined>,
+  exhaustiveSpan: bigint = DEFAULT_EXHAUSTIVE_DUAL_AXIS_SPAN
+): bigint[] {
+  if (minimumAmount > maximumAmount) {
+    return [];
+  }
+
+  if (maximumAmount - minimumAmount <= exhaustiveSpan) {
+    const values: bigint[] = [];
+    for (let value = minimumAmount; value <= maximumAmount; value += 1n) {
+      values.push(value);
+    }
+    return values;
+  }
+
+  return buildAnchoredSearchAmounts(minimumAmount, maximumAmount, anchorAmounts, {
+    includeBroadSearch: true
+  });
+}
+
+function compressSearchAmounts(
+  amounts: bigint[],
+  anchorAmounts: Array<bigint | undefined>,
+  maxSamples?: number
+): bigint[] {
+  if (!maxSamples || amounts.length <= maxSamples) {
+    return amounts;
+  }
+
+  const retained = new Set<bigint>([amounts[0]!, amounts[amounts.length - 1]!]);
+  for (const anchorAmount of anchorAmounts) {
+    if (anchorAmount !== undefined && amounts.includes(anchorAmount)) {
+      retained.add(anchorAmount);
+    }
+  }
+
+  if (retained.size >= maxSamples) {
+    return Array.from(retained).sort((left, right) =>
+      left < right ? -1 : left > right ? 1 : 0
+    );
+  }
+
+  const evenlySpacedIndexes = new Set<number>([0, amounts.length - 1]);
+  for (let sampleIndex = 1; sampleIndex < maxSamples - 1; sampleIndex += 1) {
+    evenlySpacedIndexes.add(
+      Math.round((sampleIndex * (amounts.length - 1)) / (maxSamples - 1))
+    );
+  }
+
+  for (const amountIndex of Array.from(evenlySpacedIndexes).sort((left, right) => left - right)) {
+    retained.add(amounts[amountIndex]!);
+    if (retained.size >= maxSamples) {
+      break;
+    }
+  }
+
+  return Array.from(retained).sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0
+  );
+}
+
+export async function searchCoarseToFineDualSpace<T>(options: {
+  minimumQuoteAmount: bigint;
+  maximumQuoteAmount: bigint;
+  minimumBorrowAmount: bigint;
+  maximumBorrowAmount: bigint;
+  quoteAnchorAmounts: Array<bigint | undefined>;
+  borrowAnchorAmounts: Array<bigint | undefined>;
+  evaluate: (point: DualSearchPoint) => Promise<T | undefined>;
+  isImprovement: (evaluation: T) => boolean;
+  compareMatches: (left: DualSearchMatch<T>, right: DualSearchMatch<T>) => number;
+  maxPromisingBasins?: number;
+  exhaustiveAxisSpan?: bigint;
+  maxQuoteSamples?: number;
+  maxBorrowSamples?: number;
+}): Promise<DualSearchMatch<T> | undefined> {
+  const exhaustiveAxisSpan =
+    options.exhaustiveAxisSpan ?? DEFAULT_EXHAUSTIVE_DUAL_AXIS_SPAN;
+  const quoteSearchAmounts = compressSearchAmounts(
+    buildAxisSearchAmounts(
+      options.minimumQuoteAmount,
+      options.maximumQuoteAmount,
+      options.quoteAnchorAmounts,
+      exhaustiveAxisSpan
+    ),
+    options.quoteAnchorAmounts,
+    options.maxQuoteSamples
+  );
+  const borrowSearchAmounts = compressSearchAmounts(
+    buildAxisSearchAmounts(
+      options.minimumBorrowAmount,
+      options.maximumBorrowAmount,
+      options.borrowAnchorAmounts,
+      exhaustiveAxisSpan
+    ),
+    options.borrowAnchorAmounts,
+    options.maxBorrowSamples
+  );
+  if (quoteSearchAmounts.length === 0 || borrowSearchAmounts.length === 0) {
+    return undefined;
+  }
+
+  const evaluationCache = new Map<string, T | null>();
+
+  async function evaluateMatch(point: DualSearchPoint): Promise<DualSearchMatch<T> | undefined> {
+    const cacheKey = `${point.quoteAmount.toString()}:${point.drawDebtAmount.toString()}`;
+    if (!evaluationCache.has(cacheKey)) {
+      evaluationCache.set(cacheKey, (await options.evaluate(point)) ?? null);
+    }
+
+    const evaluation = evaluationCache.get(cacheKey);
+    if (evaluation === null || evaluation === undefined || !options.isImprovement(evaluation)) {
+      return undefined;
+    }
+
+    return {
+      ...point,
+      evaluation
+    };
+  }
+
+  async function refineQuoteForBorrow(
+    drawDebtAmount: bigint,
+    preferredQuoteAnchors: Array<bigint | undefined> = []
+  ): Promise<DualSearchMatch<T> | undefined> {
+    const candidateQuoteAmounts = compressSearchAmounts(
+      buildAxisSearchAmounts(
+        options.minimumQuoteAmount,
+        options.maximumQuoteAmount,
+        [...preferredQuoteAnchors, ...options.quoteAnchorAmounts],
+        exhaustiveAxisSpan
+      ),
+      [...preferredQuoteAnchors, ...options.quoteAnchorAmounts],
+      options.maxQuoteSamples
+    );
+    if (candidateQuoteAmounts.length === 0) {
+      return undefined;
+    }
+
+    let lowerQuoteAmount = options.minimumQuoteAmount - 1n;
+    let upperMatch: DualSearchMatch<T> | undefined;
+    let previousSeedAmount = options.minimumQuoteAmount - 1n;
+
+    for (const quoteAmount of candidateQuoteAmounts) {
+      const match = await evaluateMatch({
+        quoteAmount,
+        drawDebtAmount
+      });
+      if (match) {
+        lowerQuoteAmount = previousSeedAmount;
+        upperMatch = match;
+        break;
+      }
+
+      previousSeedAmount = quoteAmount;
+    }
+
+    if (!upperMatch) {
+      return undefined;
+    }
+
+    while (upperMatch.quoteAmount - lowerQuoteAmount > 1n) {
+      const middleQuoteAmount =
+        lowerQuoteAmount + (upperMatch.quoteAmount - lowerQuoteAmount) / 2n;
+      const middleMatch = await evaluateMatch({
+        quoteAmount: middleQuoteAmount,
+        drawDebtAmount
+      });
+      if (middleMatch) {
+        upperMatch = middleMatch;
+      } else {
+        lowerQuoteAmount = middleQuoteAmount;
+      }
+    }
+
+    return upperMatch;
+  }
+
+  const promisingBasins: DualSearchMatch<T>[] = [];
+  for (const drawDebtAmount of borrowSearchAmounts) {
+    for (const quoteAmount of quoteSearchAmounts) {
+      const match = await evaluateMatch({
+        quoteAmount,
+        drawDebtAmount
+      });
+      if (match) {
+        promisingBasins.push(match);
+      }
+    }
+  }
+
+  if (promisingBasins.length === 0) {
+    return undefined;
+  }
+
+  promisingBasins.sort(options.compareMatches);
+  const maxPromisingBasins =
+    options.maxPromisingBasins ?? DEFAULT_MAX_PROMISING_DUAL_BASINS;
+  let bestMatch: DualSearchMatch<T> | undefined;
+
+  for (const basin of promisingBasins.slice(0, maxPromisingBasins)) {
+    let basinBest =
+      (await refineQuoteForBorrow(basin.drawDebtAmount, [basin.quoteAmount])) ?? basin;
+
+    const basinBorrowIndex = borrowSearchAmounts.findIndex(
+      (amount) => amount === basin.drawDebtAmount
+    );
+    const previousBorrowAmount =
+      basinBorrowIndex > 0 ? borrowSearchAmounts[basinBorrowIndex - 1] : undefined;
+    const nextBorrowAmount =
+      basinBorrowIndex >= 0 && basinBorrowIndex < borrowSearchAmounts.length - 1
+        ? borrowSearchAmounts[basinBorrowIndex + 1]
+        : undefined;
+    const lowerBorrowBoundary =
+      previousBorrowAmount === undefined
+        ? options.minimumBorrowAmount
+        : previousBorrowAmount + 1n;
+    const upperBorrowBoundary =
+      nextBorrowAmount === undefined ? options.maximumBorrowAmount : nextBorrowAmount - 1n;
+
+    if (lowerBorrowBoundary <= upperBorrowBoundary) {
+      const refinementBorrowAmounts = compressSearchAmounts(
+        buildAxisSearchAmounts(
+          lowerBorrowBoundary,
+          upperBorrowBoundary,
+          [basin.drawDebtAmount],
+          exhaustiveAxisSpan
+        ),
+        [basin.drawDebtAmount],
+        options.maxBorrowSamples
+      ).filter((amount) => amount !== basin.drawDebtAmount);
+
+      for (const drawDebtAmount of refinementBorrowAmounts) {
+        const refinedMatch = await refineQuoteForBorrow(drawDebtAmount, [
+          basinBest.quoteAmount,
+          basin.quoteAmount
+        ]);
+        if (
+          refinedMatch &&
+          options.compareMatches(refinedMatch, basinBest) < 0
+        ) {
+          basinBest = refinedMatch;
+        }
+      }
+    }
+
+    if (!bestMatch || options.compareMatches(basinBest, bestMatch) < 0) {
+      bestMatch = basinBest;
+    }
+  }
+
+  return bestMatch;
 }
 
 function collateralAmountForCandidate(candidate: PlanCandidate): bigint {
@@ -1942,6 +2215,15 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
   const anchorDrawDebtStep = extractDrawDebtStep(heuristicAnchorBorrowCandidate);
   const anchorDualDrawDebtStep = extractDrawDebtStep(heuristicDualCandidate);
   const anchorDualAddQuoteStep = extractAddQuoteStep(heuristicDualCandidate);
+  const exactDualBucketIndexes = Array.from(
+    new Set(
+      [
+        anchorDualAddQuoteStep?.bucketIndex,
+        ...singleActionAddQuoteSteps.map((step) => step.bucketIndex),
+        ...addQuoteBucketIndexes
+      ].filter((bucketIndex): bucketIndex is number => bucketIndex !== undefined)
+    )
+  ).slice(0, EXACT_DUAL_MAX_BUCKETS);
   const lookaheadUpdates =
     heuristicAnchorBorrowCandidate?.planningLookaheadUpdates ??
     resolveBorrowSimulationLookaheadUpdates(config);
@@ -2202,24 +2484,44 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
           (config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS);
 
         let bestCandidate: PlanCandidate | undefined;
+        interface DualSimulationEvaluation {
+          candidatePath: {
+            firstRateWadAfterNextUpdate: bigint;
+            firstRateBpsAfterNextUpdate: number;
+            firstOutcome: RateMoveOutcome;
+            terminalRateBps: number;
+            terminalDistanceToTargetBps: number;
+          };
+          nextDistance: number;
+        }
 
-        for (const addQuoteBucketIndex of addQuoteBucketIndexes) {
+        for (const addQuoteBucketIndex of exactDualBucketIndexes) {
           for (const limitIndex of resolveDrawDebtLimitIndexes(config)) {
             for (const collateralAmount of candidateCollateralAmounts) {
-              const borrowSeedAmounts = buildAnchoredSearchAmounts(
-              minimumAmount,
-              maxBorrowAmount,
-              [
-                anchorDualDrawDebtStep &&
-                anchorDualDrawDebtStep.limitIndex === limitIndex &&
-                (anchorDualDrawDebtStep.collateralAmount ?? 0n) === collateralAmount
-                  ? anchorDualDrawDebtStep.amount
-                  : undefined,
-                anchorDrawDebtStep &&
-                anchorDrawDebtStep.limitIndex === limitIndex &&
-                (anchorDrawDebtStep.collateralAmount ?? 0n) === collateralAmount
-                  ? anchorDrawDebtStep.amount
-                  : undefined,
+              const dualSearchMatch = await searchCoarseToFineDualSpace<DualSimulationEvaluation>({
+                minimumQuoteAmount: minimumAmount,
+                maximumQuoteAmount: maxAvailableQuote,
+                minimumBorrowAmount: minimumAmount,
+                maximumBorrowAmount: maxBorrowAmount,
+                quoteAnchorAmounts: [
+                  anchorDualAddQuoteStep?.bucketIndex === addQuoteBucketIndex
+                    ? anchorDualAddQuoteStep.amount
+                    : undefined,
+                  ...singleActionAddQuoteSteps
+                    .filter((step) => step.bucketIndex === addQuoteBucketIndex)
+                    .map((step) => step.amount)
+                ],
+                borrowAnchorAmounts: [
+                  anchorDualDrawDebtStep &&
+                  anchorDualDrawDebtStep.limitIndex === limitIndex &&
+                  (anchorDualDrawDebtStep.collateralAmount ?? 0n) === collateralAmount
+                    ? anchorDualDrawDebtStep.amount
+                    : undefined,
+                  anchorDrawDebtStep &&
+                  anchorDrawDebtStep.limitIndex === limitIndex &&
+                  (anchorDrawDebtStep.collateralAmount ?? 0n) === collateralAmount
+                    ? anchorDrawDebtStep.amount
+                    : undefined,
                   ...singleActionDrawDebtSteps
                     .filter(
                       (step) =>
@@ -2227,41 +2529,8 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
                         (step.collateralAmount ?? 0n) === collateralAmount
                     )
                     .map((step) => step.amount)
-              ],
-              {
-                includeBroadSearch: false
-              }
-            );
-              for (const drawDebtAmount of borrowSeedAmounts) {
-                const quoteSeedAmounts = buildAnchoredSearchAmounts(
-                minimumAmount,
-                maxAvailableQuote,
-                [
-                    anchorDualAddQuoteStep?.bucketIndex === addQuoteBucketIndex
-                      ? anchorDualAddQuoteStep.amount
-                      : undefined,
-                    ...singleActionAddQuoteSteps
-                      .filter((step) => step.bucketIndex === addQuoteBucketIndex)
-                      .map((step) => step.amount),
-                  drawDebtAmount
                 ],
-                {
-                  includeBroadSearch: false
-                }
-              );
-
-                const evaluateQuoteAmount = async (
-                quoteAmount: bigint
-              ): Promise<{
-                candidatePath?: {
-                  firstRateWadAfterNextUpdate: bigint;
-                  firstRateBpsAfterNextUpdate: number;
-                  firstOutcome: RateMoveOutcome;
-                  terminalRateBps: number;
-                  terminalDistanceToTargetBps: number;
-                };
-                improvesConvergence: boolean;
-              }> => {
+                evaluate: async ({ quoteAmount, drawDebtAmount }) => {
                   try {
                     const candidatePath = await simulatePath({
                       addQuoteAmount: quoteAmount,
@@ -2271,122 +2540,130 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
                       collateralAmount,
                       expiry
                     });
-                  const nextDistance = distanceToTargetBand(
-                    candidatePath.firstRateBpsAfterNextUpdate,
-                    targetBand
-                  );
-                  const candidatePrediction: AjnaRatePrediction = {
-                    predictedOutcome: candidatePath.firstOutcome,
-                    predictedNextRateWad: candidatePath.firstRateWadAfterNextUpdate,
-                    predictedNextRateBps: candidatePath.firstRateBpsAfterNextUpdate,
-                    secondsUntilNextRateUpdate: 0
-                  };
+                    const nextDistance = distanceToTargetBand(
+                      candidatePath.firstRateBpsAfterNextUpdate,
+                      targetBand
+                    );
+                    const candidatePrediction: AjnaRatePrediction = {
+                      predictedOutcome: candidatePath.firstOutcome,
+                      predictedNextRateWad: candidatePath.firstRateWadAfterNextUpdate,
+                      predictedNextRateBps: candidatePath.firstRateBpsAfterNextUpdate,
+                      secondsUntilNextRateUpdate: 0
+                    };
+
+                    const improvesConvergence =
+                      ((nextDistance < comparisonNextDistance &&
+                        candidatePath.terminalDistanceToTargetBps <=
+                          comparisonTerminalDistance) ||
+                        (candidatePath.terminalDistanceToTargetBps <
+                          comparisonTerminalDistance &&
+                          nextDistance <= comparisonNextDistance)) &&
+                      (lookaheadUpdates > 1 ||
+                        nextDistance < comparisonNextDistance ||
+                        predictionChanged(baselinePrediction, candidatePrediction));
+
+                    if (!improvesConvergence) {
+                      return undefined;
+                    }
 
                     return {
                       candidatePath,
-                      improvesConvergence:
-                        ((nextDistance < comparisonNextDistance &&
-                          candidatePath.terminalDistanceToTargetBps <=
-                            comparisonTerminalDistance) ||
-                          (candidatePath.terminalDistanceToTargetBps <
-                            comparisonTerminalDistance &&
-                            nextDistance <= comparisonNextDistance)) &&
-                        (lookaheadUpdates > 1 ||
-                          nextDistance < comparisonNextDistance ||
-                          predictionChanged(baselinePrediction, candidatePrediction))
+                      nextDistance
                     };
                   } catch {
-                    return {
-                      improvesConvergence: false
-                    };
+                    return undefined;
                   }
-                };
+                },
+                isImprovement: () => true,
+                maxQuoteSamples: EXACT_DUAL_MAX_QUOTE_SAMPLES,
+                maxBorrowSamples: EXACT_DUAL_MAX_BORROW_SAMPLES,
+                maxPromisingBasins: EXACT_DUAL_MAX_PROMISING_BASINS,
+                compareMatches: (left, right) => {
+                  const leftCandidate: PlanCandidate = {
+                    id: `compare-dual:${addQuoteBucketIndex}:${limitIndex}:${collateralAmount.toString()}:add-quote:${left.quoteAmount.toString()}:draw-debt:${left.drawDebtAmount.toString()}`,
+                    intent: "LEND_AND_BORROW",
+                    minimumExecutionSteps: [
+                      {
+                        type: "ADD_QUOTE",
+                        amount: left.quoteAmount,
+                        bucketIndex: addQuoteBucketIndex,
+                        expiry
+                      },
+                      {
+                        type: "DRAW_DEBT",
+                        amount: left.drawDebtAmount,
+                        limitIndex,
+                        collateralAmount
+                      }
+                    ],
+                    predictedOutcome: left.evaluation.candidatePath.firstOutcome,
+                    predictedRateBpsAfterNextUpdate:
+                      left.evaluation.candidatePath.firstRateBpsAfterNextUpdate,
+                    resultingDistanceToTargetBps:
+                      left.evaluation.candidatePath.terminalDistanceToTargetBps,
+                    quoteTokenDelta: left.quoteAmount + left.drawDebtAmount,
+                    explanation: ""
+                  };
+                  const rightCandidate: PlanCandidate = {
+                    id: `compare-dual:${addQuoteBucketIndex}:${limitIndex}:${collateralAmount.toString()}:add-quote:${right.quoteAmount.toString()}:draw-debt:${right.drawDebtAmount.toString()}`,
+                    intent: "LEND_AND_BORROW",
+                    minimumExecutionSteps: [
+                      {
+                        type: "ADD_QUOTE",
+                        amount: right.quoteAmount,
+                        bucketIndex: addQuoteBucketIndex,
+                        expiry
+                      },
+                      {
+                        type: "DRAW_DEBT",
+                        amount: right.drawDebtAmount,
+                        limitIndex,
+                        collateralAmount
+                      }
+                    ],
+                    predictedOutcome: right.evaluation.candidatePath.firstOutcome,
+                    predictedRateBpsAfterNextUpdate:
+                      right.evaluation.candidatePath.firstRateBpsAfterNextUpdate,
+                    resultingDistanceToTargetBps:
+                      right.evaluation.candidatePath.terminalDistanceToTargetBps,
+                    quoteTokenDelta: right.quoteAmount + right.drawDebtAmount,
+                    explanation: ""
+                  };
 
-              let lowerQuoteAmount = minimumAmount - 1n;
-              let upperQuoteAmount: bigint | undefined;
-              let upperQuoteEvaluation:
-                | {
-                    candidatePath?: {
-                      firstRateWadAfterNextUpdate: bigint;
-                      firstRateBpsAfterNextUpdate: number;
-                      firstOutcome: RateMoveOutcome;
-                      terminalRateBps: number;
-                      terminalDistanceToTargetBps: number;
-                    };
-                    improvesConvergence: boolean;
-                  }
-                | undefined;
-
-              let previousSeedAmount = minimumAmount - 1n;
-              for (const seedQuoteAmount of quoteSeedAmounts) {
-                const seedEvaluation = await evaluateQuoteAmount(seedQuoteAmount);
-                if (seedEvaluation.improvesConvergence) {
-                  lowerQuoteAmount = previousSeedAmount;
-                  upperQuoteAmount = seedQuoteAmount;
-                  upperQuoteEvaluation = seedEvaluation;
-                  break;
+                  return compareCandidatePreference(leftCandidate, rightCandidate);
                 }
+              });
 
-                previousSeedAmount = seedQuoteAmount;
-              }
-
-              if (upperQuoteAmount === undefined || !upperQuoteEvaluation?.improvesConvergence) {
+              if (!dualSearchMatch) {
                 continue;
               }
-
-              while (true) {
-                const currentUpperQuoteAmount: bigint | undefined = upperQuoteAmount;
-                if (currentUpperQuoteAmount === undefined) {
-                  break;
-                }
-                if (currentUpperQuoteAmount - lowerQuoteAmount <= 1n) {
-                  break;
-                }
-
-                const middleQuoteAmount: bigint =
-                  lowerQuoteAmount + (currentUpperQuoteAmount - lowerQuoteAmount) / 2n;
-                const middleQuoteEvaluation = await evaluateQuoteAmount(middleQuoteAmount);
-                if (middleQuoteEvaluation.improvesConvergence) {
-                  upperQuoteAmount = middleQuoteAmount;
-                  upperQuoteEvaluation = middleQuoteEvaluation;
-                } else {
-                  lowerQuoteAmount = middleQuoteAmount;
-                }
-              }
-
-              if (
-                upperQuoteAmount === undefined ||
-                !upperQuoteEvaluation?.candidatePath
-              ) {
-                continue;
-              }
-              const finalQuoteAmount = upperQuoteAmount;
 
               const candidate: PlanCandidate = {
-                id: `sim-dual:${addQuoteBucketIndex}:${limitIndex}:${collateralAmount.toString()}:add-quote:${finalQuoteAmount.toString()}:draw-debt:${drawDebtAmount.toString()}`,
+                id: `sim-dual:${addQuoteBucketIndex}:${limitIndex}:${collateralAmount.toString()}:add-quote:${dualSearchMatch.quoteAmount.toString()}:draw-debt:${dualSearchMatch.drawDebtAmount.toString()}`,
                 intent: "LEND_AND_BORROW",
                 minimumExecutionSteps: [
                   {
                     type: "ADD_QUOTE",
-                    amount: finalQuoteAmount,
+                    amount: dualSearchMatch.quoteAmount,
                     bucketIndex: addQuoteBucketIndex,
                     expiry,
                     note: "simulation-backed add-quote threshold for dual-side steering"
                   },
                   {
                     type: "DRAW_DEBT",
-                    amount: drawDebtAmount,
+                    amount: dualSearchMatch.drawDebtAmount,
                     limitIndex,
                     collateralAmount,
                     note: "simulation-backed draw-debt threshold for dual-side steering"
                   }
                 ],
-                predictedOutcome: upperQuoteEvaluation.candidatePath.firstOutcome,
+                predictedOutcome: dualSearchMatch.evaluation.candidatePath.firstOutcome,
                 predictedRateBpsAfterNextUpdate:
-                  upperQuoteEvaluation.candidatePath.firstRateBpsAfterNextUpdate,
+                  dualSearchMatch.evaluation.candidatePath.firstRateBpsAfterNextUpdate,
                 resultingDistanceToTargetBps:
-                  upperQuoteEvaluation.candidatePath.terminalDistanceToTargetBps,
-                quoteTokenDelta: finalQuoteAmount + drawDebtAmount,
+                  dualSearchMatch.evaluation.candidatePath.terminalDistanceToTargetBps,
+                quoteTokenDelta:
+                  dualSearchMatch.quoteAmount + dualSearchMatch.drawDebtAmount,
                 explanation:
                   lookaheadUpdates > 1
                     ? `simulation-backed add-quote + draw-debt path improves the ${lookaheadUpdates}-update path beyond the best single-action path`
@@ -2394,7 +2671,8 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
               };
 
               if (lookaheadUpdates > 1) {
-                candidate.planningRateBps = upperQuoteEvaluation.candidatePath.terminalRateBps;
+                candidate.planningRateBps =
+                  dualSearchMatch.evaluation.candidatePath.terminalRateBps;
                 candidate.planningLookaheadUpdates = lookaheadUpdates;
               }
 
@@ -2403,7 +2681,6 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
               }
             }
           }
-        }
         }
 
         return bestCandidate;
@@ -2443,7 +2720,14 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
   private readonly poolAddress: `0x${string}`;
   private readonly publicClient: PublicClient;
   private readonly now: () => number;
-  private readonly simulationCandidateCache = new Map<string, PlanCandidate[]>();
+  private readonly simulationCandidateCache = new Map<
+    string,
+    {
+      candidates: PlanCandidate[];
+      planningRateBps?: number;
+      planningLookaheadUpdates?: number;
+    }
+  >();
 
   constructor(
     private readonly config: KeeperConfig,
@@ -2543,10 +2827,24 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
           }
         }
 
-        this.simulationCandidateCache.set(snapshotFingerprint, synthesizedCandidates);
+        this.simulationCandidateCache.set(snapshotFingerprint, {
+          candidates: synthesizedCandidates,
+          ...(planningRateBps === undefined ? {} : { planningRateBps }),
+          ...(planningLookaheadUpdates === undefined
+            ? {}
+            : { planningLookaheadUpdates })
+        });
       }
 
-      const cachedCandidates = this.simulationCandidateCache.get(snapshotFingerprint) ?? [];
+      const cachedSimulation = this.simulationCandidateCache.get(snapshotFingerprint);
+      if (cachedSimulation?.planningRateBps !== undefined) {
+        planningRateBps = cachedSimulation.planningRateBps;
+      }
+      if (cachedSimulation?.planningLookaheadUpdates !== undefined) {
+        planningLookaheadUpdates = cachedSimulation.planningLookaheadUpdates;
+      }
+
+      const cachedCandidates = cachedSimulation?.candidates ?? [];
       if (cachedCandidates.length > 0) {
         autoCandidates.push(...cachedCandidates);
         autoCandidateSource = "simulation";

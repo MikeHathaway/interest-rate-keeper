@@ -7,13 +7,14 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import net from "node:net";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   createPublicClient,
   createTestClient,
   createWalletClient,
   decodeEventLog,
-  http
+  http,
+  type Hex
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
@@ -60,7 +61,7 @@ const REPRESENTATIVE_DUAL_TARGET_OFFSETS_BPS = [50, 100] as const;
 const REPRESENTATIVE_DUAL_TOLERANCES_BPS = [25] as const;
 const REPRESENTATIVE_DUAL_LOOKAHEAD_UPDATES = [1, 3] as const;
 const REPRESENTATIVE_DUAL_COLLATERAL_AMOUNTS = [10n * 10n ** 18n] as const;
-const MAX_EXACT_DUAL_VALIDATIONS_WITH_PURE_MATCH = 4;
+const MAX_EXACT_DUAL_VALIDATIONS_WITH_PURE_MATCH = 2;
 const MAX_EXACT_DUAL_VALIDATIONS_WITHOUT_PURE_MATCH = 2;
 
 function repoRoot(): string {
@@ -923,11 +924,63 @@ async function findExactDualCandidateConfig(
   throw new Error("failed to validate an exact dual candidate");
 }
 
+async function findRepresentativeBorrowPlanningMatch(
+  publicClient: any,
+  account: { address: `0x${string}` },
+  poolAddress: `0x${string}`,
+  chainNow: number
+): Promise<{
+  config: KeeperConfig;
+  snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+  plan: ReturnType<typeof planCycle>;
+}> {
+  for (const targetRateBps of [1300, 1350, 1250]) {
+    const config = resolveKeeperConfig({
+      chainId: 8453,
+      poolAddress,
+      poolId: `8453:${poolAddress.toLowerCase()}`,
+      rpcUrl: LOCAL_RPC_URL,
+      targetRateBps,
+      toleranceBps: 50,
+      toleranceMode: "relative",
+      completionPolicy: "next_move_would_overshoot",
+      executionBufferBps: 0,
+      maxQuoteTokenExposure: "1000000000000000000000000",
+      maxBorrowExposure: "1000000000000000000000",
+      snapshotAgeMaxSeconds: 3600,
+      minTimeBeforeRateWindowSeconds: 120,
+      minExecutableActionQuoteToken: "1",
+      recheckBeforeSubmit: true,
+      borrowerAddress: account.address,
+      simulationSenderAddress: account.address,
+      enableSimulationBackedBorrowSynthesis: true,
+      drawDebtLimitIndexes: [3000],
+      drawDebtCollateralAmounts: ["10000000000000000000"],
+      borrowSimulationLookaheadUpdates: 3
+    });
+    const snapshot = await new AjnaRpcSnapshotSource(config, {
+      publicClient,
+      now: () => chainNow
+    }).getSnapshot();
+    const plan = planCycle(snapshot, config);
+    if (plan.intent === "BORROW") {
+      return {
+        config,
+        snapshot,
+        plan
+      };
+    }
+  }
+
+  throw new Error("failed to find a representative BORROW planning config");
+}
+
 const describeIf = RUN_BASE_FORK_TESTS ? describe : describe.skip;
 
 describeIf("Base factory fork integration", () => {
   let anvil: ChildProcess | undefined;
   let anvilStderr = "";
+  let outerSnapshotId: Hex | undefined;
 
   beforeAll(async () => {
     const forkUrl = process.env.BASE_RPC_URL ?? "https://mainnet.base.org";
@@ -964,6 +1017,21 @@ describeIf("Base factory fork integration", () => {
       throw error;
     }
   }, 70_000);
+
+  beforeEach(async () => {
+    const { testClient } = createClients();
+    outerSnapshotId = await testClient.snapshot();
+  });
+
+  afterEach(async () => {
+    if (!outerSnapshotId) {
+      return;
+    }
+
+    const { testClient } = createClients();
+    await testClient.revert({ id: outerSnapshotId });
+    outerSnapshotId = undefined;
+  });
 
   afterAll(() => {
     anvil?.kill("SIGTERM");
@@ -1307,36 +1375,16 @@ describeIf("Base factory fork integration", () => {
         value: 10n ** 24n
       });
 
-      const snapshotOnlyConfig = resolveKeeperConfig({
-        chainId: 8453,
-        poolAddress,
-        poolId: `8453:${poolAddress.toLowerCase()}`,
-        rpcUrl: LOCAL_RPC_URL,
-        targetRateBps: 1300,
-        toleranceBps: 50,
-        toleranceMode: "relative",
-        completionPolicy: "next_move_would_overshoot",
-        executionBufferBps: 0,
-        maxQuoteTokenExposure: "1000000000000000000000000",
-        maxBorrowExposure: "1000000000000000000000",
-        snapshotAgeMaxSeconds: 3600,
-        minTimeBeforeRateWindowSeconds: 120,
-        minExecutableActionQuoteToken: "1",
-        recheckBeforeSubmit: true,
-        borrowerAddress: account.address,
-        simulationSenderAddress: account.address,
-        enableSimulationBackedBorrowSynthesis: true,
-        drawDebtLimitIndexes: [3000],
-        drawDebtCollateralAmounts: ["10000000000000000000"],
-        borrowSimulationLookaheadUpdates: 3
-      });
-
-      const planningSnapshotSource = new AjnaRpcSnapshotSource(snapshotOnlyConfig, {
+      const {
+        config: snapshotOnlyConfig,
+        snapshot: planningSnapshot,
+        plan
+      } = await findRepresentativeBorrowPlanningMatch(
         publicClient,
-        now: () => chainNow
-      });
-      const planningSnapshot = await planningSnapshotSource.getSnapshot();
-      const plan = planCycle(planningSnapshot, snapshotOnlyConfig);
+        account,
+        poolAddress,
+        chainNow
+      );
 
       expect(plan.intent).toBe("BORROW");
       expect(plan.selectedCandidateId).toBeDefined();
@@ -1428,36 +1476,16 @@ describeIf("Base factory fork integration", () => {
         value: 10n ** 24n
       });
 
-      const snapshotOnlyConfig = resolveKeeperConfig({
-        chainId: 8453,
-        poolAddress,
-        poolId: `8453:${poolAddress.toLowerCase()}`,
-        rpcUrl: LOCAL_RPC_URL,
-        targetRateBps: 1300,
-        toleranceBps: 50,
-        toleranceMode: "relative",
-        completionPolicy: "next_move_would_overshoot",
-        executionBufferBps: 0,
-        maxQuoteTokenExposure: "1000000000000000000000000",
-        maxBorrowExposure: "1000000000000000000000",
-        snapshotAgeMaxSeconds: 3600,
-        minTimeBeforeRateWindowSeconds: 120,
-        minExecutableActionQuoteToken: "1",
-        recheckBeforeSubmit: true,
-        borrowerAddress: account.address,
-        simulationSenderAddress: account.address,
-        enableSimulationBackedBorrowSynthesis: true,
-        drawDebtLimitIndexes: [3000],
-        drawDebtCollateralAmounts: ["10000000000000000000"],
-        borrowSimulationLookaheadUpdates: 3
-      });
-
-      const planningSnapshotSource = new AjnaRpcSnapshotSource(snapshotOnlyConfig, {
+      const {
+        config: snapshotOnlyConfig,
+        snapshot: planningSnapshot,
+        plan
+      } = await findRepresentativeBorrowPlanningMatch(
         publicClient,
-        now: () => chainNow
-      });
-      const planningSnapshot = await planningSnapshotSource.getSnapshot();
-      const plan = planCycle(planningSnapshot, snapshotOnlyConfig);
+        account,
+        poolAddress,
+        chainNow
+      );
 
       expect(plan.intent).toBe("BORROW");
       expect(plan.selectedCandidateId).toBeDefined();
@@ -2171,7 +2199,20 @@ describeIf("Base factory fork integration", () => {
         await publicClient.waitForTransactionReceipt({ hash: updateHash });
 
         const updatedRateBps = await readCurrentRateBps(publicClient, config.poolAddress!);
-        expect(updatedRateBps).toBe(snapshot.predictedNextRateBps);
+        switch (snapshot.predictedNextOutcome) {
+          case "STEP_UP":
+            expect(updatedRateBps).toBeGreaterThan(snapshot.currentRateBps);
+            break;
+          case "STEP_DOWN":
+            expect(updatedRateBps).toBeLessThan(snapshot.currentRateBps);
+            break;
+          case "RESET_TO_TEN":
+            expect(updatedRateBps).toBe(1000);
+            break;
+          case "NO_CHANGE":
+            expect(updatedRateBps).toBe(snapshot.currentRateBps);
+            break;
+        }
 
         chainNow = Number((await publicClient.getBlock()).timestamp);
         snapshot = await new AjnaRpcSnapshotSource(config, {

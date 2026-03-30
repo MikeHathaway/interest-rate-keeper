@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyAjnaNextRate,
   forecastAjnaNextEligibleRate,
+  searchCoarseToFineDualSpace,
   synthesizeAjnaBorrowCandidate,
   synthesizeAjnaLendAndBorrowCandidate,
   synthesizeAjnaLendCandidate
@@ -274,6 +275,139 @@ describe("synthesizeAjnaBorrowCandidate", () => {
     );
 
     expect(belowThreshold).toBeUndefined();
+  });
+});
+
+describe("searchCoarseToFineDualSpace", () => {
+  it("matches an exhaustive oracle in a bounded 2D search space even when anchors miss the optimum", async () => {
+    type SyntheticEvaluation = {
+      terminalDistance: number;
+      nextDistance: number;
+      capital: bigint;
+    };
+
+    const minimumQuoteAmount = 1n;
+    const maximumQuoteAmount = 20n;
+    const minimumBorrowAmount = 1n;
+    const maximumBorrowAmount = 20n;
+    const optimalBorrowAmount = 13n;
+
+    function evaluateSyntheticPoint(
+      quoteAmount: bigint,
+      drawDebtAmount: bigint
+    ): SyntheticEvaluation | undefined {
+      const minimumHelpfulQuote =
+        drawDebtAmount <= 4n
+          ? 9n
+          : drawDebtAmount <= 8n
+            ? 6n
+            : drawDebtAmount <= 12n
+              ? 4n
+              : drawDebtAmount <= 16n
+                ? 3n
+                : 7n;
+      if (quoteAmount < minimumHelpfulQuote) {
+        return undefined;
+      }
+
+      return {
+        terminalDistance:
+          Number(drawDebtAmount > optimalBorrowAmount
+            ? drawDebtAmount - optimalBorrowAmount
+            : optimalBorrowAmount - drawDebtAmount) +
+          Number(quoteAmount - minimumHelpfulQuote),
+        nextDistance:
+          Number(
+            drawDebtAmount > optimalBorrowAmount - 1n
+              ? drawDebtAmount - (optimalBorrowAmount - 1n)
+              : (optimalBorrowAmount - 1n) - drawDebtAmount
+          ) + Number(quoteAmount - minimumHelpfulQuote),
+        capital: quoteAmount + drawDebtAmount
+      };
+    }
+
+    const exhaustiveMatches: Array<{
+      quoteAmount: bigint;
+      drawDebtAmount: bigint;
+      evaluation: SyntheticEvaluation;
+    }> = [];
+    for (let drawDebtAmount = minimumBorrowAmount; drawDebtAmount <= maximumBorrowAmount; drawDebtAmount += 1n) {
+      for (let quoteAmount = minimumQuoteAmount; quoteAmount <= maximumQuoteAmount; quoteAmount += 1n) {
+        const evaluation = evaluateSyntheticPoint(quoteAmount, drawDebtAmount);
+        if (!evaluation) {
+          continue;
+        }
+        exhaustiveMatches.push({
+          quoteAmount,
+          drawDebtAmount,
+          evaluation
+        });
+      }
+    }
+
+    exhaustiveMatches.sort((left, right) => {
+      if (left.evaluation.terminalDistance !== right.evaluation.terminalDistance) {
+        return left.evaluation.terminalDistance - right.evaluation.terminalDistance;
+      }
+      if (left.evaluation.nextDistance !== right.evaluation.nextDistance) {
+        return left.evaluation.nextDistance - right.evaluation.nextDistance;
+      }
+      if (left.evaluation.capital !== right.evaluation.capital) {
+        return left.evaluation.capital < right.evaluation.capital ? -1 : 1;
+      }
+      if (left.drawDebtAmount !== right.drawDebtAmount) {
+        return left.drawDebtAmount < right.drawDebtAmount ? -1 : 1;
+      }
+      return left.quoteAmount < right.quoteAmount ? -1 : 1;
+    });
+
+    const searchedMatch = await searchCoarseToFineDualSpace({
+      minimumQuoteAmount,
+      maximumQuoteAmount,
+      minimumBorrowAmount,
+      maximumBorrowAmount,
+      quoteAnchorAmounts: [19n],
+      borrowAnchorAmounts: [2n],
+      evaluate: async ({ quoteAmount, drawDebtAmount }) =>
+        evaluateSyntheticPoint(quoteAmount, drawDebtAmount),
+      isImprovement: () => true,
+      compareMatches: (left, right) => {
+        if (left.evaluation.terminalDistance !== right.evaluation.terminalDistance) {
+          return left.evaluation.terminalDistance - right.evaluation.terminalDistance;
+        }
+        if (left.evaluation.nextDistance !== right.evaluation.nextDistance) {
+          return left.evaluation.nextDistance - right.evaluation.nextDistance;
+        }
+        if (left.evaluation.capital !== right.evaluation.capital) {
+          return left.evaluation.capital < right.evaluation.capital ? -1 : 1;
+        }
+        if (left.drawDebtAmount !== right.drawDebtAmount) {
+          return left.drawDebtAmount < right.drawDebtAmount ? -1 : 1;
+        }
+        return left.quoteAmount < right.quoteAmount ? -1 : 1;
+      }
+    });
+
+    expect(searchedMatch).toBeDefined();
+    expect(searchedMatch?.quoteAmount).toBe(exhaustiveMatches[0]?.quoteAmount);
+    expect(searchedMatch?.drawDebtAmount).toBe(exhaustiveMatches[0]?.drawDebtAmount);
+    expect(searchedMatch?.evaluation).toEqual(exhaustiveMatches[0]?.evaluation);
+  });
+
+  it("returns undefined when no improving dual point exists in the bounded fixture", async () => {
+    const searchedMatch = await searchCoarseToFineDualSpace({
+      minimumQuoteAmount: 1n,
+      maximumQuoteAmount: 8n,
+      minimumBorrowAmount: 1n,
+      maximumBorrowAmount: 8n,
+      quoteAnchorAmounts: [8n],
+      borrowAnchorAmounts: [8n],
+      evaluate: async () => undefined,
+      isImprovement: () => true,
+      compareMatches: () => 0
+    });
+
+    expect(searchedMatch).toBeUndefined();
   });
 });
 
