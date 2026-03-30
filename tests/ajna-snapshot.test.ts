@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   classifyAjnaNextRate,
   forecastAjnaNextEligibleRate,
+  resolveSimulationBorrowCollateralAmounts,
+  resolveSimulationBorrowLimitIndexes,
   searchCoarseToFineDualSpace,
   synthesizeAjnaBorrowCandidate,
   synthesizeAjnaLendAndBorrowCandidate,
@@ -408,6 +410,52 @@ describe("searchCoarseToFineDualSpace", () => {
     });
 
     expect(searchedMatch).toBeUndefined();
+  });
+});
+
+describe("resolveSimulationBorrowLimitIndexes", () => {
+  it("expands a single configured limit index into a bounded local neighborhood", () => {
+    expect(
+      resolveSimulationBorrowLimitIndexes({
+        ...baseConfig,
+        drawDebtLimitIndex: 3000
+      })
+    ).toEqual([2500, 2750, 3000, 3250, 3500]);
+  });
+
+  it("preserves explicitly configured multiple limit indexes without adding neighbors", () => {
+    expect(
+      resolveSimulationBorrowLimitIndexes({
+        ...baseConfig,
+        drawDebtLimitIndexes: [2800, 3000, 3200]
+      })
+    ).toEqual([2800, 3000, 3200]);
+  });
+});
+
+describe("resolveSimulationBorrowCollateralAmounts", () => {
+  it("expands a single configured collateral amount into a bounded scaled search set", () => {
+    expect(
+      resolveSimulationBorrowCollateralAmounts(
+        {
+          ...baseConfig,
+          drawDebtCollateralAmount: 10n * WAD
+        },
+        100n * WAD
+      )
+    ).toEqual([1n, 2n, 5n, 10n, 20n, 50n, 100n].map((amount) => amount * WAD));
+  });
+
+  it("preserves multiple explicit collateral candidates without adding derived values", () => {
+    expect(
+      resolveSimulationBorrowCollateralAmounts(
+        {
+          ...baseConfig,
+          drawDebtCollateralAmounts: [1n * WAD, 5n * WAD, 10n * WAD]
+        },
+        100n * WAD
+      )
+    ).toEqual([1n * WAD, 5n * WAD, 10n * WAD]);
   });
 });
 

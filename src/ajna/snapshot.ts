@@ -41,6 +41,7 @@ const EXACT_DUAL_MAX_BUCKETS = 3;
 const EXACT_DUAL_MAX_QUOTE_SAMPLES = 6;
 const EXACT_DUAL_MAX_BORROW_SAMPLES = 6;
 const EXACT_DUAL_MAX_PROMISING_BASINS = 3;
+const EXACT_BORROW_LIMIT_INDEX_OFFSETS = [-500, -250, 0, 250, 500] as const;
 const MAX_SIMULATION_ACCOUNT_STATE_CACHE_ENTRIES = 256;
 const MAX_EXACT_SIMULATION_PATH_CACHE_ENTRIES = 20_000;
 const MAX_SIMULATION_CANDIDATE_CACHE_ENTRIES = 2_048;
@@ -365,6 +366,60 @@ function resolveDrawDebtCollateralAmounts(config: KeeperConfig): bigint[] {
   }
 
   return Array.from(new Set(configured)).sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0
+  );
+}
+
+export function resolveSimulationBorrowLimitIndexes(config: KeeperConfig): number[] {
+  const configured = resolveDrawDebtLimitIndexes(config);
+  if (configured.length !== 1) {
+    return configured;
+  }
+
+  const anchor = configured[0]!;
+  return Array.from(
+    new Set(
+      EXACT_BORROW_LIMIT_INDEX_OFFSETS.map((offset) => anchor + offset).filter(
+        (limitIndex) => limitIndex >= 0
+      )
+    )
+  ).sort((left, right) => left - right);
+}
+
+export function resolveSimulationBorrowCollateralAmounts(
+  config: KeeperConfig,
+  maxAvailableCollateral: bigint
+): bigint[] {
+  const configured = resolveDrawDebtCollateralAmounts(config).filter(
+    (collateralAmount) => collateralAmount <= maxAvailableCollateral
+  );
+  if (configured.length === 0) {
+    return [];
+  }
+
+  if (configured.length !== 1) {
+    return configured;
+  }
+
+  const anchor = configured[0]!;
+  if (anchor === 0n) {
+    return [0n];
+  }
+
+  const scaledCandidates = [
+    anchor / 10n,
+    anchor / 5n,
+    anchor / 2n,
+    anchor,
+    anchor * 2n,
+    anchor * 5n,
+    anchor * 10n
+  ].filter(
+    (collateralAmount) =>
+      collateralAmount > 0n && collateralAmount <= maxAvailableCollateral
+  );
+
+  return Array.from(new Set(scaledCandidates)).sort((left, right) =>
     left < right ? -1 : left > right ? 1 : 0
   );
 }
@@ -2158,7 +2213,7 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
     accountState?: SimulationAccountState;
   }
 ): Promise<BorrowSimulationSynthesisResult | undefined> {
-  const limitIndexes = resolveDrawDebtLimitIndexes(config);
+  const limitIndexes = resolveSimulationBorrowLimitIndexes(config);
   if (limitIndexes.length === 0) {
     return undefined;
   }
@@ -2186,7 +2241,6 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
   const borrowerAddress =
     options.accountState?.borrowerAddress ??
     resolveSimulationBorrowerAddress(config, simulationSenderAddress);
-  const collateralAmounts = resolveDrawDebtCollateralAmounts(config);
   const lookaheadUpdates = resolveBorrowSimulationLookaheadUpdates(config);
   const initialLastInterestRateUpdateTimestamp =
     readState.rateState.lastInterestRateUpdateTimestamp;
@@ -2251,8 +2305,9 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
           effectiveAccountState.collateralBalance ?? 0n,
           effectiveAccountState.collateralAllowance ?? 0n
         );
-        const candidateCollateralAmounts = collateralAmounts.filter(
-          (collateralAmount) => collateralAmount <= maxAvailableCollateral
+        const candidateCollateralAmounts = resolveSimulationBorrowCollateralAmounts(
+          config,
+          maxAvailableCollateral
         );
         if (candidateCollateralAmounts.length === 0) {
           return undefined;

@@ -57,6 +57,35 @@ describe("keeperhub", () => {
     expect(payload.snapshot.planningLookaheadUpdates).toBe(3);
   });
 
+  it("rejects fractional planning lookahead values in payload snapshots", () => {
+    expect(() =>
+      resolveKeeperHubPayload({
+        config: {
+          chainId: 8453,
+          poolId: "base:pool",
+          targetRateBps: 1000,
+          toleranceBps: 1000,
+          maxQuoteTokenExposure: "1000",
+          maxBorrowExposure: "1000"
+        },
+        snapshot: {
+          snapshotFingerprint: "payload",
+          poolId: "base:pool",
+          chainId: 8453,
+          blockNumber: "10",
+          blockTimestamp: 1000,
+          snapshotAgeSeconds: 5,
+          secondsUntilNextRateUpdate: 300,
+          currentRateBps: 1000,
+          predictedNextOutcome: "STEP_UP",
+          predictedNextRateBps: 1100,
+          planningLookaheadUpdates: 1.5,
+          candidates: []
+        }
+      })
+    ).toThrow(/planningLookaheadUpdates/);
+  });
+
   it("disables recheck when running a static payload without live read config", async () => {
     const result = await runKeeperHubPayload(
       {

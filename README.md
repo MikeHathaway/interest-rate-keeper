@@ -220,7 +220,7 @@ npm run test:integration:base
 - Exact simulation-backed `LEND_AND_BORROW` synthesis is now wired into the live snapshot path when both exact lend and borrow synthesis are enabled, and it benchmarks candidate dual paths against the best exact single-action paths before emitting them.
 - Adding multi-bucket quote search made that stricter benchmark productive again in the representative Base fixture: the keeper now surfaces and naturally selects a real exact `LEND_AND_BORROW` candidate there.
 - The representative live-execution equivalence check for the exact dual plan is now covered on the fork: the executed due-window plan lands on the same first-update rate the simulation predicted.
-- Exact same-cycle borrow synthesis remains conservative in the representative Base-fork abandoned-pool fixture; the fork reaches eligible states, but no same-cycle live `DRAW_DEBT` candidate is appearing there yet.
+- Exact same-cycle borrow synthesis now broadens a single configured `drawDebtLimitIndex` and `drawDebtCollateralAmount` into a bounded local neighborhood during simulation, but it still remains conservative in the representative Base-fork abandoned-pool fixture; the fork reaches eligible states, yet no same-cycle live `DRAW_DEBT` candidate is appearing there.
 - Heuristic `LEND_AND_BORROW` synthesis only covers the “temper an oversized borrow with a small quote deposit” case today; it is not yet a general liquidity-seeding or multi-dimensional search strategy.
 - Heuristic lend synthesis is opt-in and currently validated for live planning/dry-run discovery, not for blind live execution in borrowed pools.
 - Repeated natural update-only convergence is covered by integration tests, including week-scale multi-cycle operation.

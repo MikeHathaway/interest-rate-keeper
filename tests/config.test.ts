@@ -73,13 +73,49 @@ describe("resolveKeeperConfig", () => {
           predictedRateBpsAfterNextUpdate: 1100,
           resultingDistanceToTargetBps: 0,
           quoteTokenDelta: "100",
-          explanation: "manual lend"
+          explanation: "manual lend",
+          planningRateBps: 1195,
+          planningLookaheadUpdates: 3
         }
       ]
     });
 
     expect(config.poolId).toBe("8453:0x1111111111111111111111111111111111111111");
     expect(config.manualCandidates).toHaveLength(1);
+    expect(config.manualCandidates?.[0]?.planningRateBps).toBe(1195);
+    expect(config.manualCandidates?.[0]?.planningLookaheadUpdates).toBe(3);
+  });
+
+  it("rejects manual candidates with non-integer step indexes", () => {
+    expect(() =>
+      resolveKeeperConfig({
+        chainId: 8453,
+        poolAddress: "0x1111111111111111111111111111111111111111",
+        targetRateBps: 1200,
+        toleranceBps: 1000,
+        maxQuoteTokenExposure: "1000000",
+        maxBorrowExposure: "500000",
+        manualCandidates: [
+          {
+            id: "lend",
+            intent: "LEND",
+            minimumExecutionSteps: [
+              {
+                type: "ADD_QUOTE",
+                amount: "100",
+                bucketIndex: 1.5,
+                expiry: 2000
+              }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 1100,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: "100",
+            explanation: "bad lend"
+          }
+        ]
+      })
+    ).toThrow(/bucketIndex/);
   });
 
   it("rejects invalid completion policy", () => {

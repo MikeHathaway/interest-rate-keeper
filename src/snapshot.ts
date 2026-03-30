@@ -39,6 +39,33 @@ function parseNumber(value: unknown, label: string): number {
   return value;
 }
 
+function parseInteger(value: unknown, label: string): number {
+  const parsed = parseNumber(value, label);
+  if (!Number.isInteger(parsed)) {
+    throw new Error(`${label} must be an integer`);
+  }
+
+  return parsed;
+}
+
+function parseNonNegativeInteger(value: unknown, label: string): number {
+  const parsed = parseInteger(value, label);
+  if (parsed < 0) {
+    throw new Error(`${label} must be a non-negative integer`);
+  }
+
+  return parsed;
+}
+
+function parsePositiveInteger(value: unknown, label: string): number {
+  const parsed = parseInteger(value, label);
+  if (parsed <= 0) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+
+  return parsed;
+}
+
 function parseBigIntValue(value: unknown, label: string): bigint {
   if (typeof value === "bigint") {
     return value;
@@ -104,22 +131,22 @@ export function resolveExecutionStep(input: unknown, label = "execution step"): 
       return {
         type,
         amount: parseBigIntValue(record.amount, `${label}.amount`),
-        bucketIndex: parseNumber(record.bucketIndex, `${label}.bucketIndex`),
-        expiry: parseNumber(record.expiry, `${label}.expiry`),
+        bucketIndex: parseNonNegativeInteger(record.bucketIndex, `${label}.bucketIndex`),
+        expiry: parsePositiveInteger(record.expiry, `${label}.expiry`),
         ...shared
       } satisfies AddQuoteStep;
     case "REMOVE_QUOTE":
       return {
         type,
         amount: parseBigIntValue(record.amount, `${label}.amount`),
-        bucketIndex: parseNumber(record.bucketIndex, `${label}.bucketIndex`),
+        bucketIndex: parseNonNegativeInteger(record.bucketIndex, `${label}.bucketIndex`),
         ...shared
       } satisfies RemoveQuoteStep;
     case "DRAW_DEBT": {
       const step: DrawDebtStep = {
         type,
         amount: parseBigIntValue(record.amount, `${label}.amount`),
-        limitIndex: parseNumber(record.limitIndex, `${label}.limitIndex`),
+        limitIndex: parseNonNegativeInteger(record.limitIndex, `${label}.limitIndex`),
         ...shared
       };
 
@@ -147,7 +174,7 @@ export function resolveExecutionStep(input: unknown, label = "execution step"): 
       }
 
       if (record.limitIndex !== undefined) {
-        step.limitIndex = parseNumber(record.limitIndex, `${label}.limitIndex`);
+        step.limitIndex = parseNonNegativeInteger(record.limitIndex, `${label}.limitIndex`);
       }
 
       if (record.recipient !== undefined) {
@@ -160,12 +187,12 @@ export function resolveExecutionStep(input: unknown, label = "execution step"): 
       const step: AddCollateralStep = {
         type,
         amount: parseBigIntValue(record.amount, `${label}.amount`),
-        bucketIndex: parseNumber(record.bucketIndex, `${label}.bucketIndex`),
+        bucketIndex: parseNonNegativeInteger(record.bucketIndex, `${label}.bucketIndex`),
         ...shared
       };
 
       if (record.expiry !== undefined) {
-        step.expiry = parseNumber(record.expiry, `${label}.expiry`);
+        step.expiry = parsePositiveInteger(record.expiry, `${label}.expiry`);
       }
 
       return step;
@@ -178,7 +205,7 @@ export function resolveExecutionStep(input: unknown, label = "execution step"): 
       };
 
       if (record.bucketIndex !== undefined) {
-        step.bucketIndex = parseNumber(record.bucketIndex, `${label}.bucketIndex`);
+        step.bucketIndex = parseNonNegativeInteger(record.bucketIndex, `${label}.bucketIndex`);
       }
 
       return step;
@@ -239,7 +266,7 @@ export function resolvePlanCandidate(input: unknown, label = "plan candidate"): 
   }
 
   if (record.planningLookaheadUpdates !== undefined) {
-    candidate.planningLookaheadUpdates = parseNumber(
+    candidate.planningLookaheadUpdates = parsePositiveInteger(
       record.planningLookaheadUpdates,
       `${label}.planningLookaheadUpdates`
     );
@@ -295,7 +322,7 @@ export function resolvePoolSnapshot(input: unknown): PoolSnapshot {
   }
 
   if (record.planningLookaheadUpdates !== undefined) {
-    snapshot.planningLookaheadUpdates = parseNumber(
+    snapshot.planningLookaheadUpdates = parsePositiveInteger(
       record.planningLookaheadUpdates,
       "planningLookaheadUpdates"
     );
