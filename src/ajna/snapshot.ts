@@ -937,6 +937,10 @@ async function synthesizeAjnaLendCandidateViaSimulation(
     return undefined;
   }
 
+  if (readState.immediatePrediction.secondsUntilNextRateUpdate > 0) {
+    return undefined;
+  }
+
   const baselinePrediction = options.baselinePrediction ?? readState.prediction;
   const baselineDistance = distanceToTargetBand(
     baselinePrediction.predictedNextRateBps,
@@ -989,20 +993,53 @@ async function synthesizeAjnaLendCandidateViaSimulation(
         const expiryOffset = BigInt(
           config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS
         );
+        const initialLastInterestRateUpdateTimestamp =
+          readState.rateState.lastInterestRateUpdateTimestamp;
+        const baselinePredictionState: AjnaRatePrediction = {
+          predictedOutcome: baselinePrediction.predictedOutcome,
+          predictedNextRateWad: baselinePrediction.predictedNextRateWad,
+          predictedNextRateBps: baselinePrediction.predictedNextRateBps,
+          secondsUntilNextRateUpdate: 0
+        };
         let bestCandidate: PlanCandidate | undefined;
 
-        for (const addQuoteBucketIndex of addQuoteBucketIndexes) {
-          const evaluate = async (
-            quoteTokenAmount: bigint
-          ): Promise<{
-            predictedOutcome: RateMoveOutcome;
-            predictedRateWadAfterNextUpdate: bigint;
-            predictedRateBpsAfterNextUpdate: number;
-            improvesConvergence: boolean;
-          }> => {
-            const snapshotId = await testClient.snapshot();
+        async function simulateLendPath(
+          addQuote:
+            | {
+                amount: bigint;
+                bucketIndex: number;
+              }
+            | null
+        ): Promise<{
+          firstRateWadAfterNextUpdate: bigint;
+          firstRateBpsAfterNextUpdate: number;
+          firstOutcome: RateMoveOutcome;
+        }> {
+          const snapshotId = await testClient.snapshot();
 
-            try {
+          try {
+            let firstRateWadAfterNextUpdate = readState.rateState.currentRateWad;
+            let firstOutcome: RateMoveOutcome = "NO_CHANGE";
+            let firstUpdateObserved = false;
+
+            const maybeCaptureObservedUpdate = (stateAfterAction: AjnaPoolStateRead): void => {
+              if (
+                firstUpdateObserved ||
+                stateAfterAction.rateState.lastInterestRateUpdateTimestamp ===
+                  initialLastInterestRateUpdateTimestamp
+              ) {
+                return;
+              }
+
+              firstUpdateObserved = true;
+              firstRateWadAfterNextUpdate = stateAfterAction.rateState.currentRateWad;
+              firstOutcome = deriveRateMoveOutcome(
+                readState.rateState.currentRateWad,
+                firstRateWadAfterNextUpdate
+              );
+            };
+
+            if (addQuote) {
               const simulationBlock = await publicClient.getBlock({ blockTag: "latest" });
               const hash = await walletClient.writeContract({
                 account: simulationSenderAddress,
@@ -1011,21 +1048,21 @@ async function synthesizeAjnaLendCandidateViaSimulation(
                 abi: ajnaPoolAbi,
                 functionName: "addQuoteToken",
                 args: [
-                  quoteTokenAmount,
-                  BigInt(addQuoteBucketIndex),
+                  addQuote.amount,
+                  BigInt(addQuote.bucketIndex),
                   simulationBlock.timestamp + expiryOffset
                 ]
               });
               const receipt = await publicClient.waitForTransactionReceipt({ hash });
               if (receipt.status !== "success") {
-                return {
-                  predictedOutcome: baselinePrediction.predictedOutcome,
-                  predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
-                  predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
-                  improvesConvergence: false
-                };
+                throw new Error("addQuoteToken simulation reverted");
               }
 
+              const postActionReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              maybeCaptureObservedUpdate(postActionReadState);
+            }
+
+            if (!firstUpdateObserved) {
               let simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
               if (simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate > 0) {
                 await testClient.increaseTime({
@@ -1049,35 +1086,61 @@ async function synthesizeAjnaLendCandidateViaSimulation(
                 hash: updateHash
               });
               if (updateReceipt.status !== "success") {
-                return {
-                  predictedOutcome: baselinePrediction.predictedOutcome,
-                  predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
-                  predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
-                  improvesConvergence: false
-                };
+                throw new Error("updateInterest simulation reverted");
               }
 
               const postUpdateReadState = await readAjnaPoolState(publicClient, options.poolAddress);
-              const predictedRateWadAfterNextUpdate =
-                postUpdateReadState.rateState.currentRateWad;
-              const predictedRateBpsAfterNextUpdate = toRateBps(
-                predictedRateWadAfterNextUpdate
+              firstRateWadAfterNextUpdate = postUpdateReadState.rateState.currentRateWad;
+              firstOutcome = deriveRateMoveOutcome(
+                readState.rateState.currentRateWad,
+                firstRateWadAfterNextUpdate
               );
+            }
+
+            return {
+              firstRateWadAfterNextUpdate,
+              firstRateBpsAfterNextUpdate: toRateBps(firstRateWadAfterNextUpdate),
+              firstOutcome
+            };
+          } finally {
+            await testClient.revert({ id: snapshotId });
+          }
+        }
+
+        const baselinePath = await simulateLendPath(null);
+        const baselineDistance = distanceToTargetBand(
+          baselinePath.firstRateBpsAfterNextUpdate,
+          targetBand
+        );
+
+        for (const addQuoteBucketIndex of addQuoteBucketIndexes) {
+          const evaluate = async (
+            quoteTokenAmount: bigint
+          ): Promise<{
+            predictedOutcome: RateMoveOutcome;
+            predictedRateWadAfterNextUpdate: bigint;
+            predictedRateBpsAfterNextUpdate: number;
+            improvesConvergence: boolean;
+          }> => {
+            try {
+              const candidatePath = await simulateLendPath({
+                amount: quoteTokenAmount,
+                bucketIndex: addQuoteBucketIndex
+              });
+              const predictedRateWadAfterNextUpdate = candidatePath.firstRateWadAfterNextUpdate;
+              const predictedRateBpsAfterNextUpdate = candidatePath.firstRateBpsAfterNextUpdate;
               const predictedDistance = distanceToTargetBand(
                 predictedRateBpsAfterNextUpdate,
                 targetBand
               );
-              const predictedOutcome = deriveRateMoveOutcome(
-                readState.rateState.currentRateWad,
-                predictedRateWadAfterNextUpdate
-              );
+              const predictedOutcome = candidatePath.firstOutcome;
 
               return {
                 predictedOutcome,
                 predictedRateWadAfterNextUpdate,
                 predictedRateBpsAfterNextUpdate,
                 improvesConvergence:
-                  predictionChanged(baselinePrediction, {
+                  predictionChanged(baselinePredictionState, {
                     predictedOutcome,
                     predictedNextRateWad: predictedRateWadAfterNextUpdate,
                     predictedNextRateBps: predictedRateBpsAfterNextUpdate,
@@ -1087,13 +1150,11 @@ async function synthesizeAjnaLendCandidateViaSimulation(
               };
             } catch {
               return {
-                predictedOutcome: baselinePrediction.predictedOutcome,
-                predictedRateWadAfterNextUpdate: baselinePrediction.predictedNextRateWad,
-                predictedRateBpsAfterNextUpdate: baselinePrediction.predictedNextRateBps,
+                predictedOutcome: baselinePath.firstOutcome,
+                predictedRateWadAfterNextUpdate: baselinePath.firstRateWadAfterNextUpdate,
+                predictedRateBpsAfterNextUpdate: baselinePath.firstRateBpsAfterNextUpdate,
                 improvesConvergence: false
               };
-            } finally {
-              await testClient.revert({ id: snapshotId });
             }
           };
 
@@ -1153,7 +1214,7 @@ async function synthesizeAjnaLendCandidateViaSimulation(
               targetBand
             ),
             quoteTokenDelta: upperBound,
-            explanation: `simulation-backed add-quote threshold changes the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.predictedOutcome}`
+            explanation: `simulation-backed add-quote threshold changes the next eligible Ajna move from ${baselinePath.firstOutcome} to ${upperEvaluation.predictedOutcome}`
           };
 
           if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
@@ -1538,6 +1599,8 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
   const borrowerAddress = resolveSimulationBorrowerAddress(config, simulationSenderAddress);
   const collateralAmounts = resolveDrawDebtCollateralAmounts(config);
   const lookaheadUpdates = resolveBorrowSimulationLookaheadUpdates(config);
+  const initialLastInterestRateUpdateTimestamp =
+    readState.rateState.lastInterestRateUpdateTimestamp;
 
   return withTemporaryAnvilFork(
     {
@@ -1593,6 +1656,29 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
           const snapshotId = await testClient.snapshot();
 
           try {
+            let firstRateWadAfterNextUpdate = readState.rateState.currentRateWad;
+            let firstOutcome: RateMoveOutcome = "NO_CHANGE";
+            let terminalRateWad = readState.rateState.currentRateWad;
+            let completedLookaheadUpdates = 0;
+
+            const maybeCaptureObservedUpdate = (stateAfterAction: AjnaPoolStateRead): void => {
+              terminalRateWad = stateAfterAction.rateState.currentRateWad;
+              if (
+                completedLookaheadUpdates > 0 ||
+                stateAfterAction.rateState.lastInterestRateUpdateTimestamp ===
+                  initialLastInterestRateUpdateTimestamp
+              ) {
+                return;
+              }
+
+              completedLookaheadUpdates = 1;
+              firstRateWadAfterNextUpdate = stateAfterAction.rateState.currentRateWad;
+              firstOutcome = deriveRateMoveOutcome(
+                readState.rateState.currentRateWad,
+                firstRateWadAfterNextUpdate
+              );
+            };
+
             if (drawDebt) {
               const drawDebtHash = await walletClient.writeContract({
                 account: simulationSenderAddress,
@@ -1613,13 +1699,12 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
               if (drawDebtReceipt.status !== "success") {
                 throw new Error("drawDebt simulation reverted");
               }
+
+              const postDrawDebtReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              maybeCaptureObservedUpdate(postDrawDebtReadState);
             }
 
-            let firstRateWadAfterNextUpdate = readState.rateState.currentRateWad;
-            let firstOutcome: RateMoveOutcome = "NO_CHANGE";
-            let terminalRateWad = readState.rateState.currentRateWad;
-
-            for (let updateIndex = 0; updateIndex < lookaheadUpdates; updateIndex += 1) {
+            for (; completedLookaheadUpdates < lookaheadUpdates; completedLookaheadUpdates += 1) {
               let simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
               if (simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate > 0) {
                 await testClient.increaseTime({
@@ -1649,7 +1734,7 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
               const postUpdateReadState = await readAjnaPoolState(publicClient, options.poolAddress);
               terminalRateWad = postUpdateReadState.rateState.currentRateWad;
 
-              if (updateIndex === 0) {
+              if (completedLookaheadUpdates === 0) {
                 firstRateWadAfterNextUpdate = terminalRateWad;
                 firstOutcome = deriveRateMoveOutcome(
                   readState.rateState.currentRateWad,
@@ -1863,6 +1948,8 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
   const minimumAmount =
     config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
   const maxBorrowAmount = config.maxBorrowExposure;
+  const initialLastInterestRateUpdateTimestamp =
+    readState.rateState.lastInterestRateUpdateTimestamp;
   if (minimumAmount > maxBorrowAmount) {
     return undefined;
   }
@@ -1952,6 +2039,29 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
           const snapshotId = await testClient.snapshot();
 
           try {
+            let firstRateWadAfterNextUpdate = readState.rateState.currentRateWad;
+            let firstOutcome: RateMoveOutcome = "NO_CHANGE";
+            let terminalRateWad = readState.rateState.currentRateWad;
+            let completedLookaheadUpdates = 0;
+
+            const maybeCaptureObservedUpdate = (stateAfterAction: AjnaPoolStateRead): void => {
+              terminalRateWad = stateAfterAction.rateState.currentRateWad;
+              if (
+                completedLookaheadUpdates > 0 ||
+                stateAfterAction.rateState.lastInterestRateUpdateTimestamp ===
+                  initialLastInterestRateUpdateTimestamp
+              ) {
+                return;
+              }
+
+              completedLookaheadUpdates = 1;
+              firstRateWadAfterNextUpdate = stateAfterAction.rateState.currentRateWad;
+              firstOutcome = deriveRateMoveOutcome(
+                readState.rateState.currentRateWad,
+                firstRateWadAfterNextUpdate
+              );
+            };
+
             if (actions?.addQuoteAmount !== undefined && actions.addQuoteAmount > 0n) {
               if (actions.addQuoteBucketIndex === undefined) {
                 throw new Error("dual-side simulation requires an addQuote bucket index");
@@ -1974,6 +2084,9 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
               if (addQuoteReceipt.status !== "success") {
                 throw new Error("addQuoteToken simulation reverted");
               }
+
+              const postAddQuoteReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              maybeCaptureObservedUpdate(postAddQuoteReadState);
             }
 
             if (actions?.drawDebtAmount !== undefined && actions.drawDebtAmount > 0n) {
@@ -1999,13 +2112,12 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
               if (drawDebtReceipt.status !== "success") {
                 throw new Error("drawDebt simulation reverted");
               }
+
+              const postDrawDebtReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              maybeCaptureObservedUpdate(postDrawDebtReadState);
             }
 
-            let firstRateWadAfterNextUpdate = readState.rateState.currentRateWad;
-            let firstOutcome: RateMoveOutcome = "NO_CHANGE";
-            let terminalRateWad = readState.rateState.currentRateWad;
-
-            for (let updateIndex = 0; updateIndex < lookaheadUpdates; updateIndex += 1) {
+            for (; completedLookaheadUpdates < lookaheadUpdates; completedLookaheadUpdates += 1) {
               let simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
               if (simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate > 0) {
                 await testClient.increaseTime({
@@ -2035,7 +2147,7 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
               const postUpdateReadState = await readAjnaPoolState(publicClient, options.poolAddress);
               terminalRateWad = postUpdateReadState.rateState.currentRateWad;
 
-              if (updateIndex === 0) {
+              if (completedLookaheadUpdates === 0) {
                 firstRateWadAfterNextUpdate = terminalRateWad;
                 firstOutcome = deriveRateMoveOutcome(
                   readState.rateState.currentRateWad,

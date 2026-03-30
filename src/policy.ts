@@ -54,10 +54,13 @@ function snapshotGuards(
   const executesUpdateInterest = plan.requiredSteps.some(
     (step) => step.type === "UPDATE_INTEREST"
   );
+  const hasMutatingStep = plan.requiredSteps.some((step) => step.type !== "UPDATE_INTEREST");
+  const dueWindowIsAlreadyOpen = snapshot.secondsUntilNextRateUpdate <= 0;
 
   if (
     snapshot.secondsUntilNextRateUpdate < config.minTimeBeforeRateWindowSeconds &&
-    !executesUpdateInterest
+    !executesUpdateInterest &&
+    !(dueWindowIsAlreadyOpen && hasMutatingStep)
   ) {
     return {
       code: "UNSAFE_TIME_WINDOW",

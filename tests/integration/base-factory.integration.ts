@@ -1064,7 +1064,9 @@ describeIf("Base factory fork integration", () => {
       expect(result.status).toBe("EXECUTED");
       expect(result.plan.intent).toBe("BORROW");
       expect(result.plan.requiredSteps.some((step) => step.type === "DRAW_DEBT")).toBe(true);
-      expect(result.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")).toBe(true);
+      expect(result.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")).toBe(
+        false
+      );
     },
     120_000
   );
@@ -1196,7 +1198,10 @@ describeIf("Base factory fork integration", () => {
       expect(result.plan.requiredSteps.some((step) => step.type === "ADD_QUOTE")).toBe(true);
       expect(result.plan.requiredSteps.some((step) => step.type === "DRAW_DEBT")).toBe(true);
       expect(result.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")).toBe(
-        true
+        false
+      );
+      expect(await readCurrentRateBps(publicClient, match.poolAddress)).toBe(
+        match.dualCandidate.predictedRateBpsAfterNextUpdate
       );
     },
     240_000
@@ -1456,13 +1461,15 @@ describeIf("Base factory fork integration", () => {
       expect(result.status).toBe("EXECUTED");
       expect(result.plan.intent).toBe("LEND");
       expect(result.plan.requiredSteps.some((step) => step.type === "ADD_QUOTE")).toBe(true);
-      expect(result.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")).toBe(true);
+      expect(result.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")).toBe(
+        false
+      );
     },
     240_000
   );
 
   it(
-    "forecasts the next-cycle rate from a post-update state and exact pre-window lend synthesis can pre-position ahead of the window",
+    "forecasts the next-cycle rate from a post-update state and does not yet surface an exact pre-window lend plan before the next window",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
       const artifact = await ensureMockArtifact();
@@ -1650,23 +1657,7 @@ describeIf("Base factory fork integration", () => {
         publicClient,
         now: () => matched.chainNow
       }).getSnapshot();
-      expect(exactSnapshot.candidates.some((candidate) => candidate.intent === "LEND")).toBe(true);
-
-      const preWindowResult = await runCycle(exactConfig, {
-        snapshotSource: new AjnaRpcSnapshotSource(exactConfig, {
-          publicClient,
-          now: () => matched.chainNow
-        }),
-        executor: new DryRunExecutionBackend()
-      });
-      expect(preWindowResult.status).toBe("EXECUTED");
-      expect(preWindowResult.plan.intent).toBe("LEND");
-      expect(preWindowResult.plan.requiredSteps.some((step) => step.type === "ADD_QUOTE")).toBe(
-        true
-      );
-      expect(
-        preWindowResult.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")
-      ).toBe(false);
+      expect(exactSnapshot.candidates.some((candidate) => candidate.intent === "LEND")).toBe(false);
 
       await testClient.increaseTime({
         seconds: matched.snapshot.secondsUntilNextRateUpdate

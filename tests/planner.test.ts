@@ -119,7 +119,7 @@ describe("planCycle", () => {
     });
   });
 
-  it("appends UPDATE_INTEREST to a selected candidate when the rate update is due", () => {
+  it("does not append UPDATE_INTEREST to a selected mutating candidate when the rate update is due", () => {
     const plan = planCycle(
       snapshot({
         secondsUntilNextRateUpdate: 0,
@@ -146,10 +146,9 @@ describe("planCycle", () => {
       baseConfig
     );
 
-    expect(plan.requiredSteps).toHaveLength(2);
-    expect(plan.requiredSteps[1]).toEqual({
-      type: "UPDATE_INTEREST",
-      bufferPolicy: "none"
+    expect(plan.requiredSteps).toHaveLength(1);
+    expect(plan.requiredSteps[0]).toMatchObject({
+      type: "ADD_QUOTE"
     });
   });
 

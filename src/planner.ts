@@ -118,6 +118,10 @@ function maybeAppendUpdateInterest(
     return steps;
   }
 
+  if (steps.length > 0) {
+    return steps;
+  }
+
   return [...steps, UPDATE_INTEREST_STEP];
 }
 

@@ -32,7 +32,7 @@ Today, the snapshot builder reads real pool state and predicts the next Ajna rat
 - snapshot `predictedNextOutcome` / `predictedNextRateBps` now describe the next eligible Ajna rate update, even when that update is not due yet
 - candidate usefulness is now judged against the do-nothing next update path, not just against the current rate, so the planner can prefer neutralizing a bad upcoming move over letting the pool drift farther away
 
-The current Base-fork evidence is important: the keeper now finds a lend plan in representative borrowed-pool step-up fixtures, exact pre-window lend synthesis can pre-position ahead of the next eligible update window, borrower-side lookahead planning can find a representative multi-cycle `BORROW` plan when a wider search space is enabled, and multi-bucket quote search now surfaces and naturally selects a representative exact `LEND_AND_BORROW` candidate on the fork. On the borrower side, exact same-cycle `DRAW_DEBT` search still does not find a safe candidate in the representative abandoned-pool fixture covered by integration. So borrower-side exact mode is now useful for multi-cycle planning, but not yet a proven live same-cycle borrow executor.
+The current Base-fork evidence is important: the keeper now finds a lend plan in representative borrowed-pool step-up fixtures, borrower-side lookahead planning can find a representative multi-cycle `BORROW` plan when a wider search space is enabled, and multi-bucket quote search now surfaces, naturally selects, and live-executes a representative exact `LEND_AND_BORROW` candidate on the fork. Due-window mutating plans no longer append a separate `UPDATE_INTEREST` step, because the first mutating action can consume the overdue update itself. On the borrower side, exact same-cycle `DRAW_DEBT` search still does not find a safe candidate in the representative abandoned-pool fixture covered by integration. Exact pre-window lend synthesis is now intentionally disabled, because the later live fork proof did not hold up. So borrower-side exact mode is useful for multi-cycle planning, but not yet a proven live same-cycle borrow executor.
 
 ## Requirements
 
@@ -184,11 +184,11 @@ The Base integration test is intended to stay close to real deployed Ajna behavi
 - it creates a fresh pool through that real factory
 - it advances time past the 12-hour update window
 - it runs the keeper cycle and verifies that `UPDATE_INTEREST` changes the rate as expected
-- it also proves that the keeper can find a due-cycle `LEND` plan in a representative borrowed-pool step-up fixture
+- it also proves that the keeper can find a due-cycle `LEND` plan in a representative borrowed-pool step-up fixture without appending a separate `UPDATE_INTEREST` step
 - it also proves that exact same-cycle `BORROW` synthesis still finds no candidate in a representative abandoned-pool Base fixture, even though the fork reaches real states where borrower-side steering would be desirable
 - it also proves that borrower-side lookahead planning can find a representative multi-cycle `BORROW` plan when `borrowSimulationLookaheadUpdates` is enabled with a wider search space
-- it also proves that multi-bucket quote search can surface and naturally select a representative exact `LEND_AND_BORROW` candidate on the fork
-- it proves the one-cycle-ahead forecast by checking that a post-update not-due snapshot predicts the next eligible rate update correctly on a later real `updateInterest`
+- it also proves that multi-bucket quote search can surface, naturally select, and live-execute a representative exact `LEND_AND_BORROW` candidate on the fork
+- it proves the one-cycle-ahead forecast by checking that a post-update not-due snapshot predicts the passive next eligible rate update correctly on a later real `updateInterest`
 - it proves repeated update-only cycles across roughly a week by stepping a pool from `1000 bps` down to a `200 bps` target band over 15 successive real updates, then verifying the keeper stops cleanly once the band is reached
 
 Run it with:
@@ -201,15 +201,15 @@ npm run test:integration:base
 
 - The planner does not yet synthesize the minimum directional threshold directly from live Ajna pool state.
 - `manualCandidates` are still the bridge for live steering plans.
-- Exact simulation-backed lend synthesis is opt-in and covered by Base-fork integration for both due-cycle and pre-window representative lend fixtures.
-- Exact pre-window lend synthesis can now emit a concrete `LEND` plan before the next eligible update window opens, while the forecast path remains validated against a later real `updateInterest`.
+- Exact simulation-backed lend synthesis is opt-in and currently limited to due-window representative lend fixtures.
+- Exact pre-window lend synthesis is intentionally disabled for now, because the live fork proof did not match the simulated candidate in the representative not-due step-up fixture.
 - Exact simulation-backed borrow synthesis is opt-in and now supports multi-cycle planning through `borrowSimulationLookaheadUpdates`, with representative Base-fork coverage for a 3-update borrower plan.
 - Exact simulation-backed `LEND_AND_BORROW` synthesis is now wired into the live snapshot path when both exact lend and borrow synthesis are enabled, and it benchmarks candidate dual paths against the best exact single-action paths before emitting them.
 - Adding multi-bucket quote search made that stricter benchmark productive again in the representative Base fixture: the keeper now surfaces and naturally selects a real exact `LEND_AND_BORROW` candidate there.
-- The representative live-execution equivalence check for that exact dual plan is still not locked in; the surfaced plan is now selected, but post-execution rate parity with the simulation remains a separate validation task.
+- The representative live-execution equivalence check for the exact dual plan is now covered on the fork: the executed due-window plan lands on the same first-update rate the simulation predicted.
 - Exact same-cycle borrow synthesis remains conservative in the representative Base-fork abandoned-pool fixture; the fork reaches eligible states, but no same-cycle live `DRAW_DEBT` candidate is appearing there yet.
 - Heuristic `LEND_AND_BORROW` synthesis only covers the “temper an oversized borrow with a small quote deposit” case today; it is not yet a general liquidity-seeding or multi-dimensional search strategy.
 - Heuristic lend synthesis is opt-in and currently validated for live planning/dry-run discovery, not for blind live execution in borrowed pools.
 - Repeated natural update-only convergence is covered by integration tests, including week-scale multi-cycle operation.
 - Token approvals are checked, not managed.
-- The current fork integration tests prove factory creation, real interest updates, next-cycle forecasting, and the exact-vs-heuristic split for lend planning, but not yet a fully validated live-executed computed `LEND` or `BORROW` steering cycle.
+- The current fork integration tests prove factory creation, real interest updates, next-cycle forecasting, a live-executed representative due-window `LEND_AND_BORROW` cycle, a representative due-window `LEND` planning cycle, and the exact-vs-heuristic split for lend planning, but not yet a fully validated live-executed computed borrower-side steering cycle.

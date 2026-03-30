@@ -114,4 +114,14 @@ describe("policy", () => {
 
     expect(failure).toBeUndefined();
   });
+
+  it("allows already-due mutating plans that will consume the overdue update", () => {
+    const failure = validatePlan(
+      plan,
+      { ...snapshot, secondsUntilNextRateUpdate: 0 },
+      config
+    );
+
+    expect(failure).toBeUndefined();
+  });
 });
