@@ -10,7 +10,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:integration:base": "RUN_BASE_FORK_TESTS=1 vitest run --config vitest.integration.config.ts tests/integration/base-factory.integration.ts"
+    "test:integration:base:smoke": "RUN_BASE_FORK_TESTS=1 RUN_BASE_FORK_SMOKE_TESTS=1 vitest run --config vitest.integration.config.ts tests/integration/base-factory.integration.ts",
+    "test:integration:base": "RUN_BASE_FORK_TESTS=1 vitest run --config vitest.integration.config.ts tests/integration/base-factory.integration.ts",
+    "test:integration:base:slow": "RUN_BASE_FORK_TESTS=1 RUN_BASE_FORK_SLOW_TESTS=1 vitest run --config vitest.integration.config.ts tests/integration/base-factory.integration.ts",
+    "test:integration:base:all": "RUN_BASE_FORK_TESTS=1 RUN_BASE_FORK_ALL_TESTS=1 vitest run --config vitest.integration.config.ts tests/integration/base-factory.integration.ts"
   },
   "engines": {
     "node": ">=20.5.0"

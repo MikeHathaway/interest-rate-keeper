@@ -52,13 +52,18 @@ npm install
 npm run build
 npm run typecheck
 npm test
+npm run test:integration:base:smoke
 npm run test:integration:base
 ```
 
 Notes:
 - `npm test` runs the fast unit suite only.
-- `npm run test:integration:base` runs the Base-fork integration test in [`tests/integration/base-factory.integration.ts`](./tests/integration/base-factory.integration.ts).
+- `npm run test:integration:base:smoke` runs the smallest Base-fork health checks.
+- `npm run test:integration:base` runs the broader default Base-fork integration profile in [`tests/integration/base-factory.integration.ts`](./tests/integration/base-factory.integration.ts).
+- `npm run test:integration:base:slow` runs the heavier exact-path Base-fork proofs.
+- `npm run test:integration:base:all` runs all profiles together.
 - The Base integration test uses `BASE_RPC_URL` if provided, otherwise it falls back to `https://mainnet.base.org`.
+- The Base integration test logs the selected profile and fork host at startup so it is obvious which upstream RPC endpoint Anvil is using.
 
 ## Env Files
 
@@ -74,8 +79,11 @@ Typical local values:
 
 ```dotenv
 BASE_RPC_URL=https://your-base-rpc.example
+BASE_ACTIVE_POOL_ADDRESS=0x...
 AJNA_KEEPER_PRIVATE_KEY=0x...
 ```
+
+`BASE_ACTIVE_POOL_ADDRESS` is optional. When set, the real active-pool replay test skips factory-log discovery and replays against that specific Base pool instead.
 
 ## CLI Usage
 
@@ -191,6 +199,7 @@ The Base integration test is intended to stay close to real deployed Ajna behavi
 - it also proves that multi-bucket quote search can surface, naturally select, and live-execute a representative exact `LEND_AND_BORROW` candidate on the fork
 - it proves the one-cycle-ahead forecast by checking that a post-update not-due snapshot predicts the passive next eligible rate update correctly on a later real `updateInterest`
 - it proves repeated update-only cycles across roughly a week by stepping a pool from `1000 bps` down to a `200 bps` target band over 15 successive real updates, then verifying the keeper stops cleanly once the band is reached
+- it can optionally skip live pool discovery and replay against `BASE_ACTIVE_POOL_ADDRESS` when that env var is set
 
 Run it with:
 

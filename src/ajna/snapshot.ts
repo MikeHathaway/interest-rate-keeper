@@ -41,6 +41,63 @@ const EXACT_DUAL_MAX_BUCKETS = 3;
 const EXACT_DUAL_MAX_QUOTE_SAMPLES = 6;
 const EXACT_DUAL_MAX_BORROW_SAMPLES = 6;
 const EXACT_DUAL_MAX_PROMISING_BASINS = 3;
+const MAX_SIMULATION_ACCOUNT_STATE_CACHE_ENTRIES = 256;
+const MAX_EXACT_SIMULATION_PATH_CACHE_ENTRIES = 20_000;
+
+interface SimulationAccountState {
+  simulationSenderAddress: HexAddress;
+  borrowerAddress: HexAddress;
+  quoteTokenBalance?: bigint;
+  quoteTokenAllowance?: bigint;
+  collateralBalance?: bigint;
+  collateralAllowance?: bigint;
+}
+
+interface LendSimulationPathResult {
+  firstRateWadAfterNextUpdate: bigint;
+  firstRateBpsAfterNextUpdate: number;
+  firstOutcome: RateMoveOutcome;
+}
+
+interface BorrowSimulationPathResult extends LendSimulationPathResult {
+  terminalRateBps: number;
+  terminalDistanceToTargetBps: number;
+}
+
+type DualSimulationPathResult = BorrowSimulationPathResult;
+
+const simulationAccountStateCache = new Map<string, SimulationAccountState>();
+const lendSimulationPathCache = new Map<string, LendSimulationPathResult | null>();
+const borrowSimulationPathCache = new Map<string, BorrowSimulationPathResult | null>();
+const dualSimulationPathCache = new Map<string, DualSimulationPathResult | null>();
+
+function setBoundedCacheEntry<K, V>(cache: Map<K, V>, key: K, value: V, maxEntries: number): void {
+  if (cache.has(key)) {
+    cache.delete(key);
+  }
+
+  cache.set(key, value);
+
+  while (cache.size > maxEntries) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) {
+      break;
+    }
+    cache.delete(oldestKey);
+  }
+}
+
+function buildSimulationCacheKey(parts: Array<string | number | bigint | undefined>): string {
+  return parts
+    .map((part) => {
+      if (part === undefined) {
+        return "-";
+      }
+
+      return typeof part === "bigint" ? part.toString() : String(part);
+    })
+    .join(":");
+}
 
 function wmul(left: bigint, right: bigint): bigint {
   if (left === 0n || right === 0n) {
@@ -878,6 +935,97 @@ function buildPoolSnapshot(
   };
 }
 
+async function readSimulationAccountState(
+  publicClient: PublicClient,
+  poolAddress: HexAddress,
+  readState: AjnaPoolStateRead,
+  config: KeeperConfig,
+  options: {
+    needsQuoteState: boolean;
+    needsCollateralState: boolean;
+  }
+): Promise<SimulationAccountState> {
+  const simulationSenderAddress = resolveSimulationSenderAddress(config);
+  const borrowerAddress = resolveSimulationBorrowerAddress(config, simulationSenderAddress);
+  const snapshotFingerprint = buildSnapshotFingerprint(
+    poolAddress,
+    readState.blockNumber,
+    readState.rateState
+  );
+  const cacheKey = buildSimulationCacheKey([
+    "account-state",
+    snapshotFingerprint,
+    simulationSenderAddress,
+    borrowerAddress,
+    options.needsQuoteState ? "quote" : "no-quote",
+    options.needsCollateralState ? "collateral" : "no-collateral"
+  ]);
+  const cached = simulationAccountStateCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const [
+    quoteTokenBalance,
+    quoteTokenAllowance,
+    collateralBalance,
+    collateralAllowance
+  ] = await Promise.all([
+    options.needsQuoteState
+      ? publicClient.readContract({
+          address: readState.quoteTokenAddress,
+          abi: erc20Abi,
+          functionName: "balanceOf",
+          args: [simulationSenderAddress],
+          blockNumber: readState.blockNumber
+        })
+      : Promise.resolve(undefined),
+    options.needsQuoteState
+      ? publicClient.readContract({
+          address: readState.quoteTokenAddress,
+          abi: erc20Abi,
+          functionName: "allowance",
+          args: [simulationSenderAddress, poolAddress],
+          blockNumber: readState.blockNumber
+        })
+      : Promise.resolve(undefined),
+    options.needsCollateralState
+      ? publicClient.readContract({
+          address: readState.collateralAddress,
+          abi: erc20Abi,
+          functionName: "balanceOf",
+          args: [simulationSenderAddress],
+          blockNumber: readState.blockNumber
+        })
+      : Promise.resolve(undefined),
+    options.needsCollateralState
+      ? publicClient.readContract({
+          address: readState.collateralAddress,
+          abi: erc20Abi,
+          functionName: "allowance",
+          args: [simulationSenderAddress, poolAddress],
+          blockNumber: readState.blockNumber
+        })
+      : Promise.resolve(undefined)
+  ]);
+
+  const accountState: SimulationAccountState = {
+    simulationSenderAddress,
+    borrowerAddress,
+    ...(quoteTokenBalance === undefined ? {} : { quoteTokenBalance }),
+    ...(quoteTokenAllowance === undefined ? {} : { quoteTokenAllowance }),
+    ...(collateralBalance === undefined ? {} : { collateralBalance }),
+    ...(collateralAllowance === undefined ? {} : { collateralAllowance })
+  };
+  setBoundedCacheEntry(
+    simulationAccountStateCache,
+    cacheKey,
+    accountState,
+    MAX_SIMULATION_ACCOUNT_STATE_CACHE_ENTRIES
+  );
+  return accountState;
+}
+
 export function synthesizeAjnaLendCandidate(
   state: AjnaRateState,
   config: KeeperConfig,
@@ -1078,6 +1226,69 @@ async function withTemporaryAnvilFork<T>(
     walletClient: ReturnType<typeof createWalletClient>;
   }) => Promise<T>
 ): Promise<T> {
+  return withLazyTemporaryAnvilFork(options, async (getContext) => {
+    return work(await getContext());
+  });
+}
+
+async function withLazyTemporaryAnvilFork<T>(
+  options: {
+    rpcUrl: string;
+    chainId: number;
+    blockNumber: bigint;
+  },
+  work: (getContext: () => Promise<{
+    publicClient: PublicClient;
+    testClient: ReturnType<typeof createTestClient>;
+    walletClient: ReturnType<typeof createWalletClient>;
+  }>) => Promise<T>
+): Promise<T> {
+  let handlePromise:
+    | Promise<{
+        publicClient: PublicClient;
+        testClient: ReturnType<typeof createTestClient>;
+        walletClient: ReturnType<typeof createWalletClient>;
+        stop: () => Promise<void>;
+      }>
+    | undefined;
+
+  async function getHandle() {
+    if (!handlePromise) {
+      handlePromise = startTemporaryAnvilFork(options);
+    }
+
+    return handlePromise;
+  }
+
+  try {
+    return await work(async () => {
+      const handle = await getHandle();
+      return {
+        publicClient: handle.publicClient,
+        testClient: handle.testClient,
+        walletClient: handle.walletClient
+      };
+    });
+  } finally {
+    if (handlePromise) {
+      const handle = await handlePromise.catch(() => undefined);
+      if (handle) {
+        await handle.stop();
+      }
+    }
+  }
+}
+
+async function startTemporaryAnvilFork(options: {
+  rpcUrl: string;
+  chainId: number;
+  blockNumber: bigint;
+}): Promise<{
+  publicClient: PublicClient;
+  testClient: ReturnType<typeof createTestClient>;
+  walletClient: ReturnType<typeof createWalletClient>;
+  stop: () => Promise<void>;
+}> {
   const port = await findOpenPort();
   let stderrBuffer = "";
 
@@ -1134,12 +1345,17 @@ async function withTemporaryAnvilFork<T>(
       transport: http(rpcUrl)
     });
 
-    return await work({
+    return {
       publicClient,
       testClient,
-      walletClient
-    });
+      walletClient,
+      stop: async () => {
+        await stopChildProcess(anvil);
+      }
+    };
   } catch (error) {
+    await stopChildProcess(anvil);
+
     if (stderrBuffer.trim().length > 0) {
       throw new Error(
         `${error instanceof Error ? error.message : String(error)}\n${stderrBuffer.trim()}`
@@ -1147,8 +1363,6 @@ async function withTemporaryAnvilFork<T>(
     }
 
     throw error;
-  } finally {
-    await stopChildProcess(anvil);
   }
 }
 
@@ -1197,6 +1411,7 @@ async function synthesizeAjnaLendCandidateViaSimulation(
     poolAddress: HexAddress;
     rpcUrl: string;
     baselinePrediction?: AjnaRatePrediction;
+    accountState?: SimulationAccountState;
   }
 ): Promise<PlanCandidate | undefined> {
   const addQuoteBucketIndexes = resolveAddQuoteBucketIndexes(config);
@@ -1221,43 +1436,70 @@ async function synthesizeAjnaLendCandidateViaSimulation(
   );
   const minimumAmount =
     config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
-  const simulationSenderAddress = resolveSimulationSenderAddress(config);
+  const simulationSenderAddress =
+    options.accountState?.simulationSenderAddress ?? resolveSimulationSenderAddress(config);
+  const snapshotFingerprint = buildSnapshotFingerprint(
+    options.poolAddress,
+    readState.blockNumber,
+    readState.rateState
+  );
 
-  return withTemporaryAnvilFork(
+  return withLazyTemporaryAnvilFork(
     {
       rpcUrl: options.rpcUrl,
       chainId: config.chainId,
       blockNumber: readState.blockNumber
     },
-    async ({ publicClient, testClient, walletClient }) => {
-      await testClient.impersonateAccount({
-        address: simulationSenderAddress
-      });
-      await testClient.setBalance({
-        address: simulationSenderAddress,
-        value: 10n ** 24n
-      });
+    async (getSimulationContext) => {
+      let preparedSimulationContext = false;
+      async function getPreparedSimulationContext() {
+        const context = await getSimulationContext();
+        if (!preparedSimulationContext) {
+          await context.testClient.impersonateAccount({
+            address: simulationSenderAddress
+          });
+          await context.testClient.setBalance({
+            address: simulationSenderAddress,
+            value: 10n ** 24n
+          });
+          preparedSimulationContext = true;
+        }
+
+        return context;
+      }
 
       try {
-        const [quoteTokenBalance, quoteTokenAllowance] = await Promise.all([
-          publicClient.readContract({
-            address: readState.quoteTokenAddress,
-            abi: erc20Abi,
-            functionName: "balanceOf",
-            args: [simulationSenderAddress]
-          }),
-          publicClient.readContract({
-            address: readState.quoteTokenAddress,
-            abi: erc20Abi,
-            functionName: "allowance",
-            args: [simulationSenderAddress, options.poolAddress]
-          })
-        ]);
+        const effectiveAccountState =
+          options.accountState ??
+          (await (async (): Promise<SimulationAccountState> => {
+            const { publicClient } = await getPreparedSimulationContext();
+            const [quoteTokenBalance, quoteTokenAllowance] = await Promise.all([
+              publicClient.readContract({
+                address: readState.quoteTokenAddress,
+                abi: erc20Abi,
+                functionName: "balanceOf",
+                args: [simulationSenderAddress]
+              }),
+              publicClient.readContract({
+                address: readState.quoteTokenAddress,
+                abi: erc20Abi,
+                functionName: "allowance",
+                args: [simulationSenderAddress, options.poolAddress]
+              })
+            ]);
+
+            return {
+              simulationSenderAddress,
+              borrowerAddress: resolveSimulationBorrowerAddress(config, simulationSenderAddress),
+              quoteTokenBalance,
+              quoteTokenAllowance
+            };
+          })());
 
         const maxAmount = smallestBigInt(
           config.maxQuoteTokenExposure,
-          quoteTokenBalance,
-          quoteTokenAllowance
+          effectiveAccountState.quoteTokenBalance ?? 0n,
+          effectiveAccountState.quoteTokenAllowance ?? 0n
         );
         if (minimumAmount > maxAmount) {
           return undefined;
@@ -1283,11 +1525,23 @@ async function synthesizeAjnaLendCandidateViaSimulation(
                 bucketIndex: number;
               }
             | null
-        ): Promise<{
-          firstRateWadAfterNextUpdate: bigint;
-          firstRateBpsAfterNextUpdate: number;
-          firstOutcome: RateMoveOutcome;
-        }> {
+        ): Promise<LendSimulationPathResult> {
+          const cacheKey = buildSimulationCacheKey([
+            "lend",
+            snapshotFingerprint,
+            simulationSenderAddress,
+            addQuote?.bucketIndex,
+            addQuote?.amount ?? 0n
+          ]);
+          const cachedPath = lendSimulationPathCache.get(cacheKey);
+          if (cachedPath !== undefined) {
+            if (cachedPath === null) {
+              throw new Error("cached lend simulation reverted");
+            }
+            return cachedPath;
+          }
+
+          const { publicClient, testClient, walletClient } = await getPreparedSimulationContext();
           const snapshotId = await testClient.snapshot();
 
           try {
@@ -1370,11 +1624,26 @@ async function synthesizeAjnaLendCandidateViaSimulation(
               );
             }
 
-            return {
+            const simulationResult: LendSimulationPathResult = {
               firstRateWadAfterNextUpdate,
               firstRateBpsAfterNextUpdate: toRateBps(firstRateWadAfterNextUpdate),
               firstOutcome
             };
+            setBoundedCacheEntry(
+              lendSimulationPathCache,
+              cacheKey,
+              simulationResult,
+              MAX_EXACT_SIMULATION_PATH_CACHE_ENTRIES
+            );
+            return simulationResult;
+          } catch (error) {
+            setBoundedCacheEntry(
+              lendSimulationPathCache,
+              cacheKey,
+              null,
+              MAX_EXACT_SIMULATION_PATH_CACHE_ENTRIES
+            );
+            throw error;
           } finally {
             await testClient.revert({ id: snapshotId });
           }
@@ -1497,9 +1766,12 @@ async function synthesizeAjnaLendCandidateViaSimulation(
 
         return bestCandidate;
       } finally {
-        await testClient.stopImpersonatingAccount({
-          address: simulationSenderAddress
-        });
+        if (preparedSimulationContext) {
+          const { testClient } = await getSimulationContext();
+          await testClient.stopImpersonatingAccount({
+            address: simulationSenderAddress
+          });
+        }
       }
     }
   );
@@ -1843,6 +2115,7 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
     poolAddress: HexAddress;
     rpcUrl: string;
     baselinePrediction?: AjnaRatePrediction;
+    accountState?: SimulationAccountState;
   }
 ): Promise<BorrowSimulationSynthesisResult | undefined> {
   const limitIndexes = resolveDrawDebtLimitIndexes(config);
@@ -1868,44 +2141,76 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
     return undefined;
   }
 
-  const simulationSenderAddress = resolveSimulationSenderAddress(config);
-  const borrowerAddress = resolveSimulationBorrowerAddress(config, simulationSenderAddress);
+  const simulationSenderAddress =
+    options.accountState?.simulationSenderAddress ?? resolveSimulationSenderAddress(config);
+  const borrowerAddress =
+    options.accountState?.borrowerAddress ??
+    resolveSimulationBorrowerAddress(config, simulationSenderAddress);
   const collateralAmounts = resolveDrawDebtCollateralAmounts(config);
   const lookaheadUpdates = resolveBorrowSimulationLookaheadUpdates(config);
   const initialLastInterestRateUpdateTimestamp =
     readState.rateState.lastInterestRateUpdateTimestamp;
+  const snapshotFingerprint = buildSnapshotFingerprint(
+    options.poolAddress,
+    readState.blockNumber,
+    readState.rateState
+  );
 
-  return withTemporaryAnvilFork(
+  return withLazyTemporaryAnvilFork(
     {
       rpcUrl: options.rpcUrl,
       chainId: config.chainId,
       blockNumber: readState.blockNumber
     },
-    async ({ publicClient, testClient, walletClient }) => {
-      await testClient.impersonateAccount({
-        address: simulationSenderAddress
-      });
-      await testClient.setBalance({
-        address: simulationSenderAddress,
-        value: 10n ** 24n
-      });
+    async (getSimulationContext) => {
+      let preparedSimulationContext = false;
+      async function getPreparedSimulationContext() {
+        const context = await getSimulationContext();
+        if (!preparedSimulationContext) {
+          await context.testClient.impersonateAccount({
+            address: simulationSenderAddress
+          });
+          await context.testClient.setBalance({
+            address: simulationSenderAddress,
+            value: 10n ** 24n
+          });
+          preparedSimulationContext = true;
+        }
+
+        return context;
+      }
 
       try {
-        const [collateralBalance, collateralAllowance] = await Promise.all([
-          publicClient.readContract({
-            address: readState.collateralAddress,
-            abi: erc20Abi,
-            functionName: "balanceOf",
-            args: [simulationSenderAddress]
-          }),
-          publicClient.readContract({
-            address: readState.collateralAddress,
-            abi: erc20Abi,
-            functionName: "allowance",
-            args: [simulationSenderAddress, options.poolAddress]
-          })
-        ]);
-        const maxAvailableCollateral = smallestBigInt(collateralBalance, collateralAllowance);
+        const effectiveAccountState =
+          options.accountState ??
+          (await (async (): Promise<SimulationAccountState> => {
+            const { publicClient } = await getPreparedSimulationContext();
+            const [collateralBalance, collateralAllowance] = await Promise.all([
+              publicClient.readContract({
+                address: readState.collateralAddress,
+                abi: erc20Abi,
+                functionName: "balanceOf",
+                args: [simulationSenderAddress]
+              }),
+              publicClient.readContract({
+                address: readState.collateralAddress,
+                abi: erc20Abi,
+                functionName: "allowance",
+                args: [simulationSenderAddress, options.poolAddress]
+              })
+            ]);
+
+            return {
+              simulationSenderAddress,
+              borrowerAddress,
+              collateralBalance,
+              collateralAllowance
+            };
+          })());
+        const maxAvailableCollateral = smallestBigInt(
+          effectiveAccountState.collateralBalance ?? 0n,
+          effectiveAccountState.collateralAllowance ?? 0n
+        );
         const candidateCollateralAmounts = collateralAmounts.filter(
           (collateralAmount) => collateralAmount <= maxAvailableCollateral
         );
@@ -1919,13 +2224,26 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
             limitIndex: number;
             collateralAmount: bigint;
           } | null
-        ): Promise<{
-          firstRateWadAfterNextUpdate: bigint;
-          firstRateBpsAfterNextUpdate: number;
-          firstOutcome: RateMoveOutcome;
-          terminalRateBps: number;
-          terminalDistanceToTargetBps: number;
-        }> {
+        ): Promise<BorrowSimulationPathResult> {
+          const cacheKey = buildSimulationCacheKey([
+            "borrow",
+            snapshotFingerprint,
+            simulationSenderAddress,
+            borrowerAddress,
+            lookaheadUpdates,
+            drawDebt?.limitIndex,
+            drawDebt?.collateralAmount ?? 0n,
+            drawDebt?.amount ?? 0n
+          ]);
+          const cachedPath = borrowSimulationPathCache.get(cacheKey);
+          if (cachedPath !== undefined) {
+            if (cachedPath === null) {
+              throw new Error("cached borrow simulation reverted");
+            }
+            return cachedPath;
+          }
+
+          const { publicClient, testClient, walletClient } = await getPreparedSimulationContext();
           const snapshotId = await testClient.snapshot();
 
           try {
@@ -2019,13 +2337,28 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
             const firstRateBpsAfterNextUpdate = toRateBps(firstRateWadAfterNextUpdate);
             const terminalRateBps = toRateBps(terminalRateWad);
 
-            return {
+            const simulationResult: BorrowSimulationPathResult = {
               firstRateWadAfterNextUpdate,
               firstRateBpsAfterNextUpdate,
               firstOutcome,
               terminalRateBps,
               terminalDistanceToTargetBps: distanceToTargetBand(terminalRateBps, targetBand)
             };
+            setBoundedCacheEntry(
+              borrowSimulationPathCache,
+              cacheKey,
+              simulationResult,
+              MAX_EXACT_SIMULATION_PATH_CACHE_ENTRIES
+            );
+            return simulationResult;
+          } catch (error) {
+            setBoundedCacheEntry(
+              borrowSimulationPathCache,
+              cacheKey,
+              null,
+              MAX_EXACT_SIMULATION_PATH_CACHE_ENTRIES
+            );
+            throw error;
           } finally {
             await testClient.revert({ id: snapshotId });
           }
@@ -2156,9 +2489,12 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
             : {})
         };
       } finally {
-        await testClient.stopImpersonatingAccount({
-          address: simulationSenderAddress
-        });
+        if (preparedSimulationContext) {
+          const { testClient } = await getSimulationContext();
+          await testClient.stopImpersonatingAccount({
+            address: simulationSenderAddress
+          });
+        }
       }
     }
   );
@@ -2173,6 +2509,7 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
     baselinePrediction?: AjnaRatePrediction;
     anchorBorrowCandidate?: PlanCandidate;
     singleActionCandidates?: PlanCandidate[];
+    accountState?: SimulationAccountState;
   }
 ): Promise<PlanCandidate | undefined> {
   const addQuoteBucketIndexes = resolveAddQuoteBucketIndexes(config);
@@ -2187,8 +2524,11 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
   }
 
   const baselinePrediction = options.baselinePrediction ?? readState.prediction;
-  const simulationSenderAddress = resolveSimulationSenderAddress(config);
-  const borrowerAddress = resolveSimulationBorrowerAddress(config, simulationSenderAddress);
+  const simulationSenderAddress =
+    options.accountState?.simulationSenderAddress ?? resolveSimulationSenderAddress(config);
+  const borrowerAddress =
+    options.accountState?.borrowerAddress ??
+    resolveSimulationBorrowerAddress(config, simulationSenderAddress);
   const heuristicDualCandidate = synthesizeAjnaLendAndBorrowCandidate(
     readState.rateState,
     config,
@@ -2252,47 +2592,63 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
       });
 
       try {
-        const [
-          quoteTokenBalance,
-          quoteTokenAllowance,
-          collateralBalance,
-          collateralAllowance
-        ] = await Promise.all([
-          publicClient.readContract({
-            address: readState.quoteTokenAddress,
-            abi: erc20Abi,
-            functionName: "balanceOf",
-            args: [simulationSenderAddress]
-          }),
-          publicClient.readContract({
-            address: readState.quoteTokenAddress,
-            abi: erc20Abi,
-            functionName: "allowance",
-            args: [simulationSenderAddress, options.poolAddress]
-          }),
-          publicClient.readContract({
-            address: readState.collateralAddress,
-            abi: erc20Abi,
-            functionName: "balanceOf",
-            args: [simulationSenderAddress]
-          }),
-          publicClient.readContract({
-            address: readState.collateralAddress,
-            abi: erc20Abi,
-            functionName: "allowance",
-            args: [simulationSenderAddress, options.poolAddress]
-          })
-        ]);
+        const effectiveAccountState =
+          options.accountState ??
+          (await (async (): Promise<SimulationAccountState> => {
+            const [
+              quoteTokenBalance,
+              quoteTokenAllowance,
+              collateralBalance,
+              collateralAllowance
+            ] = await Promise.all([
+              publicClient.readContract({
+                address: readState.quoteTokenAddress,
+                abi: erc20Abi,
+                functionName: "balanceOf",
+                args: [simulationSenderAddress]
+              }),
+              publicClient.readContract({
+                address: readState.quoteTokenAddress,
+                abi: erc20Abi,
+                functionName: "allowance",
+                args: [simulationSenderAddress, options.poolAddress]
+              }),
+              publicClient.readContract({
+                address: readState.collateralAddress,
+                abi: erc20Abi,
+                functionName: "balanceOf",
+                args: [simulationSenderAddress]
+              }),
+              publicClient.readContract({
+                address: readState.collateralAddress,
+                abi: erc20Abi,
+                functionName: "allowance",
+                args: [simulationSenderAddress, options.poolAddress]
+              })
+            ]);
+
+            return {
+              simulationSenderAddress,
+              borrowerAddress,
+              quoteTokenBalance,
+              quoteTokenAllowance,
+              collateralBalance,
+              collateralAllowance
+            };
+          })());
 
         const maxAvailableQuote = smallestBigInt(
           config.maxQuoteTokenExposure,
-          quoteTokenBalance,
-          quoteTokenAllowance
+          effectiveAccountState.quoteTokenBalance ?? 0n,
+          effectiveAccountState.quoteTokenAllowance ?? 0n
         );
         if (minimumAmount > maxAvailableQuote) {
           return undefined;
         }
-        const maxAvailableCollateral = smallestBigInt(collateralBalance, collateralAllowance);
+        const maxAvailableCollateral = smallestBigInt(
+          effectiveAccountState.collateralBalance ?? 0n,
+          effectiveAccountState.collateralAllowance ?? 0n
+        );
         const candidateCollateralAmounts = resolveDrawDebtCollateralAmounts(config).filter(
           (collateralAmount) => collateralAmount <= maxAvailableCollateral
         );
@@ -2311,13 +2667,7 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
                 expiry?: number;
               }
             | null
-        ): Promise<{
-          firstRateWadAfterNextUpdate: bigint;
-          firstRateBpsAfterNextUpdate: number;
-          firstOutcome: RateMoveOutcome;
-          terminalRateBps: number;
-          terminalDistanceToTargetBps: number;
-        }> {
+        ): Promise<DualSimulationPathResult> {
           const snapshotId = await testClient.snapshot();
 
           try {
@@ -2768,6 +3118,16 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
       if (!this.simulationCandidateCache.has(snapshotFingerprint)) {
         const synthesizedCandidates: PlanCandidate[] = [];
         const rpcUrl = assertLiveReadConfig(this.config).rpcUrl;
+        const simulationAccountState = await readSimulationAccountState(
+          this.publicClient,
+          this.poolAddress,
+          readState,
+          this.config,
+          {
+            needsQuoteState: this.config.enableSimulationBackedLendSynthesis === true,
+            needsCollateralState: this.config.enableSimulationBackedBorrowSynthesis === true
+          }
+        );
         let lendCandidate: PlanCandidate | undefined;
         let borrowCandidate: PlanCandidate | undefined;
 
@@ -2778,7 +3138,8 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
             {
               poolAddress: this.poolAddress,
               rpcUrl,
-              baselinePrediction: readState.prediction
+              baselinePrediction: readState.prediction,
+              accountState: simulationAccountState
             }
           );
           if (lendCandidate) {
@@ -2793,7 +3154,8 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
             {
               poolAddress: this.poolAddress,
               rpcUrl,
-              baselinePrediction: readState.prediction
+              baselinePrediction: readState.prediction,
+              accountState: simulationAccountState
             }
           );
           borrowCandidate = borrowResult?.candidate;
@@ -2813,6 +3175,7 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
                 poolAddress: this.poolAddress,
                 rpcUrl,
                 baselinePrediction: readState.prediction,
+                accountState: simulationAccountState,
                 ...(borrowCandidate === undefined
                   ? {}
                   : { anchorBorrowCandidate: borrowCandidate }),
