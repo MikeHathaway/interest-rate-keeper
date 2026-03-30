@@ -43,6 +43,7 @@ const EXACT_DUAL_MAX_BORROW_SAMPLES = 6;
 const EXACT_DUAL_MAX_PROMISING_BASINS = 3;
 const MAX_SIMULATION_ACCOUNT_STATE_CACHE_ENTRIES = 256;
 const MAX_EXACT_SIMULATION_PATH_CACHE_ENTRIES = 20_000;
+const MAX_SIMULATION_CANDIDATE_CACHE_ENTRIES = 2_048;
 
 interface SimulationAccountState {
   simulationSenderAddress: HexAddress;
@@ -66,10 +67,17 @@ interface BorrowSimulationPathResult extends LendSimulationPathResult {
 
 type DualSimulationPathResult = BorrowSimulationPathResult;
 
+interface CachedSimulationCandidates {
+  candidates: PlanCandidate[];
+  planningRateBps?: number;
+  planningLookaheadUpdates?: number;
+}
+
 const simulationAccountStateCache = new Map<string, SimulationAccountState>();
 const lendSimulationPathCache = new Map<string, LendSimulationPathResult | null>();
 const borrowSimulationPathCache = new Map<string, BorrowSimulationPathResult | null>();
 const dualSimulationPathCache = new Map<string, DualSimulationPathResult | null>();
+const simulationCandidateCache = new Map<string, CachedSimulationCandidates>();
 
 function setBoundedCacheEntry<K, V>(cache: Map<K, V>, key: K, value: V, maxEntries: number): void {
   if (cache.has(key)) {
@@ -97,6 +105,38 @@ function buildSimulationCacheKey(parts: Array<string | number | bigint | undefin
       return typeof part === "bigint" ? part.toString() : String(part);
     })
     .join(":");
+}
+
+function buildSimulationCandidateCacheKey(
+  snapshotFingerprint: string,
+  config: KeeperConfig,
+  accountState: SimulationAccountState
+): string {
+  return buildSimulationCacheKey([
+    "candidate-set",
+    snapshotFingerprint,
+    config.targetRateBps,
+    config.toleranceBps,
+    config.toleranceMode,
+    config.enableSimulationBackedLendSynthesis ? "sim-lend" : "no-sim-lend",
+    config.enableSimulationBackedBorrowSynthesis ? "sim-borrow" : "no-sim-borrow",
+    config.maxQuoteTokenExposure,
+    config.maxBorrowExposure,
+    config.minExecutableActionQuoteToken,
+    config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS,
+    resolveAddQuoteBucketIndexes(config).join(","),
+    resolveDrawDebtLimitIndexes(config).join(","),
+    resolveDrawDebtCollateralAmounts(config)
+      .map((value) => value.toString())
+      .join(","),
+    config.borrowSimulationLookaheadUpdates ?? 1,
+    accountState.simulationSenderAddress,
+    accountState.borrowerAddress,
+    accountState.quoteTokenBalance,
+    accountState.quoteTokenAllowance,
+    accountState.collateralBalance,
+    accountState.collateralAllowance
+  ]);
 }
 
 function wmul(left: bigint, right: bigint): bigint {
@@ -3070,14 +3110,6 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
   private readonly poolAddress: `0x${string}`;
   private readonly publicClient: PublicClient;
   private readonly now: () => number;
-  private readonly simulationCandidateCache = new Map<
-    string,
-    {
-      candidates: PlanCandidate[];
-      planningRateBps?: number;
-      planningLookaheadUpdates?: number;
-    }
-  >();
 
   constructor(
     private readonly config: KeeperConfig,
@@ -3115,19 +3147,25 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
       this.config.enableSimulationBackedLendSynthesis ||
       this.config.enableSimulationBackedBorrowSynthesis
     ) {
-      if (!this.simulationCandidateCache.has(snapshotFingerprint)) {
+      const rpcUrl = assertLiveReadConfig(this.config).rpcUrl;
+      const simulationAccountState = await readSimulationAccountState(
+        this.publicClient,
+        this.poolAddress,
+        readState,
+        this.config,
+        {
+          needsQuoteState: this.config.enableSimulationBackedLendSynthesis === true,
+          needsCollateralState: this.config.enableSimulationBackedBorrowSynthesis === true
+        }
+      );
+      const simulationCacheKey = buildSimulationCandidateCacheKey(
+        snapshotFingerprint,
+        this.config,
+        simulationAccountState
+      );
+
+      if (!simulationCandidateCache.has(simulationCacheKey)) {
         const synthesizedCandidates: PlanCandidate[] = [];
-        const rpcUrl = assertLiveReadConfig(this.config).rpcUrl;
-        const simulationAccountState = await readSimulationAccountState(
-          this.publicClient,
-          this.poolAddress,
-          readState,
-          this.config,
-          {
-            needsQuoteState: this.config.enableSimulationBackedLendSynthesis === true,
-            needsCollateralState: this.config.enableSimulationBackedBorrowSynthesis === true
-          }
-        );
         let lendCandidate: PlanCandidate | undefined;
         let borrowCandidate: PlanCandidate | undefined;
 
@@ -3190,16 +3228,16 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
           }
         }
 
-        this.simulationCandidateCache.set(snapshotFingerprint, {
+        setBoundedCacheEntry(simulationCandidateCache, simulationCacheKey, {
           candidates: synthesizedCandidates,
           ...(planningRateBps === undefined ? {} : { planningRateBps }),
           ...(planningLookaheadUpdates === undefined
             ? {}
             : { planningLookaheadUpdates })
-        });
+        }, MAX_SIMULATION_CANDIDATE_CACHE_ENTRIES);
       }
 
-      const cachedSimulation = this.simulationCandidateCache.get(snapshotFingerprint);
+      const cachedSimulation = simulationCandidateCache.get(simulationCacheKey);
       if (cachedSimulation?.planningRateBps !== undefined) {
         planningRateBps = cachedSimulation.planningRateBps;
       }

@@ -7,6 +7,17 @@ import {
   type PoolSnapshot
 } from "./types.js";
 
+const SEMANTIC_SNAPSHOT_METADATA_KEYS = [
+  "poolAddress",
+  "currentRateWad",
+  "currentDebtWad",
+  "debtEmaWad",
+  "depositEmaWad",
+  "debtColEmaWad",
+  "lupt0DebtEmaWad",
+  "lastInterestRateUpdateTimestamp"
+] as const;
+
 function stepAmount(step: ExecutionStep): bigint {
   switch (step.type) {
     case "ADD_QUOTE":
@@ -37,6 +48,52 @@ function borrowExposureForStep(step: ExecutionStep): bigint {
     default:
       return 0n;
   }
+}
+
+function semanticSnapshotMetadataSignature(snapshot: PoolSnapshot): string | undefined {
+  const metadata = snapshot.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return undefined;
+  }
+
+  const parts: string[] = [];
+  for (const key of SEMANTIC_SNAPSHOT_METADATA_KEYS) {
+    const value = metadata[key];
+    if (typeof value !== "string" && typeof value !== "number") {
+      return undefined;
+    }
+    parts.push(String(value));
+  }
+
+  return parts.join(":");
+}
+
+function coarseSnapshotSignature(snapshot: PoolSnapshot): string {
+  return [
+    snapshot.poolId,
+    String(snapshot.chainId),
+    String(snapshot.currentRateBps),
+    snapshot.predictedNextOutcome,
+    String(snapshot.predictedNextRateBps),
+    snapshot.planningRateBps === undefined ? "-" : String(snapshot.planningRateBps),
+    snapshot.planningLookaheadUpdates === undefined
+      ? "-"
+      : String(snapshot.planningLookaheadUpdates)
+  ].join(":");
+}
+
+function sameSemanticPoolState(previousSnapshot: PoolSnapshot, freshSnapshot: PoolSnapshot): boolean {
+  if (freshSnapshot.snapshotFingerprint === previousSnapshot.snapshotFingerprint) {
+    return true;
+  }
+
+  const previousMetadataSignature = semanticSnapshotMetadataSignature(previousSnapshot);
+  const freshMetadataSignature = semanticSnapshotMetadataSignature(freshSnapshot);
+  if (previousMetadataSignature && freshMetadataSignature) {
+    return previousMetadataSignature === freshMetadataSignature;
+  }
+
+  return coarseSnapshotSignature(previousSnapshot) === coarseSnapshotSignature(freshSnapshot);
 }
 
 function snapshotGuards(
@@ -125,7 +182,7 @@ export function preSubmitRecheck(
     return snapshotFailure;
   }
 
-  if (freshSnapshot.snapshotFingerprint !== previousSnapshot.snapshotFingerprint) {
+  if (!sameSemanticPoolState(previousSnapshot, freshSnapshot)) {
     return {
       code: "POOL_STATE_CHANGED",
       reason: "pool state changed between planning and execution"

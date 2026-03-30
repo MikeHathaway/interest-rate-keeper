@@ -215,7 +215,7 @@ export function resolvePlanCandidate(input: unknown, label = "plan candidate"): 
     throw new Error(`${label}.intent is invalid`);
   }
 
-  return {
+  const candidate: PlanCandidate = {
     id: parseString(record.id, `${label}.id`),
     intent,
     minimumExecutionSteps: rawSteps.map((step, index) =>
@@ -233,6 +233,19 @@ export function resolvePlanCandidate(input: unknown, label = "plan candidate"): 
     quoteTokenDelta: parseBigIntValue(record.quoteTokenDelta, `${label}.quoteTokenDelta`),
     explanation: parseString(record.explanation, `${label}.explanation`)
   };
+
+  if (record.planningRateBps !== undefined) {
+    candidate.planningRateBps = parseNumber(record.planningRateBps, `${label}.planningRateBps`);
+  }
+
+  if (record.planningLookaheadUpdates !== undefined) {
+    candidate.planningLookaheadUpdates = parseNumber(
+      record.planningLookaheadUpdates,
+      `${label}.planningLookaheadUpdates`
+    );
+  }
+
+  return candidate;
 }
 
 export function resolvePoolSnapshot(input: unknown): PoolSnapshot {
@@ -276,6 +289,17 @@ export function resolvePoolSnapshot(input: unknown): PoolSnapshot {
       resolvePlanCandidate(candidate, `candidates[${index}]`)
     )
   };
+
+  if (record.planningRateBps !== undefined) {
+    snapshot.planningRateBps = parseNumber(record.planningRateBps, "planningRateBps");
+  }
+
+  if (record.planningLookaheadUpdates !== undefined) {
+    snapshot.planningLookaheadUpdates = parseNumber(
+      record.planningLookaheadUpdates,
+      "planningLookaheadUpdates"
+    );
+  }
 
   if (
     record.metadata &&

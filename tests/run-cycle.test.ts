@@ -65,6 +65,35 @@ function buildSnapshot(overrides: Partial<PoolSnapshot> = {}): PoolSnapshot {
   };
 }
 
+function buildPostAddQuoteSnapshot(overrides: Partial<PoolSnapshot> = {}): PoolSnapshot {
+  return buildSnapshot({
+    snapshotFingerprint: "after-add-quote",
+    blockNumber: 11n,
+    currentRateBps: 700,
+    predictedNextOutcome: "STEP_UP",
+    predictedNextRateBps: 800,
+    candidates: [
+      {
+        id: "borrow-only",
+        intent: "BORROW",
+        minimumExecutionSteps: [
+          {
+            type: "DRAW_DEBT",
+            amount: 50n,
+            limitIndex: 2
+          }
+        ],
+        predictedOutcome: "STEP_UP",
+        predictedRateBpsAfterNextUpdate: 950,
+        resultingDistanceToTargetBps: 0,
+        quoteTokenDelta: 50n,
+        explanation: "borrow-only follow-up remains valid"
+      }
+    ],
+    ...overrides
+  });
+}
+
 describe("runCycle", () => {
   it("returns a no-op when the natural move already converges", async () => {
     const result = await runCycle(baseConfig, {
@@ -114,7 +143,11 @@ describe("runCycle", () => {
         logPath: join(directory, "runs.jsonl")
       },
       {
-        snapshotSource: new StaticSnapshotSource([buildSnapshot(), buildSnapshot()]),
+        snapshotSource: new StaticSnapshotSource([
+          buildSnapshot(),
+          buildSnapshot(),
+          buildPostAddQuoteSnapshot()
+        ]),
         executor: new StepwiseExecutionBackend({
           ADD_QUOTE: async () => ({ transactionHash: "0xadd" }),
           DRAW_DEBT: async () => ({ transactionHash: "0xdraw" })
@@ -131,7 +164,11 @@ describe("runCycle", () => {
 
   it("surfaces partial failures", async () => {
     const result = await runCycle(baseConfig, {
-      snapshotSource: new StaticSnapshotSource([buildSnapshot(), buildSnapshot()]),
+      snapshotSource: new StaticSnapshotSource([
+        buildSnapshot(),
+        buildSnapshot(),
+        buildPostAddQuoteSnapshot()
+      ]),
       executor: new StepwiseExecutionBackend({
         ADD_QUOTE: async () => ({ transactionHash: "0xadd" }),
         DRAW_DEBT: async () => {
@@ -143,5 +180,65 @@ describe("runCycle", () => {
     expect(result.status).toBe("PARTIAL_FAILURE");
     expect(result.transactionHashes).toEqual(["0xadd"]);
     expect(result.failedStepIndex).toBe(1);
+  });
+
+  it("rechecks after the first step and stops cleanly if no remaining step is needed", async () => {
+    const result = await runCycle(baseConfig, {
+      snapshotSource: new StaticSnapshotSource([
+        buildSnapshot(),
+        buildSnapshot(),
+        buildPostAddQuoteSnapshot({
+          currentRateBps: 950,
+          predictedNextRateBps: 1000,
+          candidates: []
+        })
+      ]),
+      executor: new StepwiseExecutionBackend({
+        ADD_QUOTE: async () => ({ transactionHash: "0xadd" }),
+        DRAW_DEBT: async () => ({ transactionHash: "0xdraw" })
+      })
+    });
+
+    expect(result.status).toBe("EXECUTED");
+    expect(result.transactionHashes).toEqual(["0xadd"]);
+    expect(result.executedSteps).toHaveLength(1);
+  });
+
+  it("rechecks after the first step and surfaces a partial failure when the remaining step changes", async () => {
+    const result = await runCycle(baseConfig, {
+      snapshotSource: new StaticSnapshotSource([
+        buildSnapshot(),
+        buildSnapshot(),
+        buildPostAddQuoteSnapshot({
+          candidates: [
+            {
+              id: "changed-borrow",
+              intent: "BORROW",
+              minimumExecutionSteps: [
+                {
+                  type: "DRAW_DEBT",
+                  amount: 60n,
+                  limitIndex: 2
+                }
+              ],
+              predictedOutcome: "STEP_UP",
+              predictedRateBpsAfterNextUpdate: 960,
+              resultingDistanceToTargetBps: 0,
+              quoteTokenDelta: 60n,
+              explanation: "remaining borrow amount changed"
+            }
+          ]
+        })
+      ]),
+      executor: new StepwiseExecutionBackend({
+        ADD_QUOTE: async () => ({ transactionHash: "0xadd" }),
+        DRAW_DEBT: async () => ({ transactionHash: "0xdraw" })
+      })
+    });
+
+    expect(result.status).toBe("PARTIAL_FAILURE");
+    expect(result.transactionHashes).toEqual(["0xadd"]);
+    expect(result.failedStepIndex).toBe(1);
+    expect(result.error).toMatch(/remaining step is no longer valid/i);
   });
 });

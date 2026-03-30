@@ -30,6 +30,16 @@ const snapshot: PoolSnapshot = {
   currentRateBps: 800,
   predictedNextOutcome: "STEP_DOWN",
   predictedNextRateBps: 700,
+  metadata: {
+    poolAddress: "0x1111111111111111111111111111111111111111",
+    currentRateWad: "100000000000000000",
+    currentDebtWad: "1000",
+    debtEmaWad: "1000",
+    depositEmaWad: "10000",
+    debtColEmaWad: "2000",
+    lupt0DebtEmaWad: "3000",
+    lastInterestRateUpdateTimestamp: 900
+  },
   candidates: [
     {
       id: "lend",
@@ -92,11 +102,35 @@ describe("policy", () => {
     expect(failure?.code).toBe("MIN_EXECUTION_AMOUNT");
   });
 
+  it("allows a new block when the semantic pool state is unchanged", () => {
+    const failure = preSubmitRecheck(
+      plan,
+      snapshot,
+      {
+        ...snapshot,
+        snapshotFingerprint: "different",
+        blockNumber: 11n,
+        blockTimestamp: 1_012,
+        snapshotAgeSeconds: 8
+      },
+      config
+    );
+
+    expect(failure).toBeUndefined();
+  });
+
   it("aborts when the pool state changed before submission", () => {
     const failure = preSubmitRecheck(
       plan,
       snapshot,
-      { ...snapshot, snapshotFingerprint: "different" },
+      {
+        ...snapshot,
+        snapshotFingerprint: "different",
+        metadata: {
+          ...snapshot.metadata,
+          currentDebtWad: "2000"
+        }
+      },
       config
     );
     expect(failure?.code).toBe("POOL_STATE_CHANGED");

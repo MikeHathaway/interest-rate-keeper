@@ -51,15 +51,23 @@ const DECREASED_RATE_BPS = 900;
 const FORK_TIME_SKIP_SECONDS = 12 * 60 * 60 + 5;
 const STEERING_BUCKET_CANDIDATES = [2500, 2750, 3000, 3250, 3500] as const;
 const BORROW_COLLATERAL_CANDIDATES = [1n, 2n, 5n, 10n, 20n, 50n, 100n] as const;
-const STEERING_SCENARIOS = [
-  { initialQuoteAmount: 500n, borrowAmount: 400n, collateralAmount: 600n },
-  { initialQuoteAmount: 500n, borrowAmount: 450n, collateralAmount: 800n },
-  { initialQuoteAmount: 500n, borrowAmount: 490n, collateralAmount: 1_000n },
-  { initialQuoteAmount: 750n, borrowAmount: 650n, collateralAmount: 1_000n },
-  { initialQuoteAmount: 1_000n, borrowAmount: 850n, collateralAmount: 1_200n },
-  { initialQuoteAmount: 1_000n, borrowAmount: 950n, collateralAmount: 1_500n },
-  { initialQuoteAmount: 1_000n, borrowAmount: 990n, collateralAmount: 2_000n }
-] as const;
+const REPRESENTATIVE_LEND_AND_DUAL_FIXTURE_MANIFEST = {
+  borrowedStepUpScenarios: [
+    { initialQuoteAmount: 500n, borrowAmount: 400n, collateralAmount: 600n },
+    { initialQuoteAmount: 500n, borrowAmount: 450n, collateralAmount: 800n },
+    { initialQuoteAmount: 500n, borrowAmount: 490n, collateralAmount: 1_000n },
+    { initialQuoteAmount: 750n, borrowAmount: 650n, collateralAmount: 1_000n },
+    { initialQuoteAmount: 1_000n, borrowAmount: 850n, collateralAmount: 1_200n },
+    { initialQuoteAmount: 1_000n, borrowAmount: 950n, collateralAmount: 1_500n },
+    { initialQuoteAmount: 1_000n, borrowAmount: 990n, collateralAmount: 2_000n }
+  ],
+  dualSearch: {
+    targetOffsetsBps: [50, 100] as const,
+    tolerancesBps: [25] as const,
+    lookaheadUpdates: [1, 3] as const,
+    collateralAmounts: [10n * 10n ** 18n] as const
+  }
+} as const;
 const REPRESENTATIVE_BORROW_PLANNING_FIXTURE_CANDIDATES = [
   { targetRateBps: 1300, toleranceBps: 50, lookaheadUpdates: 3 },
   { targetRateBps: 1350, toleranceBps: 50, lookaheadUpdates: 3 },
@@ -69,10 +77,6 @@ const REPRESENTATIVE_BORROW_PLANNING_FIXTURE_CANDIDATES = [
   { targetRateBps: 1300, toleranceBps: 50, lookaheadUpdates: 2 },
   { targetRateBps: 1350, toleranceBps: 25, lookaheadUpdates: 2 }
 ] as const;
-const REPRESENTATIVE_DUAL_TARGET_OFFSETS_BPS = [50, 100] as const;
-const REPRESENTATIVE_DUAL_TOLERANCES_BPS = [25] as const;
-const REPRESENTATIVE_DUAL_LOOKAHEAD_UPDATES = [1, 3] as const;
-const REPRESENTATIVE_DUAL_COLLATERAL_AMOUNTS = [10n * 10n ** 18n] as const;
 const MAX_EXACT_DUAL_VALIDATIONS_WITH_PURE_MATCH = 2;
 const MAX_EXACT_DUAL_VALIDATIONS_WITHOUT_PURE_MATCH = 2;
 
@@ -610,7 +614,7 @@ async function findRepresentativeBorrowedStepUpState(
     }
   | undefined
 > {
-  for (const [index, scenario] of STEERING_SCENARIOS.entries()) {
+  for (const [index, scenario] of REPRESENTATIVE_LEND_AND_DUAL_FIXTURE_MANIFEST.borrowedStepUpScenarios.entries()) {
     const collateralToken = await deployMockToken(
       walletClient,
       publicClient,
@@ -811,16 +815,16 @@ async function findExactDualCandidateFromSnapshot(
   const baselinePrediction = forecastAjnaNextEligibleRate(rateState);
   const targetRateCandidates = Array.from(
     new Set(
-      REPRESENTATIVE_DUAL_TARGET_OFFSETS_BPS
+      REPRESENTATIVE_LEND_AND_DUAL_FIXTURE_MANIFEST.dualSearch.targetOffsetsBps
         .map((offsetBps) => baselineSnapshot.currentRateBps + offsetBps)
         .filter((targetRateBps) => targetRateBps > baselineSnapshot.currentRateBps)
     )
   );
   const candidateConfigs = targetRateCandidates
     .flatMap((targetRateBps) =>
-      REPRESENTATIVE_DUAL_TOLERANCES_BPS.flatMap((toleranceBps) =>
-        REPRESENTATIVE_DUAL_LOOKAHEAD_UPDATES.flatMap((lookahead) =>
-          REPRESENTATIVE_DUAL_COLLATERAL_AMOUNTS.map((collateralAmount) => ({
+      REPRESENTATIVE_LEND_AND_DUAL_FIXTURE_MANIFEST.dualSearch.tolerancesBps.flatMap((toleranceBps) =>
+        REPRESENTATIVE_LEND_AND_DUAL_FIXTURE_MANIFEST.dualSearch.lookaheadUpdates.flatMap((lookahead) =>
+          REPRESENTATIVE_LEND_AND_DUAL_FIXTURE_MANIFEST.dualSearch.collateralAmounts.map((collateralAmount) => ({
             config: resolveKeeperConfig({
               chainId: 8453,
               poolAddress,
@@ -1800,7 +1804,7 @@ describeIf("Base factory fork integration", () => {
         | undefined;
       let stepUpScenarioCount = 0;
 
-      for (const [index, scenario] of STEERING_SCENARIOS.entries()) {
+      for (const [index, scenario] of REPRESENTATIVE_LEND_AND_DUAL_FIXTURE_MANIFEST.borrowedStepUpScenarios.entries()) {
         const collateralToken = await deployMockToken(
           walletClient,
           publicClient,
@@ -2058,7 +2062,7 @@ describeIf("Base factory fork integration", () => {
           }
         | undefined;
 
-      for (const [index, scenario] of STEERING_SCENARIOS.entries()) {
+      for (const [index, scenario] of REPRESENTATIVE_LEND_AND_DUAL_FIXTURE_MANIFEST.borrowedStepUpScenarios.entries()) {
         const collateralToken = await deployMockToken(
           walletClient,
           publicClient,

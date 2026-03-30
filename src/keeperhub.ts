@@ -1,6 +1,11 @@
 import { resolveKeeperConfig } from "./config.js";
 import { runCycle, type RunCycleDependencies } from "./run-cycle.js";
-import { resolvePoolSnapshot, StaticSnapshotSource } from "./snapshot.js";
+import {
+  resolvePoolSnapshot,
+  StaticSnapshotSource,
+  type SnapshotSource
+} from "./snapshot.js";
+import { AjnaRpcSnapshotSource } from "./ajna/snapshot.js";
 import { safeJsonStringify } from "./json.js";
 
 function parseObject(input: unknown, label: string): Record<string, unknown> {
@@ -23,14 +28,51 @@ export function resolveKeeperHubPayload(input: unknown): {
   };
 }
 
+class PayloadThenLiveSnapshotSource implements SnapshotSource {
+  private firstRead = true;
+
+  constructor(
+    private readonly initialSnapshot: ReturnType<typeof resolvePoolSnapshot>,
+    private readonly liveSnapshotSource: SnapshotSource
+  ) {}
+
+  async getSnapshot() {
+    if (this.firstRead) {
+      this.firstRead = false;
+      return structuredClone(this.initialSnapshot);
+    }
+
+    return this.liveSnapshotSource.getSnapshot();
+  }
+}
+
 export async function runKeeperHubPayload(
   input: unknown,
   dependencies: Omit<RunCycleDependencies, "snapshotSource">
 ) {
   const payload = resolveKeeperHubPayload(input);
-  return runCycle(payload.config, {
+  const canLiveRecheck =
+    payload.config.recheckBeforeSubmit &&
+    payload.config.poolAddress !== undefined &&
+    payload.config.rpcUrl !== undefined;
+
+  const effectiveConfig = canLiveRecheck
+    ? payload.config
+    : {
+        ...payload.config,
+        recheckBeforeSubmit: false
+      };
+
+  const snapshotSource = canLiveRecheck
+    ? new PayloadThenLiveSnapshotSource(
+        payload.snapshot,
+        new AjnaRpcSnapshotSource(payload.config)
+      )
+    : new StaticSnapshotSource([payload.snapshot]);
+
+  return runCycle(effectiveConfig, {
     ...dependencies,
-    snapshotSource: new StaticSnapshotSource([payload.snapshot, payload.snapshot])
+    snapshotSource
   });
 }
 

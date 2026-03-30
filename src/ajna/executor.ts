@@ -259,6 +259,16 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
         throw new Error("Ajna ADD_COLLATERAL execution requires an expiry value");
       }
 
+      const { collateralAddress } = await resolvePoolTokens();
+      await requireAllowance(
+        publicClient,
+        collateralAddress,
+        account.address,
+        runtime.poolAddress,
+        addCollateralStep.amount,
+        "collateral token"
+      );
+
       const hash = await walletClient.writeContract({
         account,
         chain: undefined,

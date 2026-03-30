@@ -24,6 +24,7 @@ This is still an early implementation. The core keeper loop exists and the live 
 Today, the snapshot builder reads real pool state and predicts the next Ajna rate move. For steering candidates:
 
 - `manualCandidates` are still the general bridge for live steering plans
+- `manualCandidates` can now carry `planningRateBps` and `planningLookaheadUpdates`, so manually supplied multi-cycle plans are ranked correctly
 - simulation-backed `ADD_QUOTE` synthesis is an exact opt-in path that forks the current chain state and tests candidate quote deposits against real Ajna contract behavior
 - simulation-backed `DRAW_DEBT` synthesis is an exact opt-in path that forks the current chain state and tests candidate borrow amounts against real Ajna contract behavior
 - simulation-backed `LEND_AND_BORROW` synthesis is an exact opt-in path that searches direct `ADD_QUOTE -> DRAW_DEBT` combinations on a fork and validates the full `ADD_QUOTE -> DRAW_DEBT -> updateInterest` path before emitting them
@@ -110,6 +111,8 @@ KeeperHub-style payload execution:
 ```bash
 node dist/src/cli.js keeperhub --payload ./keeperhub-payload.json --dry-run
 ```
+
+When KeeperHub payload config includes `poolAddress` and `rpcUrl`, the adapter now uses the payload snapshot for planning and a live Ajna RPC read for the submit-time recheck. If the payload cannot support a live recheck, the adapter disables `recheckBeforeSubmit` instead of pretending the second read happened.
 
 CLI flags:
 - `run --config <path>`

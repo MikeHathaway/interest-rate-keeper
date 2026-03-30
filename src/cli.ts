@@ -10,7 +10,7 @@ import {
   runKeeperHubPayload
 } from "./keeperhub.js";
 import { runCycle } from "./run-cycle.js";
-import { FileSnapshotSource, StaticSnapshotSource } from "./snapshot.js";
+import { FileSnapshotSource } from "./snapshot.js";
 import { createAjnaExecutionBackend } from "./ajna/executor.js";
 import { AjnaRpcSnapshotSource } from "./ajna/snapshot.js";
 import { safeJsonStringify } from "./json.js";
@@ -44,11 +44,7 @@ async function main(): Promise<void> {
     const payload = JSON.parse(await readFile(command.payloadPath!, "utf8"));
     const resolvedPayload = resolveKeeperHubPayload(payload);
     const backend = resolveBackend(resolvedPayload.config, command.dryRun);
-    const result = await runCycle(resolvedPayload.config, {
-      snapshotSource: new StaticSnapshotSource([
-        resolvedPayload.snapshot,
-        resolvedPayload.snapshot
-      ]),
+    const result = await runKeeperHubPayload(payload, {
       executor: backend
     });
     process.stdout.write(`${formatKeeperHubResponse(result)}\n`);
