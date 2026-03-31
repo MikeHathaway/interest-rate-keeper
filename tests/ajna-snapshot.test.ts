@@ -420,7 +420,7 @@ describe("resolveSimulationBorrowLimitIndexes", () => {
         ...baseConfig,
         drawDebtLimitIndex: 3000
       })
-    ).toEqual([2500, 2750, 3000, 3250, 3500]);
+    ).toEqual([2500, 2750, 3000, 3250, 3500, 4000, 5000, 6000, 7000, 7388]);
   });
 
   it("preserves explicitly configured multiple limit indexes without adding neighbors", () => {
@@ -441,9 +441,13 @@ describe("resolveSimulationBorrowCollateralAmounts", () => {
           ...baseConfig,
           drawDebtCollateralAmount: 10n * WAD
         },
-        100n * WAD
+        1_000_000n * WAD
       )
-    ).toEqual([1n, 2n, 5n, 10n, 20n, 50n, 100n].map((amount) => amount * WAD));
+    ).toEqual(
+      [1n, 2n, 5n, 10n, 20n, 50n, 100n, 1_000n, 10_000n, 100_000n, 1_000_000n].map(
+        (amount) => amount * WAD
+      )
+    );
   });
 
   it("preserves multiple explicit collateral candidates without adding derived values", () => {
@@ -456,6 +460,21 @@ describe("resolveSimulationBorrowCollateralAmounts", () => {
         100n * WAD
       )
     ).toEqual([1n * WAD, 5n * WAD, 10n * WAD]);
+  });
+
+  it("includes zero additional collateral when the borrower already has an open position", () => {
+    expect(
+      resolveSimulationBorrowCollateralAmounts(
+        {
+          ...baseConfig,
+          drawDebtCollateralAmount: 10n * WAD
+        },
+        100n * WAD,
+        {
+          borrowerHasExistingPosition: true
+        }
+      )
+    ).toEqual([0n, 1n, 2n, 5n, 10n, 20n, 50n, 100n].map((amount) => amount * WAD));
   });
 });
 

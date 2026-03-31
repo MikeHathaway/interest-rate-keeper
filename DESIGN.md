@@ -26,6 +26,58 @@ desired direction until the pool reaches the target zone.
 - Minimize capital deployed while still reliably changing the next-rate outcome.
 - Handle abandoned/out-of-range pools, including reset-to-10 behavior.
 
+## Product Modes
+
+The design should treat the keeper as several related product modes, not one undifferentiated "target rate" problem.
+
+### 1. Brand-New Pool, Downward Convergence
+
+This is the case where a newly created pool should move down faster or continue moving down safely.
+
+- dominant primitives: `UPDATE_INTEREST`, sometimes `LEND`
+- strongest current evidence
+
+This mode is close to:
+- new or thin quote-heavy pools
+- underutilized pools where passive updates or quote-side nudges are sufficient
+
+### 2. Brand-New Pool, Upward Convergence
+
+This is the case where a newly created pool should move up faster than passive updates would allow.
+
+- dominant primitive: `BORROW`
+- materially harder than downward convergence
+
+This mode should be treated separately from abandoned-pool reset/recovery. The protocol mechanics and the keeper evidence are different.
+
+### 3. Abandoned High-Rate Reset / Recovery
+
+This is the thin-pool reset-to-10 regime and the recovery path around it.
+
+- dominant primitive: explicit `RESET_TO_TEN` outcome modeling
+- related to low meaningful utilization at high rates
+- not equivalent to "brand-new pool should move upward"
+
+### 4. Mixed Two-Sided Correction
+
+This is the case where `LEND_AND_BORROW` beats single-sided actions.
+
+- dominant primitive: exact `ADD_QUOTE -> DRAW_DEBT`
+- separate from both pure downward and pure upward single-sided cases
+
+### Current Validation Status
+
+The current implementation/testing evidence should be understood per mode:
+
+- Brand-new pool downward convergence:
+  proven for repeated update-only convergence and representative due-window `LEND` planning
+- Brand-new pool upward convergence:
+  proven only for representative multi-cycle `BORROW`, not exact same-cycle borrower steering
+- Abandoned high-rate reset / recovery:
+  outcome model is implemented, but no separate positive live keeper proof exists beyond shared engine behavior
+- Mixed two-sided correction:
+  representative exact due-window `LEND_AND_BORROW` is proven
+
 ## Non-Goals
 
 - No new smart contracts in v1.

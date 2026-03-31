@@ -42,6 +42,9 @@ const EXACT_DUAL_MAX_QUOTE_SAMPLES = 6;
 const EXACT_DUAL_MAX_BORROW_SAMPLES = 6;
 const EXACT_DUAL_MAX_PROMISING_BASINS = 3;
 const EXACT_BORROW_LIMIT_INDEX_OFFSETS = [-500, -250, 0, 250, 500] as const;
+const BORROW_BUCKET_PROBE_OFFSETS = [-250, -100, -50, 0, 50, 100, 250] as const;
+const MAX_AJNA_LIMIT_INDEX = 7_388;
+const MAX_SIMULATION_BORROW_COLLATERAL_SAMPLES = 12;
 const MAX_SIMULATION_ACCOUNT_STATE_CACHE_ENTRIES = 256;
 const MAX_EXACT_SIMULATION_PATH_CACHE_ENTRIES = 20_000;
 const MAX_SIMULATION_CANDIDATE_CACHE_ENTRIES = 2_048;
@@ -225,6 +228,17 @@ interface AjnaPoolStateRead {
   collateralAddress: HexAddress;
   quoteTokenScale: bigint;
   poolType: number;
+  borrowerState?: {
+    borrowerAddress: HexAddress;
+    t0Debt: bigint;
+    collateral: bigint;
+    npTpRatio: bigint;
+  };
+  loansState?: {
+    maxBorrower: HexAddress;
+    maxT0DebtToCollateral: bigint;
+    noOfLoans: bigint;
+  };
 }
 
 interface BorrowSimulationSynthesisResult {
@@ -377,18 +391,103 @@ export function resolveSimulationBorrowLimitIndexes(config: KeeperConfig): numbe
   }
 
   const anchor = configured[0]!;
+  const highSideAnchors = [4_000, 5_000, 6_000, 7_000, MAX_AJNA_LIMIT_INDEX].filter(
+    (limitIndex) => limitIndex > anchor
+  );
+
   return Array.from(
     new Set(
-      EXACT_BORROW_LIMIT_INDEX_OFFSETS.map((offset) => anchor + offset).filter(
-        (limitIndex) => limitIndex >= 0
-      )
+      [
+        ...EXACT_BORROW_LIMIT_INDEX_OFFSETS.map((offset) => anchor + offset),
+        ...highSideAnchors
+      ].filter((limitIndex) => limitIndex >= 0)
     )
   ).sort((left, right) => left - right);
 }
 
+function buildBorrowBucketProbeIndexes(config: KeeperConfig): number[] {
+  const seedIndexes = Array.from(
+    new Set([
+      ...resolveSimulationBorrowLimitIndexes(config),
+      ...resolveAddQuoteBucketIndexes(config)
+    ])
+  );
+
+  return Array.from(
+    new Set(
+      seedIndexes.flatMap((seedIndex) =>
+        BORROW_BUCKET_PROBE_OFFSETS.map((offset) => seedIndex + offset)
+      )
+    )
+  )
+    .filter((bucketIndex) => bucketIndex >= 0 && bucketIndex <= MAX_AJNA_LIMIT_INDEX)
+    .sort((left, right) => left - right);
+}
+
+async function resolvePoolAwareBorrowLimitIndexes(
+  publicClient: PublicClient,
+  poolAddress: HexAddress,
+  blockNumber: bigint,
+  config: KeeperConfig
+): Promise<number[]> {
+  const baseIndexes = resolveSimulationBorrowLimitIndexes(config);
+  const probeIndexes = buildBorrowBucketProbeIndexes(config);
+  if (probeIndexes.length === 0) {
+    return baseIndexes;
+  }
+
+  const bucketResults = await Promise.all(
+    probeIndexes.map(async (bucketIndex) => {
+      try {
+        const [, , bankruptcyTime, bucketDeposit] = await publicClient.readContract({
+          address: poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "bucketInfo",
+          args: [BigInt(bucketIndex)],
+          blockNumber
+        });
+
+        return {
+          bucketIndex,
+          bankruptcyTime,
+          bucketDeposit
+        };
+      } catch {
+        return undefined;
+      }
+    })
+  );
+
+  const fundedIndexes = bucketResults
+    .filter(
+      (
+        bucket
+      ): bucket is {
+        bucketIndex: number;
+        bankruptcyTime: bigint;
+        bucketDeposit: bigint;
+      } =>
+        bucket !== undefined &&
+        bucket.bankruptcyTime === 0n &&
+        bucket.bucketDeposit > 0n
+    )
+    .sort((left, right) => {
+      if (left.bucketDeposit !== right.bucketDeposit) {
+        return left.bucketDeposit > right.bucketDeposit ? -1 : 1;
+      }
+      return left.bucketIndex - right.bucketIndex;
+    })
+    .map((bucket) => bucket.bucketIndex);
+
+  return Array.from(new Set([...fundedIndexes, ...baseIndexes]));
+}
+
 export function resolveSimulationBorrowCollateralAmounts(
   config: KeeperConfig,
-  maxAvailableCollateral: bigint
+  maxAvailableCollateral: bigint,
+  options: {
+    borrowerHasExistingPosition?: boolean;
+  } = {}
 ): bigint[] {
   const configured = resolveDrawDebtCollateralAmounts(config).filter(
     (collateralAmount) => collateralAmount <= maxAvailableCollateral
@@ -398,7 +497,12 @@ export function resolveSimulationBorrowCollateralAmounts(
   }
 
   if (configured.length !== 1) {
-    return configured;
+    return Array.from(
+      new Set([
+        ...(options.borrowerHasExistingPosition ? [0n] : []),
+        ...configured
+      ])
+    ).sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
   }
 
   const anchor = configured[0]!;
@@ -406,7 +510,7 @@ export function resolveSimulationBorrowCollateralAmounts(
     return [0n];
   }
 
-  const scaledCandidates = [
+  const scaledCandidates = new Set<bigint>([
     anchor / 10n,
     anchor / 5n,
     anchor / 2n,
@@ -414,14 +518,29 @@ export function resolveSimulationBorrowCollateralAmounts(
     anchor * 2n,
     anchor * 5n,
     anchor * 10n
-  ].filter(
-    (collateralAmount) =>
-      collateralAmount > 0n && collateralAmount <= maxAvailableCollateral
-  );
+  ]);
+  let scaledUp = anchor * 10n;
+  while (
+    scaledCandidates.size < MAX_SIMULATION_BORROW_COLLATERAL_SAMPLES &&
+    scaledUp < maxAvailableCollateral
+  ) {
+    scaledUp *= 10n;
+    scaledCandidates.add(scaledUp);
+  }
 
-  return Array.from(new Set(scaledCandidates)).sort((left, right) =>
-    left < right ? -1 : left > right ? 1 : 0
-  );
+  return Array.from(
+    new Set([
+      ...(options.borrowerHasExistingPosition ? [0n] : []),
+      ...Array.from(scaledCandidates)
+    ])
+  )
+    .filter(
+      (collateralAmount) =>
+        collateralAmount >= 0n && collateralAmount <= maxAvailableCollateral
+    )
+    .sort((left, right) =>
+      left < right ? -1 : left > right ? 1 : 0
+    );
 }
 
 function extractDrawDebtStep(candidate: PlanCandidate | undefined): DrawDebtStep | undefined {
@@ -885,7 +1004,8 @@ async function readAjnaPoolState(
   publicClient: PublicClient,
   poolAddress: HexAddress,
   nowSeconds?: number,
-  blockNumber?: bigint
+  blockNumber?: bigint,
+  borrowerAddress?: HexAddress
 ): Promise<AjnaPoolStateRead> {
   const block = await publicClient.getBlock(
     blockNumber === undefined ? { blockTag: "latest" } : { blockNumber }
@@ -900,7 +1020,9 @@ async function readAjnaPoolState(
     quoteTokenAddress,
     collateralAddress,
     quoteTokenScale,
-    poolType
+    poolType,
+    loansInfo,
+    borrowerInfo
   ] = await Promise.all([
     publicClient.readContract({
       address: poolAddress,
@@ -943,7 +1065,22 @@ async function readAjnaPoolState(
       abi: ajnaPoolAbi,
       functionName: "poolType",
       blockNumber: effectiveBlockNumber
-    })
+    }),
+    publicClient.readContract({
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "loansInfo",
+      blockNumber: effectiveBlockNumber
+    }),
+    borrowerAddress === undefined
+      ? Promise.resolve(undefined)
+      : publicClient.readContract({
+          address: poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "borrowerInfo",
+          args: [borrowerAddress],
+          blockNumber: effectiveBlockNumber
+        })
   ]);
 
   const rateState: AjnaRateState = {
@@ -966,7 +1103,22 @@ async function readAjnaPoolState(
     quoteTokenAddress,
     collateralAddress,
     quoteTokenScale,
-    poolType
+    poolType,
+    ...(borrowerInfo === undefined
+      ? {}
+      : {
+          borrowerState: {
+            borrowerAddress: borrowerAddress!,
+            t0Debt: borrowerInfo[0],
+            collateral: borrowerInfo[1],
+            npTpRatio: borrowerInfo[2]
+          }
+        }),
+    loansState: {
+      maxBorrower: loansInfo[0] as HexAddress,
+      maxT0DebtToCollateral: loansInfo[1],
+      noOfLoans: loansInfo[2]
+    }
   };
 }
 
@@ -1010,6 +1162,13 @@ function buildPoolSnapshot(
       collateralAddress: readState.collateralAddress,
       quoteTokenScale: readState.quoteTokenScale.toString(),
       poolType: readState.poolType,
+      maxBorrower: readState.loansState?.maxBorrower,
+      maxT0DebtToCollateral: readState.loansState?.maxT0DebtToCollateral.toString(),
+      noOfLoans: readState.loansState?.noOfLoans.toString(),
+      borrowerAddress: readState.borrowerState?.borrowerAddress,
+      borrowerT0Debt: readState.borrowerState?.t0Debt.toString(),
+      borrowerCollateral: readState.borrowerState?.collateral.toString(),
+      borrowerNpTpRatio: readState.borrowerState?.npTpRatio.toString(),
       currentRateWad: readState.rateState.currentRateWad.toString(),
       predictedNextRateWad: readState.prediction.predictedNextRateWad.toString(),
       immediatePredictedNextRateWad: readState.immediatePrediction.predictedNextRateWad.toString(),
@@ -1998,6 +2157,70 @@ export function synthesizeAjnaBorrowCandidate(
   return bestCandidate;
 }
 
+function findPureBorrowImprovementThresholdForCollateral(
+  state: AjnaRateState,
+  targetBand: ReturnType<typeof buildTargetBand>,
+  baselinePrediction: AjnaRatePrediction,
+  minimumAmount: bigint,
+  maximumAmount: bigint,
+  collateralAmount: bigint
+): bigint | undefined {
+  const baselineDistance = distanceToTargetBand(
+    baselinePrediction.predictedNextRateBps,
+    targetBand
+  );
+
+  function evaluate(drawDebtAmount: bigint): {
+    prediction: AjnaRatePrediction;
+    improvesConvergence: boolean;
+  } {
+    const prediction = forecastAjnaNextEligibleRate(
+      drawDebtIntoRateState(state, drawDebtAmount, collateralAmount)
+    );
+    const predictedDistance = distanceToTargetBand(
+      prediction.predictedNextRateBps,
+      targetBand
+    );
+
+    return {
+      prediction,
+      improvesConvergence:
+        predictionChanged(baselinePrediction, prediction) &&
+        predictedDistance < baselineDistance
+    };
+  }
+
+  let lowerBound = minimumAmount - 1n;
+  let upperBound = minimumAmount;
+  let upperEvaluation = evaluate(upperBound);
+
+  while (!upperEvaluation.improvesConvergence) {
+    lowerBound = upperBound;
+    if (upperBound === maximumAmount) {
+      return undefined;
+    }
+
+    upperBound = upperBound * 2n;
+    if (upperBound > maximumAmount) {
+      upperBound = maximumAmount;
+    }
+    upperEvaluation = evaluate(upperBound);
+  }
+
+  while (upperBound - lowerBound > 1n) {
+    const middle = lowerBound + (upperBound - lowerBound) / 2n;
+    const middleEvaluation = evaluate(middle);
+    if (middleEvaluation.improvesConvergence) {
+      upperBound = middle;
+      upperEvaluation = middleEvaluation;
+    } else {
+      lowerBound = middle;
+    }
+  }
+
+  return upperBound;
+}
+
 export function synthesizeAjnaLendAndBorrowCandidate(
   state: AjnaRateState,
   config: KeeperConfig,
@@ -2213,11 +2436,6 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
     accountState?: SimulationAccountState;
   }
 ): Promise<BorrowSimulationSynthesisResult | undefined> {
-  const limitIndexes = resolveSimulationBorrowLimitIndexes(config);
-  if (limitIndexes.length === 0) {
-    return undefined;
-  }
-
   const targetBand = buildTargetBand(config);
   const currentRateBps = toRateBps(readState.rateState.currentRateWad);
   if (currentRateBps >= targetBand.minRateBps) {
@@ -2275,10 +2493,10 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
       }
 
       try {
+        const { publicClient } = await getPreparedSimulationContext();
         const effectiveAccountState =
           options.accountState ??
           (await (async (): Promise<SimulationAccountState> => {
-            const { publicClient } = await getPreparedSimulationContext();
             const [collateralBalance, collateralAllowance] = await Promise.all([
               publicClient.readContract({
                 address: readState.collateralAddress,
@@ -2307,9 +2525,44 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
         );
         const candidateCollateralAmounts = resolveSimulationBorrowCollateralAmounts(
           config,
-          maxAvailableCollateral
+          maxAvailableCollateral,
+          {
+            borrowerHasExistingPosition:
+              (readState.borrowerState?.t0Debt ?? 0n) > 0n ||
+              (readState.borrowerState?.collateral ?? 0n) > 0n
+          }
         );
         if (candidateCollateralAmounts.length === 0) {
+          return undefined;
+        }
+        const limitIndexes = await resolvePoolAwareBorrowLimitIndexes(
+          publicClient,
+          options.poolAddress,
+          readState.blockNumber,
+          config
+        );
+        if (limitIndexes.length === 0) {
+          return undefined;
+        }
+        const exactBorrowSearchInputs = candidateCollateralAmounts
+          .map((collateralAmount) => ({
+            collateralAmount,
+            pureThresholdAmount:
+              lookaheadUpdates === 1
+                ? findPureBorrowImprovementThresholdForCollateral(
+                    readState.rateState,
+                    targetBand,
+                    baselinePrediction,
+                    minimumAmount,
+                    maxAmount,
+                    collateralAmount
+                  )
+                : undefined
+          }))
+          .filter(
+            (entry) => lookaheadUpdates > 1 || entry.pureThresholdAmount !== undefined
+          );
+        if (exactBorrowSearchInputs.length === 0) {
           return undefined;
         }
 
@@ -2469,7 +2722,10 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
         let bestCandidate: PlanCandidate | undefined;
 
         for (const limitIndex of limitIndexes) {
-          for (const collateralAmount of candidateCollateralAmounts) {
+          for (const {
+            collateralAmount,
+            pureThresholdAmount
+          } of exactBorrowSearchInputs) {
             const evaluate = async (
               drawDebtAmount: bigint
             ): Promise<{
@@ -2509,8 +2765,15 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
               }
             };
 
-            let lowerBound = minimumAmount - 1n;
-            let upperBound = minimumAmount;
+            const initialUpperBound =
+              pureThresholdAmount !== undefined && pureThresholdAmount >= minimumAmount
+                ? pureThresholdAmount
+                : minimumAmount;
+            let lowerBound =
+              pureThresholdAmount !== undefined && pureThresholdAmount > minimumAmount
+                ? minimumAmount - 1n
+                : minimumAmount - 1n;
+            let upperBound = initialUpperBound;
             let upperEvaluation = await evaluate(upperBound);
 
             while (!upperEvaluation.improvesConvergence) {
@@ -3185,7 +3448,9 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
     const readState = await readAjnaPoolState(
       this.publicClient,
       this.poolAddress,
-      this.now()
+      this.now(),
+      undefined,
+      this.config.borrowerAddress
     );
     const snapshotFingerprint = buildSnapshotFingerprint(
       this.poolAddress,

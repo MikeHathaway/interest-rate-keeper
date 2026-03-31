@@ -41,7 +41,9 @@ const RUN_BASE_FORK_SMOKE_TESTS = process.env.RUN_BASE_FORK_SMOKE_TESTS === "1";
 const RUN_BASE_FORK_SLOW_TESTS = process.env.RUN_BASE_FORK_SLOW_TESTS === "1";
 const RUN_BASE_FORK_ALL_TESTS = process.env.RUN_BASE_FORK_ALL_TESTS === "1";
 const TEST_PORT = 9545;
-const LOCAL_RPC_URL = `http://127.0.0.1:${TEST_PORT}`;
+const DEFAULT_LOCAL_ANVIL_URL = `http://127.0.0.1:${TEST_PORT}`;
+const EXTERNAL_LOCAL_ANVIL_URL = process.env.BASE_LOCAL_ANVIL_URL?.trim() || undefined;
+const LOCAL_RPC_URL = EXTERNAL_LOCAL_ANVIL_URL ?? DEFAULT_LOCAL_ANVIL_URL;
 const DEFAULT_ANVIL_PRIVATE_KEY =
   "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const COMPETING_ANVIL_PRIVATE_KEY =
@@ -76,6 +78,14 @@ const REPRESENTATIVE_BORROW_PLANNING_FIXTURE_CANDIDATES = [
   { targetRateBps: 1450, toleranceBps: 25, lookaheadUpdates: 3 },
   { targetRateBps: 1300, toleranceBps: 50, lookaheadUpdates: 2 },
   { targetRateBps: 1350, toleranceBps: 25, lookaheadUpdates: 2 }
+] as const;
+const REPRESENTATIVE_EXISTING_BORROWER_SAME_CYCLE_SCENARIOS = [
+  { initialQuoteAmount: 1_000n, borrowAmount: 100n, collateralAmount: 1_000n },
+  { initialQuoteAmount: 2_000n, borrowAmount: 150n, collateralAmount: 1_200n }
+] as const;
+const REPRESENTATIVE_EXISTING_BORROWER_SAME_CYCLE_CONFIG_CANDIDATES = [
+  { targetRateBps: 1000, toleranceBps: 50 },
+  { targetRateBps: 1100, toleranceBps: 50 }
 ] as const;
 const MAX_EXACT_DUAL_VALIDATIONS_WITH_PURE_MATCH = 2;
 const MAX_EXACT_DUAL_VALIDATIONS_WITHOUT_PURE_MATCH = 2;
@@ -130,6 +140,39 @@ async function waitForPort(port: number, timeoutMs = 20_000): Promise<void> {
   }
 
   throw new Error(`timed out waiting for localhost:${port}`);
+}
+
+async function waitForRpcListener(rpcUrl: string, timeoutMs = 20_000): Promise<void> {
+  let parsed: URL;
+  try {
+    parsed = new URL(rpcUrl);
+  } catch {
+    throw new Error(`invalid RPC URL: ${rpcUrl}`);
+  }
+
+  const port =
+    parsed.port.length > 0 ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
+  const host = parsed.hostname;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const connected = await new Promise<boolean>((resolve) => {
+      const socket = net.createConnection({ port, host });
+      socket.once("connect", () => {
+        socket.end();
+        resolve(true);
+      });
+      socket.once("error", () => resolve(false));
+    });
+
+    if (connected) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  throw new Error(`timed out waiting for ${host}:${port}`);
 }
 
 async function ensureMockArtifact(): Promise<{
@@ -563,6 +606,99 @@ async function createQuoteOnlyBorrowFixture(
     args: [1_000n * 10n ** 18n, 3_000n, latestBlock.timestamp + 3600n]
   });
   await publicClient.waitForTransactionReceipt({ hash: addQuoteHash });
+
+  return poolAddress;
+}
+
+async function createExistingBorrowerSameCycleFixture(
+  account: { address: `0x${string}` },
+  publicClient: any,
+  walletClient: any,
+  artifact: { abi: unknown[]; bytecode: `0x${string}` },
+  scenario: {
+    initialQuoteAmount: bigint;
+    borrowAmount: bigint;
+    collateralAmount: bigint;
+  }
+): Promise<`0x${string}` | undefined> {
+  const collateralToken = await deployMockToken(
+    walletClient,
+    publicClient,
+    artifact,
+    "Existing Borrower Collateral",
+    "EBC"
+  );
+  const quoteToken = await deployMockToken(
+    walletClient,
+    publicClient,
+    artifact,
+    "Existing Borrower Quote",
+    "EBQ"
+  );
+
+  for (const tokenAddress of [collateralToken, quoteToken]) {
+    await mintToken(
+      walletClient,
+      publicClient,
+      artifact,
+      tokenAddress,
+      account.address,
+      1_000_000n * 10n ** 18n
+    );
+  }
+
+  const poolAddress = await deployPoolThroughFactory(
+    walletClient,
+    publicClient,
+    collateralToken,
+    quoteToken
+  );
+
+  await approveToken(
+    walletClient,
+    publicClient,
+    quoteToken,
+    poolAddress,
+    1_000_000n * 10n ** 18n,
+    artifact.abi
+  );
+  await approveToken(
+    walletClient,
+    publicClient,
+    collateralToken,
+    poolAddress,
+    1_000_000n * 10n ** 18n,
+    artifact.abi
+  );
+
+  const latestBlock = await publicClient.getBlock();
+  const addQuoteHash = await walletClient.writeContract({
+    account,
+    chain: undefined,
+    address: poolAddress,
+    abi: ajnaPoolAbi,
+    functionName: "addQuoteToken",
+    args: [scenario.initialQuoteAmount * 10n ** 18n, 3_000n, latestBlock.timestamp + 3600n]
+  });
+  await publicClient.waitForTransactionReceipt({ hash: addQuoteHash });
+
+  const drawDebtHash = await walletClient.writeContract({
+    account,
+    chain: undefined,
+    address: poolAddress,
+    abi: ajnaPoolAbi,
+    functionName: "drawDebt",
+    args: [
+      account.address,
+      scenario.borrowAmount * 10n ** 18n,
+      3_000n,
+      scenario.collateralAmount * 10n ** 18n
+    ]
+  }).catch(() => undefined);
+  if (!drawDebtHash) {
+    return undefined;
+  }
+  await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
 
   return poolAddress;
 }
@@ -1065,6 +1201,95 @@ async function findRepresentativeBorrowPlanningMatch(
   );
 }
 
+async function findExistingBorrowerSameCycleBorrowMatch(
+  account: { address: `0x${string}` },
+  publicClient: any,
+  walletClient: any,
+  testClient: any,
+  artifact: { abi: unknown[]; bytecode: `0x${string}` }
+): Promise<
+  | {
+      poolAddress: `0x${string}`;
+      chainNow: number;
+      config: KeeperConfig;
+      snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+      plan: ReturnType<typeof planCycle>;
+    }
+  | undefined
+> {
+  for (const scenario of REPRESENTATIVE_EXISTING_BORROWER_SAME_CYCLE_SCENARIOS) {
+    const poolAddress = await createExistingBorrowerSameCycleFixture(
+      account,
+      publicClient,
+      walletClient,
+      artifact,
+      scenario
+    );
+    if (!poolAddress) {
+      continue;
+    }
+    const chainNow = await moveToFirstBorrowLookaheadState(
+      account,
+      publicClient,
+      walletClient,
+      testClient,
+      poolAddress
+    );
+
+    for (const candidate of REPRESENTATIVE_EXISTING_BORROWER_SAME_CYCLE_CONFIG_CANDIDATES) {
+      const config = resolveKeeperConfig({
+        chainId: 8453,
+        poolAddress,
+        poolId: `8453:${poolAddress.toLowerCase()}`,
+        rpcUrl: LOCAL_RPC_URL,
+        targetRateBps: candidate.targetRateBps,
+        toleranceBps: candidate.toleranceBps,
+        toleranceMode: "relative",
+        completionPolicy: "next_move_would_overshoot",
+        executionBufferBps: 0,
+        maxQuoteTokenExposure: "1000000000000000000000000",
+        maxBorrowExposure: "1000000000000000000000",
+        snapshotAgeMaxSeconds: 3600,
+        minTimeBeforeRateWindowSeconds: 120,
+        minExecutableActionQuoteToken: "1",
+        recheckBeforeSubmit: true,
+        borrowerAddress: account.address,
+        simulationSenderAddress: account.address,
+        enableSimulationBackedBorrowSynthesis: true,
+        drawDebtLimitIndexes: [3000],
+        drawDebtCollateralAmounts: ["10000000000000000000"]
+      });
+      const snapshot = await new AjnaRpcSnapshotSource(config, {
+        publicClient,
+        now: () => chainNow
+      }).getSnapshot();
+      const borrowCandidate = snapshot.candidates.find(
+        (innerCandidate) => innerCandidate.intent === "BORROW"
+      );
+      if (!borrowCandidate) {
+        continue;
+      }
+
+      const borrowOnlySnapshot = {
+        ...snapshot,
+        candidates: [borrowCandidate]
+      };
+      const plan = planCycle(borrowOnlySnapshot, config);
+      if (plan.intent === "BORROW") {
+        return {
+          poolAddress,
+          chainNow,
+          config,
+          snapshot: borrowOnlySnapshot,
+          plan
+        };
+      }
+    }
+  }
+
+  return undefined;
+}
+
 const describeIf = RUN_BASE_FORK_TESTS ? describe : describe.skip;
 const itBaseSmoke = RUN_BASE_FORK_SLOW_TESTS && !RUN_BASE_FORK_ALL_TESTS ? it.skip : it;
 const itBaseDefault =
@@ -1080,8 +1305,20 @@ describeIf("Base factory fork integration", () => {
 
   beforeAll(async () => {
     const forkUrl = process.env.BASE_RPC_URL ?? "https://mainnet.base.org";
+    if (EXTERNAL_LOCAL_ANVIL_URL) {
+      console.log(
+        `[base-fork] profile=${currentBaseForkProfile()} mode=reuse local=${describeForkHost(
+          LOCAL_RPC_URL
+        )}`
+      );
+      await waitForRpcListener(LOCAL_RPC_URL, 60_000);
+      return;
+    }
+
     console.log(
-      `[base-fork] profile=${currentBaseForkProfile()} host=${describeForkHost(forkUrl)}`
+      `[base-fork] profile=${currentBaseForkProfile()} mode=spawn upstream=${describeForkHost(
+        forkUrl
+      )} local=${describeForkHost(LOCAL_RPC_URL)}`
     );
     anvil = spawn(
       "anvil",
@@ -1137,7 +1374,7 @@ describeIf("Base factory fork integration", () => {
   });
 
   itBaseSmoke(
-    "creates a new pool through the deployed Base factory and updates interest after fast-forwarding time",
+    "brand-new quote-only pool passively steps down on its first eligible update",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
 
@@ -1248,7 +1485,7 @@ describeIf("Base factory fork integration", () => {
   );
 
   itBaseDefault(
-    "does not yet find an exact same-cycle borrow steering candidate in a representative abandoned-pool state",
+    "brand-new quote-only pool does not yet find an exact same-cycle borrow steering candidate after the first passive update",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
       const artifact = await ensureMockArtifact();
@@ -1326,7 +1563,7 @@ describeIf("Base factory fork integration", () => {
   );
 
   itBaseSlow(
-    "finds and live-executes a multi-cycle borrow plan in a representative abandoned-pool state when lookahead is enabled",
+    "brand-new quote-only pool finds and live-executes a multi-cycle borrow plan when target is above the passive trajectory",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
       const artifact = await ensureMockArtifact();
@@ -1445,6 +1682,26 @@ describeIf("Base factory fork integration", () => {
       expect(activePath.currentRateBps).toBeGreaterThan(passivePath.currentRateBps);
     },
     120_000
+  );
+
+  itBaseSlow(
+    "does not yet find an exact same-cycle borrow steering candidate across representative existing-borrower fixtures",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const match = await findExistingBorrowerSameCycleBorrowMatch(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        artifact
+      );
+
+      expect(match).toBeUndefined();
+    },
+    180_000
   );
 
   itBaseSlow(
@@ -2317,7 +2574,7 @@ describeIf("Base factory fork integration", () => {
   );
 
   itBaseSmoke(
-    "handles repeated update-only cycles across roughly a week until the target band is reached, then stops cleanly",
+    "brand-new quote-only pool continues repeated update-only downward convergence across roughly a week until the target band is reached, then stops cleanly",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
       const artifact = await ensureMockArtifact();
