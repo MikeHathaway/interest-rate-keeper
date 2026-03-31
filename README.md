@@ -95,6 +95,31 @@ This is the case where quote and borrow actions together beat either side alone.
 | Abandoned high-rate reset/recovery | outcome model implemented, but not a separately proven live steering strategy |
 | Mixed two-sided correction | representative exact due-window `LEND_AND_BORROW` is proven |
 
+## Terms
+
+- `same-cycle`: act now so the very next eligible Ajna rate update moves in the desired direction or stays inside the target band
+- `multi-cycle`: act now because, even if the next single update is still imperfect, the next few eligible Ajna updates converge better than the passive do-nothing path
+- `passive path`: the projected rate path if the keeper does nothing
+- `lookahead`: how many future eligible updates the borrower-side exact search evaluates when judging convergence
+
+## How Multi-Cycle Works
+
+Multi-cycle planning is not assuming the keeper can predict the pool forever while ignoring other actors. It is a bounded planning heuristic:
+
+- take a fresh snapshot of current pool state
+- simulate a no-op baseline over the next `N` eligible updates
+- simulate one or more keeper actions over the same `N`-update horizon
+- choose the action only if that action improves the bounded horizon relative to the passive path
+- rerun the whole process again on the next keeper cycle from fresh live state
+
+So the keeper is not saying "I know exactly what the pool will do for the next week." It is saying "from the current state, this action improves the next few Ajna updates more than doing nothing, and I will re-evaluate again later."
+
+External actors still matter:
+
+- they can invalidate the current plan before execution, which is why the keeper rechecks state before submit
+- they can change the pool after this cycle, which is why multi-cycle planning is implemented as repeated replanning, not as one fixed long-lived commitment
+- the more active the pool is, the less confidence you should place in long-horizon forecasts
+
 ## Requirements
 
 - Node.js `>=20.5.0`

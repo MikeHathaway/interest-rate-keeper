@@ -78,6 +78,31 @@ The current implementation/testing evidence should be understood per mode:
 - Mixed two-sided correction:
   representative exact due-window `LEND_AND_BORROW` is proven
 
+### Current Product Conclusion For Borrower Steering
+
+The implementation and fork evidence now support a clearer product stance:
+
+- operators should still configure only the pool, target band, and risk limits
+- the engine should choose the best available borrower-side tactic internally
+- exact same-cycle `BORROW` should be treated as experimental, not as the default upward-steering primitive
+- the default proven upward-steering path is multi-cycle borrower positioning over the next eligible updates
+- heuristic same-cycle `BORROW` can still be useful as exploratory operator guidance, but not as a proven automatic execution path
+
+Why:
+
+- brand-new quote-only fixtures remain negative for exact same-cycle borrower steering
+- true existing-borrower fixtures remain negative for exact same-cycle borrower steering
+- deliberately borrower-heavy existing-loan fixtures also remain negative for exact same-cycle borrower steering
+- representative multi-cycle borrower steering is positively proven
+
+So for v1/v1.1, upward convergence should be implemented as an internal policy ladder:
+
+- first, use the strongest exact borrower-side tactic that is actually proven for the current state
+- if exact same-cycle `BORROW` is not proven/available, fall back to exact multi-cycle `BORROW`
+- if no exact borrower path exists, heuristic same-cycle `BORROW` can still be surfaced for recommendation or dry-run contexts
+
+This is not intended to become a user-facing per-pool strategy setting.
+
 ## Non-Goals
 
 - No new smart contracts in v1.
