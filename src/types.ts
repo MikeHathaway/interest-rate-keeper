@@ -142,6 +142,7 @@ export interface KeeperConfig {
   drawDebtCollateralAmounts?: bigint[];
   borrowSimulationLookaheadUpdates?: number;
   enableHeuristicLendSynthesis?: boolean;
+  enableHeuristicBorrowSynthesis?: boolean;
   logPath?: string;
   manualCandidates?: PlanCandidate[];
 }

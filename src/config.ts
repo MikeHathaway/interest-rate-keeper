@@ -353,6 +353,13 @@ export function resolveKeeperConfig(input: unknown): KeeperConfig {
     );
   }
 
+  if (record.enableHeuristicBorrowSynthesis !== undefined) {
+    config.enableHeuristicBorrowSynthesis = parseBoolean(
+      record.enableHeuristicBorrowSynthesis,
+      "enableHeuristicBorrowSynthesis"
+    );
+  }
+
   if (record.manualCandidates !== undefined) {
     if (!Array.isArray(record.manualCandidates)) {
       throw new Error("manualCandidates must be an array");

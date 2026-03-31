@@ -7,6 +7,7 @@ import {
   resolveSimulationBorrowLimitIndexes,
   searchCoarseToFineDualSpace,
   synthesizeAjnaBorrowCandidate,
+  synthesizeAjnaHeuristicCandidates,
   synthesizeAjnaLendAndBorrowCandidate,
   synthesizeAjnaLendCandidate
 } from "../src/ajna/snapshot.js";
@@ -475,6 +476,72 @@ describe("resolveSimulationBorrowCollateralAmounts", () => {
         }
       )
     ).toEqual([0n, 1n, 2n, 5n, 10n, 20n, 50n, 100n].map((amount) => amount * WAD));
+  });
+});
+
+describe("synthesizeAjnaHeuristicCandidates", () => {
+  it("surfaces a heuristic borrow candidate when borrow heuristics are enabled without lend heuristics", () => {
+    const config: KeeperConfig = {
+      ...baseConfig,
+      targetRateBps: 1_300,
+      drawDebtLimitIndex: 3000,
+      drawDebtCollateralAmounts: [0n, 5n],
+      enableHeuristicBorrowSynthesis: true
+    };
+    let matchedCandidates:
+      | ReturnType<typeof synthesizeAjnaHeuristicCandidates>
+      | undefined;
+
+    for (const debtEmaWad of [
+      50_000_000_000_000_000n,
+      100_000_000_000_000_000n,
+      150_000_000_000_000_000n,
+      200_000_000_000_000_000n,
+      250_000_000_000_000_000n
+    ]) {
+      for (const debtColEmaWad of [
+        10_000_000_000_000_000n,
+        25_000_000_000_000_000n,
+        50_000_000_000_000_000n,
+        75_000_000_000_000_000n,
+        100_000_000_000_000_000n,
+        150_000_000_000_000_000n,
+        200_000_000_000_000_000n,
+        250_000_000_000_000_000n,
+        300_000_000_000_000_000n
+      ]) {
+        const state = {
+          currentRateWad: 100_000_000_000_000_000n,
+          currentDebtWad: 1_000n,
+          debtEmaWad,
+          depositEmaWad: 1_000_000_000_000_000_000n,
+          debtColEmaWad,
+          lupt0DebtEmaWad: WAD,
+          lastInterestRateUpdateTimestamp: 0,
+          nowTimestamp: 50_000
+        } as const;
+
+        const candidates = synthesizeAjnaHeuristicCandidates(state, config, {
+          quoteTokenScale: 1n,
+          nowTimestamp: state.nowTimestamp
+        });
+        if (candidates.some((candidate) => candidate.intent === "BORROW")) {
+          matchedCandidates = candidates;
+          break;
+        }
+      }
+
+      if (matchedCandidates) {
+        break;
+      }
+    }
+
+    expect(matchedCandidates).toBeDefined();
+    expect(matchedCandidates?.some((candidate) => candidate.intent === "BORROW")).toBe(true);
+    expect(matchedCandidates?.some((candidate) => candidate.intent === "LEND")).toBe(false);
+    expect(matchedCandidates?.some((candidate) => candidate.intent === "LEND_AND_BORROW")).toBe(
+      false
+    );
   });
 });
 

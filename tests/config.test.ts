@@ -23,6 +23,7 @@ describe("resolveKeeperConfig", () => {
       drawDebtCollateralAmounts: ["1000000000000000000", "2500000000000000000"],
       borrowSimulationLookaheadUpdates: 2,
       enableHeuristicLendSynthesis: true,
+      enableHeuristicBorrowSynthesis: true,
       maxQuoteTokenExposure: "1000000",
       maxBorrowExposure: "500000"
     });
@@ -47,6 +48,7 @@ describe("resolveKeeperConfig", () => {
     ]);
     expect(config.borrowSimulationLookaheadUpdates).toBe(2);
     expect(config.enableHeuristicLendSynthesis).toBe(true);
+    expect(config.enableHeuristicBorrowSynthesis).toBe(true);
   });
 
   it("parses manual candidates", () => {

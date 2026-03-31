@@ -19,6 +19,7 @@ This is still an early implementation. The core keeper loop exists and the live 
 - exact simulation-backed `DRAW_DEBT` synthesis now exists behind `enableSimulationBackedBorrowSynthesis`
 - exact simulation-backed `LEND_AND_BORROW` synthesis now exists when both exact lend and borrow synthesis are enabled
 - heuristic `ADD_QUOTE` synthesis still exists behind `enableHeuristicLendSynthesis`
+- heuristic `DRAW_DEBT` synthesis now exists behind `enableHeuristicBorrowSynthesis`
 - heuristic `LEND_AND_BORROW` synthesis now exists for the narrow case where adding quote tempers an oversized borrow path toward the target band
 
 Today, the snapshot builder reads real pool state and predicts the next Ajna rate move. For steering candidates:
@@ -30,11 +31,12 @@ Today, the snapshot builder reads real pool state and predicts the next Ajna rat
 - simulation-backed `DRAW_DEBT` synthesis is an exact opt-in path that forks the current chain state and tests candidate borrow amounts against real Ajna contract behavior
 - simulation-backed `LEND_AND_BORROW` synthesis is an exact opt-in path that searches direct `ADD_QUOTE -> DRAW_DEBT` combinations on a fork and validates the full `ADD_QUOTE -> DRAW_DEBT -> updateInterest` path before emitting them
 - heuristic `ADD_QUOTE` synthesis remains useful for exploratory planning and dry-run validation
+- heuristic `DRAW_DEBT` synthesis now provides exploratory upward-steering candidates when exact same-cycle borrow remains too conservative
 - heuristic `LEND_AND_BORROW` synthesis is deliberately narrow: it looks for `ADD_QUOTE -> DRAW_DEBT` plans that soften a borrow overshoot rather than trying to solve a full two-dimensional optimizer
 - snapshot `predictedNextOutcome` / `predictedNextRateBps` now describe the next eligible Ajna rate update, even when that update is not due yet
 - candidate usefulness is now judged against the do-nothing next update path, not just against the current rate, so the planner can prefer neutralizing a bad upcoming move over letting the pool drift farther away
 
-The current Base-fork evidence is important: the keeper now finds a lend plan in representative borrowed-pool step-up fixtures, borrower-side lookahead planning can find and live-execute a representative multi-cycle `BORROW` plan when a wider search space is enabled, and multi-bucket quote search now surfaces, naturally selects, and live-executes a representative exact `LEND_AND_BORROW` candidate on the fork. Due-window mutating plans no longer append a separate `UPDATE_INTEREST` step, because the first mutating action can consume the overdue update itself. The fork suite now also proves that the keeper aborts safely when another actor changes the pool between planning and execution. On the borrower side, exact same-cycle `DRAW_DEBT` search still does not find a safe candidate in the representative brand-new quote-only fixture covered by integration. Exact pre-window lend synthesis is now intentionally disabled, because the later live fork proof did not hold up. So borrower-side exact mode is now useful for representative multi-cycle live steering, but not yet a proven live same-cycle borrow executor.
+The current Base-fork evidence is important: the keeper now finds a lend plan in representative borrowed-pool step-up fixtures, borrower-side lookahead planning can find and live-execute a representative multi-cycle `BORROW` plan when a wider search space is enabled, and multi-bucket quote search now surfaces, naturally selects, and live-executes a representative exact `LEND_AND_BORROW` candidate on the fork. Due-window mutating plans no longer append a separate `UPDATE_INTEREST` step, because the first mutating action can consume the overdue update itself. The fork suite now also proves that the keeper aborts safely when another actor changes the pool between planning and execution. On the borrower side, exact same-cycle `DRAW_DEBT` search still does not find a safe candidate in the representative brand-new quote-only fixture covered by integration, while heuristic `DRAW_DEBT` synthesis is now available as an exploratory fallback. Exact pre-window lend synthesis is still intentionally disabled, because the representative not-due step-up fixture is not stable enough for a live proof yet. So borrower-side exact mode is now useful for representative multi-cycle live steering, but not yet a proven live same-cycle borrow executor.
 
 ## Product Modes
 
@@ -260,6 +262,7 @@ Optional live-execution fields:
 - `drawDebtCollateralAmounts`
 - `borrowSimulationLookaheadUpdates`
 - `enableHeuristicLendSynthesis`
+- `enableHeuristicBorrowSynthesis`
 
 ## Live Execution Notes
 
@@ -316,8 +319,8 @@ npm run test:integration:base
 - `manualCandidates` are still the bridge for live steering plans.
 - live snapshots now attach validation signatures to `manualCandidates`, so recheck can invalidate them when pool, borrower, loan, or referenced-bucket context drifts before execution.
 - Exact simulation-backed lend synthesis is opt-in and currently limited to due-window representative lend fixtures.
-- Exact pre-window lend synthesis is intentionally disabled for now, because the live fork proof did not match the simulated candidate in the representative not-due step-up fixture.
 - Exact simulation-backed borrow synthesis is opt-in and now supports multi-cycle planning through `borrowSimulationLookaheadUpdates`, with representative Base-fork coverage for a live-executed 3-update borrower path.
+- Heuristic borrow synthesis is opt-in and now covers exploratory upward-steering candidates through the same heuristic search path used by the pure planner tests.
 - Brand-new pool upward-convergence and abandoned-pool recovery should not be treated as the same keeper mode; they share engine pieces, but the proven execution paths are different.
 - Exact simulation-backed `LEND_AND_BORROW` synthesis is now wired into the live snapshot path when both exact lend and borrow synthesis are enabled, and it benchmarks candidate dual paths against the best exact single-action paths before emitting them.
 - Adding multi-bucket quote search made that stricter benchmark productive again in the representative Base fixture: the keeper now surfaces and naturally selects a real exact `LEND_AND_BORROW` candidate there.

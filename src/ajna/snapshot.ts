@@ -994,7 +994,9 @@ function buildSnapshotFingerprint(
         state.debtEmaWad.toString(),
         state.depositEmaWad.toString(),
         state.debtColEmaWad.toString(),
-        state.lupt0DebtEmaWad.toString()
+        state.lupt0DebtEmaWad.toString(),
+        state.lastInterestRateUpdateTimestamp.toString(),
+        state.nowTimestamp.toString()
       ].join(":")
     )
   );
@@ -2614,6 +2616,56 @@ export function synthesizeAjnaLendAndBorrowCandidate(
   return bestCandidate;
 }
 
+export function synthesizeAjnaHeuristicCandidates(
+  state: AjnaRateState,
+  config: KeeperConfig,
+  options: {
+    quoteTokenScale: bigint;
+    nowTimestamp: number;
+    baselinePrediction?: AjnaRatePrediction;
+  }
+): PlanCandidate[] {
+  const candidates: PlanCandidate[] = [];
+  const heuristicBorrowCandidate = config.enableHeuristicBorrowSynthesis
+    ? synthesizeAjnaBorrowCandidate(state, config, {
+        baselinePrediction: options.baselinePrediction
+      })
+    : undefined;
+
+  if (heuristicBorrowCandidate) {
+    candidates.push(heuristicBorrowCandidate);
+  }
+
+  if (config.enableHeuristicLendSynthesis) {
+    const lendCandidate = synthesizeAjnaLendCandidate(state, config, {
+      quoteTokenScale: options.quoteTokenScale,
+      nowTimestamp: options.nowTimestamp,
+      baselinePrediction: options.baselinePrediction
+    });
+    if (lendCandidate) {
+      candidates.push(lendCandidate);
+    }
+
+    const dualCandidate = synthesizeAjnaLendAndBorrowCandidate(
+      state,
+      config,
+      {
+        quoteTokenScale: options.quoteTokenScale,
+        nowTimestamp: options.nowTimestamp,
+        baselinePrediction: options.baselinePrediction,
+        ...(heuristicBorrowCandidate === undefined
+          ? {}
+          : { anchorBorrowCandidate: heuristicBorrowCandidate })
+      }
+    );
+    if (dualCandidate) {
+      candidates.push(dualCandidate);
+    }
+  }
+
+  return candidates;
+}
+
 async function synthesizeAjnaBorrowCandidateViaSimulation(
   readState: AjnaPoolStateRead,
   config: KeeperConfig,
@@ -3756,18 +3808,11 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
       }
     }
 
-    if (autoCandidates.length === 0 && this.config.enableHeuristicLendSynthesis) {
-      const lendCandidate = synthesizeAjnaLendCandidate(readState.rateState, this.config, {
-        quoteTokenScale: readState.quoteTokenScale,
-        nowTimestamp: readState.rateState.nowTimestamp,
-        baselinePrediction: readState.prediction
-      });
-      if (lendCandidate) {
-        autoCandidates.push(lendCandidate);
-        autoCandidateSource = "heuristic";
-      }
-
-      const dualCandidate = synthesizeAjnaLendAndBorrowCandidate(
+    if (
+      autoCandidates.length === 0 &&
+      (this.config.enableHeuristicLendSynthesis || this.config.enableHeuristicBorrowSynthesis)
+    ) {
+      const heuristicCandidates = synthesizeAjnaHeuristicCandidates(
         readState.rateState,
         this.config,
         {
@@ -3776,8 +3821,8 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
           baselinePrediction: readState.prediction
         }
       );
-      if (dualCandidate) {
-        autoCandidates.push(dualCandidate);
+      if (heuristicCandidates.length > 0) {
+        autoCandidates.push(...heuristicCandidates);
         autoCandidateSource = "heuristic";
       }
     }
