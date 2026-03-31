@@ -110,14 +110,19 @@ npm run typecheck
 npm test
 npm run test:integration:base:smoke
 npm run test:integration:base
+npm run test:integration:base:slow
+npm run test:integration:base:stress
+npm run test:integration:base:experimental
 ```
 
 Notes:
 - `npm test` runs the fast unit suite only.
 - `npm run test:integration:base:smoke` runs the smallest Base-fork health checks.
 - `npm run test:integration:base` runs the broader default Base-fork integration profile in [`tests/integration/base-factory.integration.ts`](./tests/integration/base-factory.integration.ts).
-- `npm run test:integration:base:slow` runs the heavier exact-path Base-fork proofs.
-- `npm run test:integration:base:all` runs all profiles together.
+- `npm run test:integration:base:slow` runs the slower but still routine exact-path proofs.
+- `npm run test:integration:base:stress` runs the heavier but consistently passable managed-local-Anvil proofs.
+- `npm run test:integration:base:experimental` runs the longest algorithmic exact-search proofs. These are exploratory and can still take many minutes.
+- `npm run test:integration:base:all` runs every profile together, including `experimental`, and also uses the managed local-Anvil path.
 - The Base integration test uses `BASE_RPC_URL` if provided, otherwise it falls back to `https://mainnet.base.org`.
 - If `BASE_LOCAL_ANVIL_URL` is set, the Base integration test reuses that already-running local Anvil fork instead of spawning a fresh fork.
 - The Base integration test logs the selected profile plus either the reused local fork host or the spawned upstream/local hosts at startup.
@@ -151,6 +156,20 @@ Recommended heavy-test workflow:
 anvil --fork-url "$BASE_RPC_URL" --port 9545 --chain-id 8453 --silent
 BASE_LOCAL_ANVIL_URL=http://127.0.0.1:9545 npm run test:integration:base:slow
 ```
+
+For the heaviest representative proofs, prefer:
+
+```bash
+BASE_LOCAL_ANVIL_URL=http://127.0.0.1:9545 npm run test:integration:base:stress
+```
+
+For the longest exploratory exact-search proofs, use:
+
+```bash
+BASE_LOCAL_ANVIL_URL=http://127.0.0.1:9545 npm run test:integration:base:experimental
+```
+
+If `BASE_LOCAL_ANVIL_URL` is unset, `test:integration:base:stress`, `test:integration:base:experimental`, and `test:integration:base:all` will automatically start a managed local Anvil fork on `http://127.0.0.1:9545`, run the suite against that warmed local fork, then shut it down when the run finishes.
 
 ## CLI Usage
 

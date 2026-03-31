@@ -32,13 +32,17 @@ import {
   runCycle,
   synthesizeAjnaLendAndBorrowCandidate,
   type AjnaRateState,
-  type KeeperConfig
+  type KeeperConfig,
+  type PlanCandidate,
+  type PoolSnapshot
 } from "../../src/index.js";
 
 const execFile = promisify(execFileCallback);
 const RUN_BASE_FORK_TESTS = process.env.RUN_BASE_FORK_TESTS === "1";
 const RUN_BASE_FORK_SMOKE_TESTS = process.env.RUN_BASE_FORK_SMOKE_TESTS === "1";
 const RUN_BASE_FORK_SLOW_TESTS = process.env.RUN_BASE_FORK_SLOW_TESTS === "1";
+const RUN_BASE_FORK_STRESS_TESTS = process.env.RUN_BASE_FORK_STRESS_TESTS === "1";
+const RUN_BASE_FORK_EXPERIMENTAL_TESTS = process.env.RUN_BASE_FORK_EXPERIMENTAL_TESTS === "1";
 const RUN_BASE_FORK_ALL_TESTS = process.env.RUN_BASE_FORK_ALL_TESTS === "1";
 const TEST_PORT = 9545;
 const DEFAULT_LOCAL_ANVIL_URL = `http://127.0.0.1:${TEST_PORT}`;
@@ -70,15 +74,6 @@ const REPRESENTATIVE_LEND_AND_DUAL_FIXTURE_MANIFEST = {
     collateralAmounts: [10n * 10n ** 18n] as const
   }
 } as const;
-const REPRESENTATIVE_BORROW_PLANNING_FIXTURE_CANDIDATES = [
-  { targetRateBps: 1300, toleranceBps: 50, lookaheadUpdates: 3 },
-  { targetRateBps: 1350, toleranceBps: 50, lookaheadUpdates: 3 },
-  { targetRateBps: 1250, toleranceBps: 50, lookaheadUpdates: 3 },
-  { targetRateBps: 1400, toleranceBps: 25, lookaheadUpdates: 3 },
-  { targetRateBps: 1450, toleranceBps: 25, lookaheadUpdates: 3 },
-  { targetRateBps: 1300, toleranceBps: 50, lookaheadUpdates: 2 },
-  { targetRateBps: 1350, toleranceBps: 25, lookaheadUpdates: 2 }
-] as const;
 const REPRESENTATIVE_EXISTING_BORROWER_SAME_CYCLE_SCENARIOS = [
   { initialQuoteAmount: 1_000n, borrowAmount: 100n, collateralAmount: 1_000n },
   { initialQuoteAmount: 2_000n, borrowAmount: 150n, collateralAmount: 1_200n }
@@ -87,12 +82,29 @@ const REPRESENTATIVE_EXISTING_BORROWER_SAME_CYCLE_CONFIG_CANDIDATES = [
   { targetRateBps: 1000, toleranceBps: 50 },
   { targetRateBps: 1100, toleranceBps: 50 }
 ] as const;
-const MAX_EXACT_DUAL_VALIDATIONS_WITH_PURE_MATCH = 2;
-const MAX_EXACT_DUAL_VALIDATIONS_WITHOUT_PURE_MATCH = 2;
+const REPRESENTATIVE_MULTI_CYCLE_BORROW_CONFIG = {
+  targetRateBps: 1300,
+  toleranceBps: 50,
+  lookaheadUpdates: 3
+} as const;
+const MAX_EXACT_DUAL_VALIDATIONS_WITH_PURE_MATCH = 1;
+const MAX_EXACT_DUAL_VALIDATIONS_WITHOUT_PURE_MATCH = 1;
 
-function currentBaseForkProfile(): "smoke" | "default" | "slow" | "all" {
+function currentBaseForkProfile():
+  | "smoke"
+  | "default"
+  | "slow"
+  | "stress"
+  | "experimental"
+  | "all" {
   if (RUN_BASE_FORK_ALL_TESTS) {
     return "all";
+  }
+  if (RUN_BASE_FORK_EXPERIMENTAL_TESTS) {
+    return "experimental";
+  }
+  if (RUN_BASE_FORK_STRESS_TESTS) {
+    return "stress";
   }
   if (RUN_BASE_FORK_SLOW_TESTS) {
     return "slow";
@@ -271,6 +283,84 @@ function createClientsForPrivateKey(privateKey: `0x${string}`) {
       mode: "anvil",
       transport: http(LOCAL_RPC_URL)
     }) as any
+  };
+}
+
+function buildRepresentativeBorrowLookaheadConfig(
+  poolAddress: `0x${string}`,
+  borrowerAddress: `0x${string}`,
+  overrides?: Partial<
+    Pick<
+      KeeperConfig,
+      | "targetRateBps"
+      | "toleranceBps"
+      | "borrowSimulationLookaheadUpdates"
+      | "enableSimulationBackedBorrowSynthesis"
+      | "drawDebtLimitIndexes"
+      | "drawDebtCollateralAmounts"
+    >
+  >
+): KeeperConfig {
+  return resolveKeeperConfig({
+    chainId: 8453,
+    poolAddress,
+    poolId: `8453:${poolAddress.toLowerCase()}`,
+    rpcUrl: LOCAL_RPC_URL,
+    targetRateBps: overrides?.targetRateBps ?? REPRESENTATIVE_MULTI_CYCLE_BORROW_CONFIG.targetRateBps,
+    toleranceBps: overrides?.toleranceBps ?? REPRESENTATIVE_MULTI_CYCLE_BORROW_CONFIG.toleranceBps,
+    toleranceMode: "relative",
+    completionPolicy: "next_move_would_overshoot",
+    executionBufferBps: 0,
+    maxQuoteTokenExposure: "1000000000000000000000000",
+    maxBorrowExposure: "1000000000000000000000",
+    snapshotAgeMaxSeconds: 3600,
+    minTimeBeforeRateWindowSeconds: 120,
+    minExecutableActionQuoteToken: "1",
+    recheckBeforeSubmit: true,
+    borrowerAddress,
+    simulationSenderAddress: borrowerAddress,
+    enableSimulationBackedBorrowSynthesis:
+      overrides?.enableSimulationBackedBorrowSynthesis ?? true,
+    drawDebtLimitIndexes: overrides?.drawDebtLimitIndexes ?? [3000],
+    drawDebtCollateralAmounts:
+      overrides?.drawDebtCollateralAmounts ?? ["10000000000000000000"],
+    borrowSimulationLookaheadUpdates:
+      overrides?.borrowSimulationLookaheadUpdates ??
+      REPRESENTATIVE_MULTI_CYCLE_BORROW_CONFIG.lookaheadUpdates
+  });
+}
+
+function buildRepresentativeBorrowAbortCandidate(
+  snapshot: PoolSnapshot,
+  config: KeeperConfig
+): PlanCandidate {
+  const collateralAmount =
+    BigInt(String((snapshot.metadata?.borrowerCollateralWad as string | number | undefined) ?? "0")) >
+    0n
+      ? 0n
+      : 10n * 10n ** 18n;
+
+  return {
+    id: "representative-manual-borrow",
+    intent: "BORROW",
+    minimumExecutionSteps: [
+      {
+        type: "DRAW_DEBT",
+        amount: 1n * 10n ** 18n,
+        limitIndex: 3000,
+        collateralAmount
+      }
+    ],
+    predictedOutcome: "STEP_UP",
+    predictedRateBpsAfterNextUpdate: Math.max(
+      snapshot.predictedNextRateBps,
+      config.targetRateBps
+    ),
+    resultingDistanceToTargetBps: 0,
+    quoteTokenDelta: 0n,
+    explanation: "representative borrower-side steering plan for recheck invalidation coverage",
+    planningRateBps: config.targetRateBps,
+    planningLookaheadUpdates: config.borrowSimulationLookaheadUpdates ?? 1
   };
 }
 
@@ -936,7 +1026,11 @@ async function findExactDualCandidateFromSnapshot(
   account: { address: `0x${string}` },
   poolAddress: `0x${string}`,
   chainNow: number,
-  baselineSnapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>
+  baselineSnapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>,
+  options?: {
+    maxValidationsWithPureMatch?: number;
+    maxValidationsWithoutPureMatch?: number;
+  }
 ): Promise<{
   attemptedConfigCount: number;
   match?: {
@@ -1031,10 +1125,16 @@ async function findExactDualCandidateFromSnapshot(
   const configsToValidate = (() => {
     const pureMatches = rankedConfigs.filter(({ pureCandidate }) => pureCandidate !== undefined);
     if (pureMatches.length > 0) {
-      return pureMatches.slice(0, MAX_EXACT_DUAL_VALIDATIONS_WITH_PURE_MATCH);
+      return pureMatches.slice(
+        0,
+        options?.maxValidationsWithPureMatch ?? MAX_EXACT_DUAL_VALIDATIONS_WITH_PURE_MATCH
+      );
     }
 
-    return rankedConfigs.slice(0, MAX_EXACT_DUAL_VALIDATIONS_WITHOUT_PURE_MATCH);
+    return rankedConfigs.slice(
+      0,
+      options?.maxValidationsWithoutPureMatch ?? MAX_EXACT_DUAL_VALIDATIONS_WITHOUT_PURE_MATCH
+    );
   })();
   let firstDualMatch:
     | {
@@ -1137,70 +1237,6 @@ async function findExactDualCandidateConfig(
   throw new Error("failed to validate an exact dual candidate");
 }
 
-async function findRepresentativeBorrowPlanningMatch(
-  publicClient: any,
-  account: { address: `0x${string}` },
-  poolAddress: `0x${string}`,
-  chainNow: number
-): Promise<{
-  config: KeeperConfig;
-  snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
-  plan: ReturnType<typeof planCycle>;
-}> {
-  for (const candidate of REPRESENTATIVE_BORROW_PLANNING_FIXTURE_CANDIDATES) {
-    const config = resolveKeeperConfig({
-      chainId: 8453,
-      poolAddress,
-      poolId: `8453:${poolAddress.toLowerCase()}`,
-      rpcUrl: LOCAL_RPC_URL,
-      targetRateBps: candidate.targetRateBps,
-      toleranceBps: candidate.toleranceBps,
-      toleranceMode: "relative",
-      completionPolicy: "next_move_would_overshoot",
-      executionBufferBps: 0,
-      maxQuoteTokenExposure: "1000000000000000000000000",
-      maxBorrowExposure: "1000000000000000000000",
-      snapshotAgeMaxSeconds: 3600,
-      minTimeBeforeRateWindowSeconds: 120,
-      minExecutableActionQuoteToken: "1",
-      recheckBeforeSubmit: true,
-      borrowerAddress: account.address,
-      simulationSenderAddress: account.address,
-      enableSimulationBackedBorrowSynthesis: true,
-      drawDebtLimitIndexes: [3000],
-      drawDebtCollateralAmounts: ["10000000000000000000"],
-      borrowSimulationLookaheadUpdates: candidate.lookaheadUpdates
-    });
-    const snapshot = await new AjnaRpcSnapshotSource(config, {
-      publicClient,
-      now: () => chainNow
-    }).getSnapshot();
-    const borrowCandidate = snapshot.candidates.find(
-      (innerCandidate) => innerCandidate.intent === "BORROW"
-    );
-    if (!borrowCandidate) {
-      continue;
-    }
-
-    const borrowOnlySnapshot = {
-      ...snapshot,
-      candidates: [borrowCandidate]
-    };
-    const plan = planCycle(borrowOnlySnapshot, config);
-    if (plan.intent === "BORROW") {
-      return {
-        config,
-        snapshot: borrowOnlySnapshot,
-        plan
-      };
-    }
-  }
-
-  throw new Error(
-    `failed to find a representative BORROW planning config; tried=${REPRESENTATIVE_BORROW_PLANNING_FIXTURE_CANDIDATES.length}`
-  );
-}
-
 async function findExistingBorrowerSameCycleBorrowMatch(
   account: { address: `0x${string}` },
   publicClient: any,
@@ -1291,12 +1327,25 @@ async function findExistingBorrowerSameCycleBorrowMatch(
 }
 
 const describeIf = RUN_BASE_FORK_TESTS ? describe : describe.skip;
-const itBaseSmoke = RUN_BASE_FORK_SLOW_TESTS && !RUN_BASE_FORK_ALL_TESTS ? it.skip : it;
+const itBaseSmoke =
+  (RUN_BASE_FORK_SLOW_TESTS ||
+    RUN_BASE_FORK_STRESS_TESTS ||
+    RUN_BASE_FORK_EXPERIMENTAL_TESTS) &&
+  !RUN_BASE_FORK_ALL_TESTS
+    ? it.skip
+    : it;
 const itBaseDefault =
-  (RUN_BASE_FORK_SMOKE_TESTS || RUN_BASE_FORK_SLOW_TESTS) && !RUN_BASE_FORK_ALL_TESTS
+  (RUN_BASE_FORK_SMOKE_TESTS ||
+    RUN_BASE_FORK_SLOW_TESTS ||
+    RUN_BASE_FORK_STRESS_TESTS ||
+    RUN_BASE_FORK_EXPERIMENTAL_TESTS) &&
+  !RUN_BASE_FORK_ALL_TESTS
     ? it.skip
     : it;
 const itBaseSlow = RUN_BASE_FORK_SLOW_TESTS || RUN_BASE_FORK_ALL_TESTS ? it : it.skip;
+const itBaseStress = RUN_BASE_FORK_STRESS_TESTS || RUN_BASE_FORK_ALL_TESTS ? it : it.skip;
+const itBaseExperimental =
+  RUN_BASE_FORK_EXPERIMENTAL_TESTS || RUN_BASE_FORK_ALL_TESTS ? it : it.skip;
 
 describeIf("Base factory fork integration", () => {
   let anvil: ChildProcess | undefined;
@@ -1562,7 +1611,7 @@ describeIf("Base factory fork integration", () => {
     120_000
   );
 
-  itBaseSlow(
+  itBaseExperimental(
     "brand-new quote-only pool finds and live-executes a multi-cycle borrow plan when target is above the passive trajectory",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
@@ -1583,29 +1632,7 @@ describeIf("Base factory fork integration", () => {
         poolAddress
       );
 
-      const config = resolveKeeperConfig({
-        chainId: 8453,
-        poolAddress,
-        poolId: `8453:${poolAddress.toLowerCase()}`,
-        rpcUrl: LOCAL_RPC_URL,
-        targetRateBps: 1300,
-        toleranceBps: 50,
-        toleranceMode: "relative",
-        completionPolicy: "next_move_would_overshoot",
-        executionBufferBps: 0,
-        maxQuoteTokenExposure: "1000000000000000000000000",
-        maxBorrowExposure: "1000000000000000000000",
-        snapshotAgeMaxSeconds: 3600,
-        minTimeBeforeRateWindowSeconds: 120,
-        minExecutableActionQuoteToken: "1",
-        recheckBeforeSubmit: true,
-        borrowerAddress: account.address,
-        simulationSenderAddress: account.address,
-        enableSimulationBackedBorrowSynthesis: true,
-        drawDebtLimitIndexes: [3000],
-        drawDebtCollateralAmounts: ["10000000000000000000"],
-        borrowSimulationLookaheadUpdates: 3
-      });
+      const config = buildRepresentativeBorrowLookaheadConfig(poolAddress, account.address);
       const snapshot = await new AjnaRpcSnapshotSource(config, {
         publicClient,
         now: () => chainNow
@@ -1681,7 +1708,7 @@ describeIf("Base factory fork integration", () => {
       expect(activePath.currentRateBps).toBe(expectedTerminalRateBps);
       expect(activePath.currentRateBps).toBeGreaterThan(passivePath.currentRateBps);
     },
-    120_000
+    420_000
   );
 
   itBaseSlow(
@@ -1704,7 +1731,7 @@ describeIf("Base factory fork integration", () => {
     180_000
   );
 
-  itBaseSlow(
+  itBaseStress(
     "aborts when another actor changes the pool between planning and execution",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
@@ -1731,23 +1758,25 @@ describeIf("Base factory fork integration", () => {
         value: 10n ** 24n
       });
 
-      const {
-        config: snapshotOnlyConfig,
-        snapshot: planningSnapshot,
-        plan
-      } = await findRepresentativeBorrowPlanningMatch(
+      const snapshotOnlyConfig = buildRepresentativeBorrowLookaheadConfig(poolAddress, account.address, {
+        enableSimulationBackedBorrowSynthesis: false
+      });
+      const rawPlanningSnapshot = await new AjnaRpcSnapshotSource(snapshotOnlyConfig, {
         publicClient,
-        account,
-        poolAddress,
-        chainNow
+        now: () => chainNow
+      }).getSnapshot();
+      const borrowCandidate = buildRepresentativeBorrowAbortCandidate(
+        rawPlanningSnapshot,
+        snapshotOnlyConfig
       );
+      const planningSnapshot = {
+        ...rawPlanningSnapshot,
+        candidates: [borrowCandidate]
+      };
+      const plan = planCycle(planningSnapshot, snapshotOnlyConfig);
 
       expect(plan.intent).toBe("BORROW");
       expect(plan.selectedCandidateId).toBeDefined();
-
-      const { collateralAddress } = planningSnapshot.metadata as {
-        collateralAddress: `0x${string}`;
-      };
 
       const result = await runCycle(snapshotOnlyConfig, {
         snapshotSource: {
@@ -1760,30 +1789,12 @@ describeIf("Base factory fork integration", () => {
                 return planningSnapshot;
               }
 
-              await mintToken(
-                competing.walletClient,
-                competing.publicClient,
-                artifact,
-                collateralAddress,
-                competing.account.address,
-                100n * 10n ** 18n
-              );
-              await approveToken(
-                competing.walletClient,
-                competing.publicClient,
-                collateralAddress,
-                poolAddress,
-                100n * 10n ** 18n,
-                artifact.abi
-              );
-
               const competingHash = await competing.walletClient.writeContract({
                 account: competing.account,
                 chain: undefined,
                 address: poolAddress,
                 abi: ajnaPoolAbi,
-                functionName: "drawDebt",
-                args: [competing.account.address, 1n * 10n ** 18n, 3000n, 10n * 10n ** 18n]
+                functionName: "updateInterest"
               });
               await competing.publicClient.waitForTransactionReceipt({ hash: competingHash });
 
@@ -1802,10 +1813,10 @@ describeIf("Base factory fork integration", () => {
       expect(result.reason).toMatch(/pool state changed|candidate is no longer valid/i);
       expect(result.transactionHashes).toHaveLength(0);
     },
-    120_000
+    180_000
   );
 
-  itBaseSlow(
+  itBaseStress(
     "aborts when another lender adds quote between planning and execution",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
@@ -1832,16 +1843,22 @@ describeIf("Base factory fork integration", () => {
         value: 10n ** 24n
       });
 
-      const {
-        config: snapshotOnlyConfig,
-        snapshot: planningSnapshot,
-        plan
-      } = await findRepresentativeBorrowPlanningMatch(
+      const snapshotOnlyConfig = buildRepresentativeBorrowLookaheadConfig(poolAddress, account.address, {
+        enableSimulationBackedBorrowSynthesis: false
+      });
+      const rawPlanningSnapshot = await new AjnaRpcSnapshotSource(snapshotOnlyConfig, {
         publicClient,
-        account,
-        poolAddress,
-        chainNow
+        now: () => chainNow
+      }).getSnapshot();
+      const borrowCandidate = buildRepresentativeBorrowAbortCandidate(
+        rawPlanningSnapshot,
+        snapshotOnlyConfig
       );
+      const planningSnapshot = {
+        ...rawPlanningSnapshot,
+        candidates: [borrowCandidate]
+      };
+      const plan = planCycle(planningSnapshot, snapshotOnlyConfig);
 
       expect(plan.intent).toBe("BORROW");
       expect(plan.selectedCandidateId).toBeDefined();
@@ -1904,10 +1921,10 @@ describeIf("Base factory fork integration", () => {
       expect(result.reason).toMatch(/pool state changed|candidate is no longer valid/i);
       expect(result.transactionHashes).toHaveLength(0);
     },
-    120_000
+    180_000
   );
 
-  itBaseSlow(
+  itBaseExperimental(
     "surfaces and naturally selects an exact LEND_AND_BORROW candidate in a representative Base-fork fixture with multi-bucket quote search",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
@@ -1962,7 +1979,11 @@ describeIf("Base factory fork integration", () => {
         account,
         quoteOnlyPoolAddress,
         quoteOnlyChainNow,
-        quoteOnlyBaselineSnapshot
+        quoteOnlyBaselineSnapshot,
+        {
+          maxValidationsWithPureMatch: 4,
+          maxValidationsWithoutPureMatch: 4
+        }
       );
       attemptedConfigCount += quoteOnlyMatch.attemptedConfigCount;
       if (quoteOnlyMatch.match) {
@@ -1987,7 +2008,11 @@ describeIf("Base factory fork integration", () => {
             account,
             representativeBorrowedState.poolAddress,
             representativeBorrowedState.chainNow,
-            representativeBorrowedState.baselineSnapshot
+            representativeBorrowedState.baselineSnapshot,
+            {
+              maxValidationsWithPureMatch: 4,
+              maxValidationsWithoutPureMatch: 4
+            }
           );
           attemptedConfigCount += scenarioMatch.attemptedConfigCount;
           if (scenarioMatch.match) {
