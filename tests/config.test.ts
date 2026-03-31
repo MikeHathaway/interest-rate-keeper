@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveKeeperConfig } from "../src/config.js";
+import { parseCliArgs, resolveKeeperConfig } from "../src/config.js";
 
 describe("resolveKeeperConfig", () => {
   it("parses a valid config", () => {
@@ -86,6 +86,45 @@ describe("resolveKeeperConfig", () => {
     expect(config.manualCandidates).toHaveLength(1);
     expect(config.manualCandidates?.[0]?.planningRateBps).toBe(1195);
     expect(config.manualCandidates?.[0]?.planningLookaheadUpdates).toBe(3);
+    expect(config.manualCandidates?.[0]?.additionalCollateralRequired).toBe(0n);
+    expect(config.manualCandidates?.[0]?.netQuoteBorrowed).toBe(-100n);
+    expect(config.manualCandidates?.[0]?.operatorCapitalRequired).toBe(100n);
+    expect(config.manualCandidates?.[0]?.operatorCapitalAtRisk).toBe(100n);
+  });
+
+  it("derives borrower capital metrics for manual candidates", () => {
+    const config = resolveKeeperConfig({
+      chainId: 8453,
+      poolAddress: "0x1111111111111111111111111111111111111111",
+      targetRateBps: 1200,
+      toleranceBps: 1000,
+      maxQuoteTokenExposure: "1000000",
+      maxBorrowExposure: "500000",
+      manualCandidates: [
+        {
+          id: "borrow",
+          intent: "BORROW",
+          minimumExecutionSteps: [
+            {
+              type: "DRAW_DEBT",
+              amount: "100",
+              limitIndex: 3000,
+              collateralAmount: "25"
+            }
+          ],
+          predictedOutcome: "STEP_UP",
+          predictedRateBpsAfterNextUpdate: 1100,
+          resultingDistanceToTargetBps: 0,
+          quoteTokenDelta: "100",
+          explanation: "manual borrow"
+        }
+      ]
+    });
+
+    expect(config.manualCandidates?.[0]?.additionalCollateralRequired).toBe(25n);
+    expect(config.manualCandidates?.[0]?.netQuoteBorrowed).toBe(100n);
+    expect(config.manualCandidates?.[0]?.operatorCapitalRequired).toBe(25n);
+    expect(config.manualCandidates?.[0]?.operatorCapitalAtRisk).toBe(25n);
   });
 
   it("rejects manual candidates with non-integer step indexes", () => {
@@ -163,5 +202,16 @@ describe("resolveKeeperConfig", () => {
         maxBorrowExposure: "1"
       })
     ).toThrow(/completionPolicy/);
+  });
+
+  it("parses the CLI summary flag", () => {
+    expect(
+      parseCliArgs(["run", "--config", "./keeper.config.json", "--dry-run", "--summary"])
+    ).toEqual({
+      mode: "run",
+      configPath: "./keeper.config.json",
+      dryRun: true,
+      summary: true
+    });
   });
 });

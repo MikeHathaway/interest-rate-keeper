@@ -47,6 +47,8 @@ describe("planCycle", () => {
     );
 
     expect(plan.intent).toBe("NO_OP");
+    expect(plan.operatorCapitalRequired).toBe(0n);
+    expect(plan.operatorCapitalAtRisk).toBe(0n);
   });
 
   it("no-ops when the natural move already improves convergence", () => {
@@ -109,6 +111,11 @@ describe("planCycle", () => {
 
     expect(plan.intent).toBe("LEND_AND_BORROW");
     expect(plan.requiredSteps).toHaveLength(2);
+    expect(plan.quoteTokenDelta).toBe(150n);
+    expect(plan.additionalCollateralRequired).toBe(0n);
+    expect(plan.netQuoteBorrowed).toBe(-50n);
+    expect(plan.operatorCapitalRequired).toBe(100n);
+    expect(plan.operatorCapitalAtRisk).toBe(100n);
     expect(plan.requiredSteps[0]).toMatchObject({
       type: "ADD_QUOTE",
       amount: 101n
@@ -301,5 +308,9 @@ describe("planCycle", () => {
 
     expect(plan.intent).toBe("BORROW");
     expect(plan.reason).toMatch(/3-update path/);
+    expect(plan.additionalCollateralRequired).toBe(10n);
+    expect(plan.netQuoteBorrowed).toBe(5n);
+    expect(plan.operatorCapitalRequired).toBe(10n);
+    expect(plan.operatorCapitalAtRisk).toBe(10n);
   });
 });

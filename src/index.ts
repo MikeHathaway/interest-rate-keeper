@@ -4,6 +4,7 @@ export * from "./planner.js";
 export * from "./policy.js";
 export * from "./log.js";
 export * from "./execute.js";
+export * from "./human-summary.js";
 export * from "./snapshot.js";
 export * from "./run-cycle.js";
 export * from "./keeperhub.js";

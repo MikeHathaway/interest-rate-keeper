@@ -83,6 +83,13 @@ export function formatKeeperHubResponse(result: Awaited<ReturnType<typeof runKee
     poolId: result.poolId,
     chainId: result.chainId,
     intent: result.plan.intent,
+    capital: {
+      quoteTokenDelta: result.plan.quoteTokenDelta,
+      additionalCollateralRequired: result.plan.additionalCollateralRequired,
+      netQuoteBorrowed: result.plan.netQuoteBorrowed,
+      operatorCapitalRequired: result.plan.operatorCapitalRequired,
+      operatorCapitalAtRisk: result.plan.operatorCapitalAtRisk
+    },
     transactionHashes: result.transactionHashes,
     failedStepIndex: result.failedStepIndex,
     error: result.error

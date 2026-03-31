@@ -15,6 +15,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 
 import { ajnaPoolAbi, erc20Abi } from "./abi.js";
+import { withPlanCandidateCapitalMetrics } from "../candidate-metrics.js";
 import { buildTargetBand, distanceToTargetBand } from "../planner.js";
 import { type SnapshotSource } from "../snapshot.js";
 import {
@@ -963,6 +964,10 @@ function collateralAmountForCandidate(candidate: PlanCandidate): bigint {
   }, 0n);
 }
 
+function finalizeCandidate(candidate: PlanCandidate): PlanCandidate {
+  return withPlanCandidateCapitalMetrics(candidate);
+}
+
 function compareCandidatePreference(left: PlanCandidate, right: PlanCandidate): number {
   const leftInBand = left.resultingDistanceToTargetBps === 0 ? 0 : 1;
   const rightInBand = right.resultingDistanceToTargetBps === 0 ? 0 : 1;
@@ -1367,8 +1372,8 @@ function buildPoolSnapshot(
       ? {}
       : { planningLookaheadUpdates: planning.lookaheadUpdates }),
     candidates: [
-      ...autoCandidates.map((candidate) => structuredClone(candidate)),
-      ...manualCandidates.map((candidate) => structuredClone(candidate))
+      ...autoCandidates.map((candidate) => structuredClone(finalizeCandidate(candidate))),
+      ...manualCandidates.map((candidate) => structuredClone(finalizeCandidate(candidate)))
     ],
     metadata: {
       poolAddress,
@@ -1605,9 +1610,10 @@ export function synthesizeAjnaLendCandidate(
       quoteTokenDelta: upperBound,
       explanation: `auto add-quote threshold changes the next Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.prediction.predictedOutcome}`
     };
+    const finalizedCandidate = finalizeCandidate(candidate);
 
-    if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
-      bestCandidate = candidate;
+    if (!bestCandidate || compareCandidatePreference(finalizedCandidate, bestCandidate) < 0) {
+      bestCandidate = finalizedCandidate;
     }
   }
 
@@ -2218,9 +2224,10 @@ async function synthesizeAjnaLendCandidateViaSimulation(
             quoteTokenDelta: upperBound,
             explanation: `simulation-backed add-quote threshold changes the next eligible Ajna move from ${baselinePath.firstOutcome} to ${upperEvaluation.predictedOutcome}`
           };
+          const finalizedCandidate = finalizeCandidate(candidate);
 
-          if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
-            bestCandidate = candidate;
+          if (!bestCandidate || compareCandidatePreference(finalizedCandidate, bestCandidate) < 0) {
+            bestCandidate = finalizedCandidate;
           }
         }
 
@@ -2351,9 +2358,10 @@ export function synthesizeAjnaBorrowCandidate(
         quoteTokenDelta: upperBound,
         explanation: `auto draw-debt threshold changes the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.prediction.predictedOutcome}`
       };
+      const finalizedCandidate = finalizeCandidate(candidate);
 
-      if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
-        bestCandidate = candidate;
+      if (!bestCandidate || compareCandidatePreference(finalizedCandidate, bestCandidate) < 0) {
+        bestCandidate = finalizedCandidate;
       }
     }
   }
@@ -2619,9 +2627,10 @@ export function synthesizeAjnaLendAndBorrowCandidate(
       quoteTokenDelta: upperQuoteAmount + overshootBorrowAmount,
       explanation: `auto add-quote + draw-debt path tempers a borrow overshoot from ${overshootBorrowEvaluation.prediction.predictedOutcome} to ${upperQuoteEvaluation.prediction.predictedOutcome}`
     };
+    const finalizedCandidate = finalizeCandidate(candidate);
 
-    if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
-      bestCandidate = candidate;
+    if (!bestCandidate || compareCandidatePreference(finalizedCandidate, bestCandidate) < 0) {
+      bestCandidate = finalizedCandidate;
     }
   }
 
@@ -3117,9 +3126,10 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
               candidate.planningRateBps = upperEvaluation.terminalRateBps;
               candidate.planningLookaheadUpdates = lookaheadUpdates;
             }
+            const finalizedCandidate = finalizeCandidate(candidate);
 
-            if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
-              bestCandidate = candidate;
+            if (!bestCandidate || compareCandidatePreference(finalizedCandidate, bestCandidate) < 0) {
+              bestCandidate = finalizedCandidate;
             }
           }
         }
@@ -3623,7 +3633,10 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
                     explanation: ""
                   };
 
-                  return compareCandidatePreference(leftCandidate, rightCandidate);
+                  return compareCandidatePreference(
+                    finalizeCandidate(leftCandidate),
+                    finalizeCandidate(rightCandidate)
+                  );
                 }
               });
 
@@ -3668,9 +3681,10 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
                   dualSearchMatch.evaluation.candidatePath.terminalRateBps;
                 candidate.planningLookaheadUpdates = lookaheadUpdates;
               }
+              const finalizedCandidate = finalizeCandidate(candidate);
 
-              if (!bestCandidate || compareCandidatePreference(candidate, bestCandidate) < 0) {
-                bestCandidate = candidate;
+              if (!bestCandidate || compareCandidatePreference(finalizedCandidate, bestCandidate) < 0) {
+                bestCandidate = finalizedCandidate;
               }
             }
           }

@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 
+import { withPlanCandidateCapitalMetrics } from "./candidate-metrics.js";
 import {
   type AddCollateralStep,
   type AddQuoteStep,
@@ -288,7 +289,7 @@ export function resolvePlanCandidate(input: unknown, label = "plan candidate"): 
     );
   }
 
-  return candidate;
+  return withPlanCandidateCapitalMetrics(candidate);
 }
 
 export function resolvePoolSnapshot(input: unknown): PoolSnapshot {

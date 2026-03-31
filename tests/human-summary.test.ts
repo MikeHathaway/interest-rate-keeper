@@ -1,0 +1,39 @@
+import { describe, expect, it } from "vitest";
+
+import { formatCycleCapitalSummary } from "../src/human-summary.js";
+import { type CycleResult } from "../src/types.js";
+
+describe("formatCycleCapitalSummary", () => {
+  it("formats a short human-readable capital summary", () => {
+    const result: CycleResult = {
+      status: "EXECUTED",
+      reason: "executed",
+      poolId: "base:pool",
+      chainId: 8453,
+      snapshotFingerprint: "snapshot",
+      transactionHashes: ["0xabc"],
+      executedSteps: [],
+      plan: {
+        intent: "LEND_AND_BORROW",
+        reason: "dual move",
+        targetBand: {
+          minRateBps: 900,
+          maxRateBps: 1100
+        },
+        selectedCandidateId: "dual",
+        requiredSteps: [],
+        predictedOutcomeAfterPlan: "STEP_UP",
+        predictedRateBpsAfterNextUpdate: 950,
+        quoteTokenDelta: 150n,
+        additionalCollateralRequired: 25n,
+        netQuoteBorrowed: -50n,
+        operatorCapitalRequired: 125n,
+        operatorCapitalAtRisk: 125n
+      }
+    };
+
+    expect(formatCycleCapitalSummary(result)).toBe(
+      "summary status=EXECUTED intent=LEND_AND_BORROW required=125 at_risk=125 net_quote=-50 addl_collateral=25"
+    );
+  });
+});

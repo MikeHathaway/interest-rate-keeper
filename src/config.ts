@@ -379,6 +379,7 @@ export interface CliCommand {
   snapshotPath?: string;
   payloadPath?: string;
   dryRun: boolean;
+  summary: boolean;
 }
 
 export function parseCliArgs(argv: string[]): CliCommand {
@@ -392,11 +393,17 @@ export function parseCliArgs(argv: string[]): CliCommand {
   let snapshotPath: string | undefined;
   let payloadPath: string | undefined;
   let dryRun = false;
+  let summary = false;
 
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index];
     if (token === "--dry-run") {
       dryRun = true;
+      continue;
+    }
+
+    if (token === "--summary") {
+      summary = true;
       continue;
     }
 
@@ -436,7 +443,8 @@ export function parseCliArgs(argv: string[]): CliCommand {
 
   const command: CliCommand = {
     mode,
-    dryRun
+    dryRun,
+    summary
   };
 
   if (configPath !== undefined) {

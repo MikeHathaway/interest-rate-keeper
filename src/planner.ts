@@ -1,3 +1,4 @@
+import { derivePlanCandidateCapitalMetrics } from "./candidate-metrics.js";
 import {
   type CyclePlan,
   type ExecutionStep,
@@ -12,6 +13,28 @@ const UPDATE_INTEREST_STEP: UpdateInterestStep = {
   type: "UPDATE_INTEREST",
   bufferPolicy: "none"
 };
+
+const ZERO_PLAN_CAPITAL = {
+  quoteTokenDelta: 0n,
+  additionalCollateralRequired: 0n,
+  netQuoteBorrowed: 0n,
+  operatorCapitalRequired: 0n,
+  operatorCapitalAtRisk: 0n
+} as const;
+
+function resolveCandidateCapital(candidate: PlanCandidate) {
+  const derived = derivePlanCandidateCapitalMetrics(candidate.minimumExecutionSteps);
+
+  return {
+    quoteTokenDelta: candidate.quoteTokenDelta,
+    additionalCollateralRequired:
+      candidate.additionalCollateralRequired ?? derived.additionalCollateralRequired,
+    netQuoteBorrowed: candidate.netQuoteBorrowed ?? derived.netQuoteBorrowed,
+    operatorCapitalRequired:
+      candidate.operatorCapitalRequired ?? derived.operatorCapitalRequired,
+    operatorCapitalAtRisk: candidate.operatorCapitalAtRisk ?? derived.operatorCapitalAtRisk
+  };
+}
 
 function calculateRelativeTolerance(targetRateBps: number, toleranceBps: number): number {
   return Math.ceil((targetRateBps * toleranceBps) / 10_000);
@@ -204,7 +227,7 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
       requiredSteps: [],
       predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
       predictedRateBpsAfterNextUpdate: snapshot.predictedNextRateBps,
-      quoteTokenDelta: 0n
+      ...ZERO_PLAN_CAPITAL
     };
   }
 
@@ -213,6 +236,8 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
   );
   const selected = chooseBestCandidate(viableCandidates, targetBand);
   if (selected) {
+    const capital = resolveCandidateCapital(selected);
+
     return {
       intent: selected.intent,
       reason: selected.explanation,
@@ -224,7 +249,7 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
       ),
       predictedOutcomeAfterPlan: selected.predictedOutcome,
       predictedRateBpsAfterNextUpdate: selected.predictedRateBpsAfterNextUpdate,
-      quoteTokenDelta: selected.quoteTokenDelta
+      ...capital
     };
   }
 
@@ -240,7 +265,7 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
       requiredSteps: [],
       predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
       predictedRateBpsAfterNextUpdate: snapshot.predictedNextRateBps,
-      quoteTokenDelta: 0n
+      ...ZERO_PLAN_CAPITAL
     };
   }
 
@@ -252,7 +277,7 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
       requiredSteps: maybeAppendUpdateInterest([], snapshot),
       predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
       predictedRateBpsAfterNextUpdate: snapshot.predictedNextRateBps,
-      quoteTokenDelta: 0n
+      ...ZERO_PLAN_CAPITAL
     };
   }
 
@@ -263,6 +288,6 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
     requiredSteps: [],
     predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
     predictedRateBpsAfterNextUpdate: snapshot.predictedNextRateBps,
-    quoteTokenDelta: 0n
+    ...ZERO_PLAN_CAPITAL
   };
 }

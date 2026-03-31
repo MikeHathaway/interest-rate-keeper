@@ -77,7 +77,11 @@ const plan: CyclePlan = {
   ],
   predictedOutcomeAfterPlan: "STEP_UP",
   predictedRateBpsAfterNextUpdate: 950,
-  quoteTokenDelta: 10n
+  quoteTokenDelta: 10n,
+  additionalCollateralRequired: 0n,
+  netQuoteBorrowed: -10n,
+  operatorCapitalRequired: 10n,
+  operatorCapitalAtRisk: 10n
 };
 
 describe("policy", () => {

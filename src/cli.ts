@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 
 import { parseCliArgs, resolveKeeperConfig } from "./config.js";
 import { DryRunExecutionBackend, type ExecutionBackend } from "./execute.js";
+import { formatCycleCapitalSummary } from "./human-summary.js";
 import {
   formatKeeperHubResponse,
   resolveKeeperHubPayload,
@@ -38,6 +39,9 @@ async function main(): Promise<void> {
         snapshotSource,
         executor: backend
       });
+      if (command.summary) {
+        process.stderr.write(`${formatCycleCapitalSummary(result)}\n`);
+      }
       process.stdout.write(`${safeJsonStringify(result, true)}\n`);
       process.exitCode = result.status === "EXECUTED" || result.status === "NO_OP" ? 0 : 1;
       return;
@@ -49,6 +53,9 @@ async function main(): Promise<void> {
     const result = await runKeeperHubPayload(payload, {
       executor: backend
     });
+    if (command.summary) {
+      process.stderr.write(`${formatCycleCapitalSummary(result)}\n`);
+    }
     process.stdout.write(`${formatKeeperHubResponse(result)}\n`);
     process.exitCode = result.status === "EXECUTED" || result.status === "NO_OP" ? 0 : 1;
   } catch (error) {

@@ -88,6 +88,10 @@ export interface PlanCandidate {
   predictedRateBpsAfterNextUpdate: number;
   resultingDistanceToTargetBps: number;
   quoteTokenDelta: bigint;
+  additionalCollateralRequired?: bigint;
+  netQuoteBorrowed?: bigint;
+  operatorCapitalRequired?: bigint;
+  operatorCapitalAtRisk?: bigint;
   explanation: string;
   planningRateBps?: number;
   planningLookaheadUpdates?: number;
@@ -156,6 +160,10 @@ export interface CyclePlan {
   predictedOutcomeAfterPlan: RateMoveOutcome;
   predictedRateBpsAfterNextUpdate: number;
   quoteTokenDelta: bigint;
+  additionalCollateralRequired: bigint;
+  netQuoteBorrowed: bigint;
+  operatorCapitalRequired: bigint;
+  operatorCapitalAtRisk: bigint;
 }
 
 export interface GuardFailure {

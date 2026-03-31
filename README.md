@@ -26,6 +26,7 @@ Today, the snapshot builder reads real pool state and predicts the next Ajna rat
 
 - `manualCandidates` are still the general bridge for live steering plans
 - `manualCandidates` can now carry `planningRateBps` and `planningLookaheadUpdates`, so manually supplied multi-cycle plans are ranked correctly
+- candidates now expose derived capital metrics from their execution steps: `additionalCollateralRequired`, `netQuoteBorrowed`, `operatorCapitalRequired`, and `operatorCapitalAtRisk`
 - live Ajna snapshots now bind `manualCandidates` to snapshot-specific validation signatures that include pool, borrower, loan, and referenced-bucket context, so recheck can invalidate stale manual plans before execution
 - simulation-backed `ADD_QUOTE` synthesis is an exact opt-in path that forks the current chain state and tests candidate quote deposits against real Ajna contract behavior
 - simulation-backed `DRAW_DEBT` synthesis is an exact opt-in path that forks the current chain state and tests candidate borrow amounts against real Ajna contract behavior
@@ -161,6 +162,7 @@ Notes:
 - If `BASE_LOCAL_ANVIL_URL` is unset, the managed fork runner picks a profile-specific free local port, starts its own local Anvil fork there, and tears it down after the run.
 - If `BASE_LOCAL_ANVIL_URL` is set, the test harness reuses that already-running local Anvil fork instead of spawning a fresh one.
 - The Base integration test logs the selected profile plus either the explicit reused local fork host or the spawned upstream/local hosts at startup.
+- CLI `run` output now carries the selected plan's capital metrics directly on `plan`, and KeeperHub responses include the same values under `capital`.
 
 ## CI/CD
 
@@ -247,8 +249,10 @@ CLI flags:
 - `run --config <path> --snapshot <path>`
 - `keeperhub --payload <path>`
 - `--dry-run`
+- `--summary`
 
 If `--snapshot` is omitted in `run` mode, the CLI uses the live Ajna RPC snapshot source.
+If `--summary` is passed, the CLI writes a short human-readable capital summary to `stderr` while keeping the structured JSON output on `stdout` unchanged.
 
 ## Minimal Config Shape
 
