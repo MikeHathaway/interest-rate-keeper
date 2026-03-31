@@ -82,6 +82,15 @@ function parseBigIntValue(value: unknown, label: string): bigint {
   throw new Error(`${label} must be integer-like`);
 }
 
+function parseNonNegativeBigIntValue(value: unknown, label: string): bigint {
+  const parsed = parseBigIntValue(value, label);
+  if (parsed < 0n) {
+    throw new Error(`${label} must be non-negative`);
+  }
+
+  return parsed;
+}
+
 function parseAddress(value: unknown, label: string): HexAddress {
   const parsed = parseString(value, label);
   if (!/^0x[a-fA-F0-9]{40}$/.test(parsed)) {
@@ -130,7 +139,7 @@ export function resolveExecutionStep(input: unknown, label = "execution step"): 
     case "ADD_QUOTE":
       return {
         type,
-        amount: parseBigIntValue(record.amount, `${label}.amount`),
+        amount: parseNonNegativeBigIntValue(record.amount, `${label}.amount`),
         bucketIndex: parseNonNegativeInteger(record.bucketIndex, `${label}.bucketIndex`),
         expiry: parsePositiveInteger(record.expiry, `${label}.expiry`),
         ...shared
@@ -138,20 +147,20 @@ export function resolveExecutionStep(input: unknown, label = "execution step"): 
     case "REMOVE_QUOTE":
       return {
         type,
-        amount: parseBigIntValue(record.amount, `${label}.amount`),
+        amount: parseNonNegativeBigIntValue(record.amount, `${label}.amount`),
         bucketIndex: parseNonNegativeInteger(record.bucketIndex, `${label}.bucketIndex`),
         ...shared
       } satisfies RemoveQuoteStep;
     case "DRAW_DEBT": {
       const step: DrawDebtStep = {
         type,
-        amount: parseBigIntValue(record.amount, `${label}.amount`),
+        amount: parseNonNegativeBigIntValue(record.amount, `${label}.amount`),
         limitIndex: parseNonNegativeInteger(record.limitIndex, `${label}.limitIndex`),
         ...shared
       };
 
       if (record.collateralAmount !== undefined) {
-        step.collateralAmount = parseBigIntValue(
+        step.collateralAmount = parseNonNegativeBigIntValue(
           record.collateralAmount,
           `${label}.collateralAmount`
         );
@@ -162,12 +171,12 @@ export function resolveExecutionStep(input: unknown, label = "execution step"): 
     case "REPAY_DEBT": {
       const step: RepayDebtStep = {
         type,
-        amount: parseBigIntValue(record.amount, `${label}.amount`),
+        amount: parseNonNegativeBigIntValue(record.amount, `${label}.amount`),
         ...shared
       };
 
       if (record.collateralAmountToPull !== undefined) {
-        step.collateralAmountToPull = parseBigIntValue(
+        step.collateralAmountToPull = parseNonNegativeBigIntValue(
           record.collateralAmountToPull,
           `${label}.collateralAmountToPull`
         );
@@ -186,7 +195,7 @@ export function resolveExecutionStep(input: unknown, label = "execution step"): 
     case "ADD_COLLATERAL": {
       const step: AddCollateralStep = {
         type,
-        amount: parseBigIntValue(record.amount, `${label}.amount`),
+        amount: parseNonNegativeBigIntValue(record.amount, `${label}.amount`),
         bucketIndex: parseNonNegativeInteger(record.bucketIndex, `${label}.bucketIndex`),
         ...shared
       };
@@ -200,7 +209,7 @@ export function resolveExecutionStep(input: unknown, label = "execution step"): 
     case "REMOVE_COLLATERAL": {
       const step: RemoveCollateralStep = {
         type,
-        amount: parseBigIntValue(record.amount, `${label}.amount`),
+        amount: parseNonNegativeBigIntValue(record.amount, `${label}.amount`),
         ...shared
       };
 
@@ -269,6 +278,13 @@ export function resolvePlanCandidate(input: unknown, label = "plan candidate"): 
     candidate.planningLookaheadUpdates = parsePositiveInteger(
       record.planningLookaheadUpdates,
       `${label}.planningLookaheadUpdates`
+    );
+  }
+
+  if (record.validationSignature !== undefined) {
+    candidate.validationSignature = parseString(
+      record.validationSignature,
+      `${label}.validationSignature`
     );
   }
 

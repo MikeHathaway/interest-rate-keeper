@@ -20,6 +20,7 @@ import { type SnapshotSource } from "../snapshot.js";
 import {
   type AddQuoteStep,
   type DrawDebtStep,
+  type ExecutionStep,
   type HexAddress,
   type KeeperConfig,
   type PlanCandidate,
@@ -1000,6 +1001,196 @@ function buildSnapshotFingerprint(
   );
 }
 
+function serializeExecutionStepForValidation(step: ExecutionStep): string {
+  switch (step.type) {
+    case "ADD_QUOTE":
+      return [
+        step.type,
+        step.amount.toString(),
+        String(step.bucketIndex),
+        String(step.expiry),
+        step.bufferPolicy ?? "-",
+        step.note ?? "-"
+      ].join(":");
+    case "REMOVE_QUOTE":
+      return [
+        step.type,
+        step.amount.toString(),
+        String(step.bucketIndex),
+        step.bufferPolicy ?? "-",
+        step.note ?? "-"
+      ].join(":");
+    case "DRAW_DEBT":
+      return [
+        step.type,
+        step.amount.toString(),
+        String(step.limitIndex),
+        step.collateralAmount?.toString() ?? "-",
+        step.bufferPolicy ?? "-",
+        step.note ?? "-"
+      ].join(":");
+    case "REPAY_DEBT":
+      return [
+        step.type,
+        step.amount.toString(),
+        step.collateralAmountToPull?.toString() ?? "-",
+        step.limitIndex === undefined ? "-" : String(step.limitIndex),
+        step.recipient ?? "-",
+        step.bufferPolicy ?? "-",
+        step.note ?? "-"
+      ].join(":");
+    case "ADD_COLLATERAL":
+      return [
+        step.type,
+        step.amount.toString(),
+        String(step.bucketIndex),
+        step.expiry === undefined ? "-" : String(step.expiry),
+        step.bufferPolicy ?? "-",
+        step.note ?? "-"
+      ].join(":");
+    case "REMOVE_COLLATERAL":
+      return [
+        step.type,
+        step.amount.toString(),
+        step.bucketIndex === undefined ? "-" : String(step.bucketIndex),
+        step.bufferPolicy ?? "-",
+        step.note ?? "-"
+      ].join(":");
+    case "UPDATE_INTEREST":
+      return [step.type, step.bufferPolicy ?? "-", step.note ?? "-"].join(":");
+  }
+}
+
+function referencedBucketIndexes(candidate: PlanCandidate): number[] {
+  return Array.from(
+    new Set(
+      candidate.minimumExecutionSteps.flatMap((step) => {
+        switch (step.type) {
+          case "ADD_QUOTE":
+          case "REMOVE_QUOTE":
+          case "ADD_COLLATERAL":
+            return [step.bucketIndex];
+          case "REMOVE_COLLATERAL":
+            return step.bucketIndex === undefined ? [] : [step.bucketIndex];
+          default:
+            return [];
+        }
+      })
+    )
+  ).sort((left, right) => left - right);
+}
+
+function serializeCandidateForValidation(candidate: PlanCandidate): string {
+  return [
+    candidate.intent,
+    candidate.predictedOutcome,
+    String(candidate.predictedRateBpsAfterNextUpdate),
+    String(candidate.resultingDistanceToTargetBps),
+    candidate.quoteTokenDelta.toString(),
+    candidate.planningRateBps === undefined ? "-" : String(candidate.planningRateBps),
+    candidate.planningLookaheadUpdates === undefined
+      ? "-"
+      : String(candidate.planningLookaheadUpdates),
+    candidate.minimumExecutionSteps.map(serializeExecutionStepForValidation).join("|")
+  ].join(":");
+}
+
+async function readManualCandidateBucketSignatures(
+  publicClient: PublicClient,
+  poolAddress: HexAddress,
+  blockNumber: bigint,
+  manualCandidates: PlanCandidate[]
+): Promise<Map<number, string>> {
+  const bucketIndexes = Array.from(
+    new Set(manualCandidates.flatMap((candidate) => referencedBucketIndexes(candidate)))
+  ).sort((left, right) => left - right);
+  const signatures = new Map<number, string>();
+
+  await Promise.all(
+    bucketIndexes.map(async (bucketIndex) => {
+      try {
+        const bucketState = await publicClient.readContract({
+          address: poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "bucketInfo",
+          args: [BigInt(bucketIndex)],
+          blockNumber
+        });
+        signatures.set(
+          bucketIndex,
+          bucketState.map((value) => value.toString()).join(":")
+        );
+      } catch {
+        signatures.set(bucketIndex, "bucket-read-failed");
+      }
+    })
+  );
+
+  return signatures;
+}
+
+function buildManualCandidateValidationSignature(
+  poolAddress: HexAddress,
+  readState: AjnaPoolStateRead,
+  candidate: PlanCandidate,
+  bucketSignatures: Map<number, string>
+): Hex {
+  return keccak256(
+    stringToHex(
+      [
+        poolAddress,
+        readState.rateState.currentRateWad.toString(),
+        readState.rateState.currentDebtWad.toString(),
+        readState.rateState.debtEmaWad.toString(),
+        readState.rateState.depositEmaWad.toString(),
+        readState.rateState.debtColEmaWad.toString(),
+        readState.rateState.lupt0DebtEmaWad.toString(),
+        String(readState.rateState.lastInterestRateUpdateTimestamp),
+        readState.loansState?.maxBorrower ?? "-",
+        readState.loansState?.maxT0DebtToCollateral.toString() ?? "-",
+        readState.loansState?.noOfLoans.toString() ?? "-",
+        readState.borrowerState?.borrowerAddress ?? "-",
+        readState.borrowerState?.t0Debt.toString() ?? "-",
+        readState.borrowerState?.collateral.toString() ?? "-",
+        readState.borrowerState?.npTpRatio.toString() ?? "-",
+        referencedBucketIndexes(candidate)
+          .map((bucketIndex) => `${bucketIndex}=${bucketSignatures.get(bucketIndex) ?? "-"}`)
+          .join("|"),
+        serializeCandidateForValidation(candidate)
+      ].join(":")
+    )
+  );
+}
+
+async function enrichManualCandidatesForSnapshot(
+  publicClient: PublicClient,
+  poolAddress: HexAddress,
+  readState: AjnaPoolStateRead,
+  manualCandidates: PlanCandidate[]
+): Promise<PlanCandidate[]> {
+  if (manualCandidates.length === 0) {
+    return [];
+  }
+
+  const bucketSignatures = await readManualCandidateBucketSignatures(
+    publicClient,
+    poolAddress,
+    readState.blockNumber,
+    manualCandidates
+  );
+
+  return manualCandidates.map((candidate) => {
+    const enrichedCandidate = structuredClone(candidate);
+    enrichedCandidate.validationSignature = buildManualCandidateValidationSignature(
+      poolAddress,
+      readState,
+      enrichedCandidate,
+      bucketSignatures
+    );
+    return enrichedCandidate;
+  });
+}
+
 async function readAjnaPoolState(
   publicClient: PublicClient,
   poolAddress: HexAddress,
@@ -1123,10 +1314,12 @@ async function readAjnaPoolState(
 }
 
 function buildPoolSnapshot(
-  config: KeeperConfig,
+  poolId: string,
+  chainId: number,
   poolAddress: HexAddress,
   readState: AjnaPoolStateRead,
   autoCandidates: PlanCandidate[],
+  manualCandidates: PlanCandidate[],
   autoCandidateSource?: "simulation" | "heuristic",
   planning?: {
     rateBps?: number;
@@ -1139,8 +1332,8 @@ function buildPoolSnapshot(
       readState.blockNumber,
       readState.rateState
     ),
-    poolId: config.poolId,
-    chainId: config.chainId,
+    poolId,
+    chainId,
     blockNumber: readState.blockNumber,
     blockTimestamp: readState.blockTimestamp,
     snapshotAgeSeconds: Math.max(0, readState.rateState.nowTimestamp - readState.blockTimestamp),
@@ -1154,7 +1347,7 @@ function buildPoolSnapshot(
       : { planningLookaheadUpdates: planning.lookaheadUpdates }),
     candidates: [
       ...autoCandidates.map((candidate) => structuredClone(candidate)),
-      ...structuredClone(config.manualCandidates ?? [])
+      ...manualCandidates.map((candidate) => structuredClone(candidate))
     ],
     metadata: {
       poolAddress,
@@ -3598,11 +3791,20 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
       }
     }
 
+    const manualCandidates = await enrichManualCandidatesForSnapshot(
+      this.publicClient,
+      this.poolAddress,
+      readState,
+      this.config.manualCandidates ?? []
+    );
+
     return buildPoolSnapshot(
-      this.config,
+      this.config.poolId,
+      this.config.chainId,
       this.poolAddress,
       readState,
       autoCandidates,
+      manualCandidates,
       autoCandidateSource,
       {
         ...(planningRateBps === undefined ? {} : { rateBps: planningRateBps }),

@@ -7,7 +7,16 @@ import { spawn } from "node:child_process";
 
 const profile = process.argv[2] ?? "stress";
 const forwardedVitestArgs = process.argv.slice(3);
-const supportedProfiles = new Set(["stress", "experimental", "all"]);
+const supportedProfiles = new Set(["smoke", "default", "slow", "stress", "experimental", "all"]);
+const explicitLocalAnvilUrl = process.env.BASE_LOCAL_ANVIL_URL?.trim();
+const DEFAULT_PORT_BY_PROFILE = {
+  smoke: 9545,
+  default: 9546,
+  slow: 9547,
+  stress: 9548,
+  experimental: 9549,
+  all: 9550
+};
 
 if (!supportedProfiles.has(profile)) {
   console.error(
@@ -18,7 +27,9 @@ if (!supportedProfiles.has(profile)) {
   process.exit(1);
 }
 
-const localAnvilUrl = (process.env.BASE_LOCAL_ANVIL_URL || "http://127.0.0.1:9545").trim();
+const localAnvilUrl = (
+  explicitLocalAnvilUrl || `http://127.0.0.1:${DEFAULT_PORT_BY_PROFILE[profile]}`
+).trim();
 let parsedLocalUrl;
 
 try {
@@ -73,6 +84,47 @@ async function isListening(host, port) {
   }
 }
 
+async function findAvailablePort(host, startPort, maxAttempts = 20) {
+  for (let offset = 0; offset < maxAttempts; offset += 1) {
+    const candidatePort = startPort + offset;
+    if (!(await isListening(host, candidatePort))) {
+      return candidatePort;
+    }
+  }
+
+  throw new Error(
+    `[base-fork-runner] failed to find a free local port starting at ${startPort} after ${maxAttempts} attempts`
+  );
+}
+
+async function assertBaseChainId(rpcUrl) {
+  const response = await fetch(rpcUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "eth_chainId",
+      params: []
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `[base-fork-runner] failed to query eth_chainId from ${rpcUrl}: ${response.status} ${response.statusText}`
+    );
+  }
+
+  const payload = await response.json();
+  if (payload?.result !== "0x2105") {
+    throw new Error(
+      `[base-fork-runner] expected Base chain id 8453 (0x2105) from ${rpcUrl}, got ${payload?.result ?? "unknown"}`
+    );
+  }
+}
+
 let managedAnvil;
 let managedAnvilStderr = "";
 
@@ -105,21 +157,40 @@ process.on("SIGTERM", async () => {
   process.exit(143);
 });
 
-const reusingExistingAnvil = await isListening(localHost, localPort);
+let effectiveLocalAnvilUrl = localAnvilUrl;
+let effectiveLocalHost = localHost;
+let effectiveLocalPort = localPort;
 
-if (reusingExistingAnvil) {
-  console.log(`[base-fork-runner] reusing local Anvil at ${localAnvilUrl}`);
+if (explicitLocalAnvilUrl) {
+  console.log(`[base-fork-runner] reusing external local Anvil at ${effectiveLocalAnvilUrl}`);
+  try {
+    await waitForPort(effectiveLocalHost, effectiveLocalPort, 60_000);
+    await assertBaseChainId(effectiveLocalAnvilUrl);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(message);
+    process.exit(1);
+  }
 } else {
+  try {
+    effectiveLocalPort = await findAvailablePort(localHost, localPort);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(message);
+    process.exit(1);
+  }
+  effectiveLocalAnvilUrl = `http://${localHost}:${effectiveLocalPort}`;
+
   const forkUrl = process.env.BASE_RPC_URL?.trim();
   if (!forkUrl) {
     console.error(
-      "[base-fork-runner] BASE_RPC_URL is required when BASE_LOCAL_ANVIL_URL is not already serving a local Anvil fork"
+      "[base-fork-runner] BASE_RPC_URL is required when no explicit BASE_LOCAL_ANVIL_URL is provided"
     );
     process.exit(1);
   }
 
   console.log(
-    `[base-fork-runner] starting managed local Anvil at ${localAnvilUrl} from ${new URL(forkUrl).host}`
+    `[base-fork-runner] starting managed local Anvil at ${effectiveLocalAnvilUrl} from ${new URL(forkUrl).host}`
   );
   managedAnvil = spawn(
     "anvil",
@@ -127,7 +198,7 @@ if (reusingExistingAnvil) {
       "--fork-url",
       forkUrl,
       "--port",
-      String(localPort),
+      String(effectiveLocalPort),
       "--chain-id",
       "8453",
       "--silent"
@@ -143,7 +214,8 @@ if (reusingExistingAnvil) {
   });
 
   try {
-    await waitForPort(localHost, localPort, 60_000);
+    await waitForPort(effectiveLocalHost, effectiveLocalPort, 60_000);
+    await assertBaseChainId(effectiveLocalAnvilUrl);
   } catch (error) {
     await stopManagedAnvil();
     const message = error instanceof Error ? error.message : String(error);
@@ -158,10 +230,12 @@ if (reusingExistingAnvil) {
 
 const profileEnv = {
   RUN_BASE_FORK_TESTS: "1",
+  RUN_BASE_FORK_SMOKE_TESTS: profile === "smoke" ? "1" : undefined,
+  RUN_BASE_FORK_SLOW_TESTS: profile === "slow" ? "1" : undefined,
   RUN_BASE_FORK_ALL_TESTS: profile === "all" ? "1" : undefined,
   RUN_BASE_FORK_STRESS_TESTS: profile === "stress" ? "1" : undefined,
   RUN_BASE_FORK_EXPERIMENTAL_TESTS: profile === "experimental" ? "1" : undefined,
-  BASE_LOCAL_ANVIL_URL: localAnvilUrl
+  BASE_LOCAL_ANVIL_URL: effectiveLocalAnvilUrl
 };
 
 const child = spawn(

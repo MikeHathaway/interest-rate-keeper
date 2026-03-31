@@ -42,4 +42,30 @@
 **Priority:** P3
 **Depends on:** Stable action-plan schema, direct executor backend, and a fully tested sequential-execution baseline
 
+## Review Follow-Ups
+
+### Release and CI Automation
+
+**What:** Finish the distribution automation that the design calls for: GitHub Actions for lint/typecheck/test/build, publish-on-tag, and release packaging.
+
+**Why:** The core keeper exists, but the release path from the design is still not implemented. The package is still private and there is no checked-in GitHub Actions workflow yet.
+
+**Context:** The current repo already has stable unit coverage and multiple Base fork test profiles. The missing piece is the automation layer that turns that into a repeatable release and verification pipeline.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** Stable test profile split and a decision on package publication scope
+
+### External Local Anvil Cleanliness Contract
+
+**What:** Keep documenting and possibly enforcing the trust contract around `BASE_LOCAL_ANVIL_URL`.
+
+**Why:** When an explicit local Anvil URL is supplied, the runner intentionally trusts that endpoint instead of resetting it. That is correct for operator-controlled heavy test runs, but it means replay tests are only as clean as the provided local fork.
+
+**Context:** The managed fork runner now starts isolated local Anvil instances by default for package scripts. This follow-up only applies when operators intentionally point the suite at an external reused fork.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
 ## Completed

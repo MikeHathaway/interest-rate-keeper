@@ -91,6 +91,7 @@ export interface PlanCandidate {
   explanation: string;
   planningRateBps?: number;
   planningLookaheadUpdates?: number;
+  validationSignature?: string;
 }
 
 export interface PoolSnapshot {

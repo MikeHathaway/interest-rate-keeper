@@ -43,6 +43,7 @@ const snapshot: PoolSnapshot = {
   candidates: [
     {
       id: "lend",
+      validationSignature: "sig:v1",
       intent: "LEND",
       minimumExecutionSteps: [
         {
@@ -134,6 +135,23 @@ describe("policy", () => {
       config
     );
     expect(failure?.code).toBe("POOL_STATE_CHANGED");
+  });
+
+  it("aborts when the selected candidate validation signature changes", () => {
+    const freshSnapshot: PoolSnapshot = {
+      ...snapshot,
+      snapshotFingerprint: "different",
+      blockNumber: 11n,
+      blockTimestamp: 1_012,
+      snapshotAgeSeconds: 8,
+      candidates: snapshot.candidates.map((candidate) => ({
+        ...candidate,
+        validationSignature: "sig:v2"
+      }))
+    };
+
+    const failure = preSubmitRecheck(plan, snapshot, freshSnapshot, config);
+    expect(failure?.code).toBe("CANDIDATE_INVALIDATED");
   });
 
   it("allows immediate UPDATE_INTEREST plans inside the unsafe window", () => {

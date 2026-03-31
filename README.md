@@ -25,6 +25,7 @@ Today, the snapshot builder reads real pool state and predicts the next Ajna rat
 
 - `manualCandidates` are still the general bridge for live steering plans
 - `manualCandidates` can now carry `planningRateBps` and `planningLookaheadUpdates`, so manually supplied multi-cycle plans are ranked correctly
+- live Ajna snapshots now bind `manualCandidates` to snapshot-specific validation signatures that include pool, borrower, loan, and referenced-bucket context, so recheck can invalidate stale manual plans before execution
 - simulation-backed `ADD_QUOTE` synthesis is an exact opt-in path that forks the current chain state and tests candidate quote deposits against real Ajna contract behavior
 - simulation-backed `DRAW_DEBT` synthesis is an exact opt-in path that forks the current chain state and tests candidate borrow amounts against real Ajna contract behavior
 - simulation-backed `LEND_AND_BORROW` synthesis is an exact opt-in path that searches direct `ADD_QUOTE -> DRAW_DEBT` combinations on a fork and validates the full `ADD_QUOTE -> DRAW_DEBT -> updateInterest` path before emitting them
@@ -117,15 +118,16 @@ npm run test:integration:base:experimental
 
 Notes:
 - `npm test` runs the fast unit suite only.
-- `npm run test:integration:base:smoke` runs the smallest Base-fork health checks.
-- `npm run test:integration:base` runs the broader default Base-fork integration profile in [`tests/integration/base-factory.integration.ts`](./tests/integration/base-factory.integration.ts).
-- `npm run test:integration:base:slow` runs the slower but still routine exact-path proofs.
+- `npm run test:integration:base:smoke` runs the smallest Base-fork health checks through the managed fork runner.
+- `npm run test:integration:base` runs the broader default Base-fork integration profile in [`tests/integration/base-factory.integration.ts`](./tests/integration/base-factory.integration.ts) through the managed fork runner.
+- `npm run test:integration:base:slow` runs the slower but still routine exact-path proofs through the managed fork runner.
 - `npm run test:integration:base:stress` runs the heavier but consistently passable managed-local-Anvil proofs.
 - `npm run test:integration:base:experimental` runs the longest algorithmic exact-search proofs. These are exploratory and can still take many minutes.
 - `npm run test:integration:base:all` runs every profile together, including `experimental`, and also uses the managed local-Anvil path.
 - The Base integration test uses `BASE_RPC_URL` if provided, otherwise it falls back to `https://mainnet.base.org`.
-- If `BASE_LOCAL_ANVIL_URL` is set, the Base integration test reuses that already-running local Anvil fork instead of spawning a fresh fork.
-- The Base integration test logs the selected profile plus either the reused local fork host or the spawned upstream/local hosts at startup.
+- If `BASE_LOCAL_ANVIL_URL` is unset, the managed fork runner picks a profile-specific free local port, starts its own local Anvil fork there, and tears it down after the run.
+- If `BASE_LOCAL_ANVIL_URL` is set, the test harness reuses that already-running local Anvil fork instead of spawning a fresh one.
+- The Base integration test logs the selected profile plus either the explicit reused local fork host or the spawned upstream/local hosts at startup.
 
 ## Env Files
 
@@ -148,6 +150,8 @@ AJNA_KEEPER_PRIVATE_KEY=0x...
 
 `BASE_LOCAL_ANVIL_URL` is optional. When set, the integration harness expects an already-running Anvil-compatible local fork and reuses it for snapshot/revert/time-travel instead of spawning its own process. This is the most robust way to run the heavier Base-fork profiles when sandboxed fork startup or upstream DNS has been flaky.
 
+When you set `BASE_LOCAL_ANVIL_URL`, the runner trusts that endpoint and does not reset or sanitize it. Point it at a clean Base fork that you control, or let the managed runner start an isolated local fork for the current profile instead.
+
 `BASE_ACTIVE_POOL_ADDRESS` is optional. When set, the real active-pool replay test skips factory-log discovery and replays against that specific Base pool instead.
 
 Recommended heavy-test workflow:
@@ -169,7 +173,7 @@ For the longest exploratory exact-search proofs, use:
 BASE_LOCAL_ANVIL_URL=http://127.0.0.1:9545 npm run test:integration:base:experimental
 ```
 
-If `BASE_LOCAL_ANVIL_URL` is unset, `test:integration:base:stress`, `test:integration:base:experimental`, and `test:integration:base:all` will automatically start a managed local Anvil fork on `http://127.0.0.1:9545`, run the suite against that warmed local fork, then shut it down when the run finishes.
+If `BASE_LOCAL_ANVIL_URL` is unset, all Base-fork package scripts automatically start a managed local Anvil fork on a profile-specific free local port, run the suite there, then shut it down when the run finishes.
 
 ## CLI Usage
 
@@ -300,6 +304,7 @@ npm run test:integration:base
 
 - The planner does not yet synthesize the minimum directional threshold directly from live Ajna pool state.
 - `manualCandidates` are still the bridge for live steering plans.
+- live snapshots now attach validation signatures to `manualCandidates`, so recheck can invalidate them when pool, borrower, loan, or referenced-bucket context drifts before execution.
 - Exact simulation-backed lend synthesis is opt-in and currently limited to due-window representative lend fixtures.
 - Exact pre-window lend synthesis is intentionally disabled for now, because the live fork proof did not match the simulated candidate in the representative not-due step-up fixture.
 - Exact simulation-backed borrow synthesis is opt-in and now supports multi-cycle planning through `borrowSimulationLookaheadUpdates`, with representative Base-fork coverage for a live-executed 3-update borrower path.

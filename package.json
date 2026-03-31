@@ -10,9 +10,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:integration:base:smoke": "RUN_BASE_FORK_TESTS=1 RUN_BASE_FORK_SMOKE_TESTS=1 vitest run --config vitest.integration.config.ts tests/integration/base-factory.integration.ts",
-    "test:integration:base": "RUN_BASE_FORK_TESTS=1 vitest run --config vitest.integration.config.ts tests/integration/base-factory.integration.ts",
-    "test:integration:base:slow": "RUN_BASE_FORK_TESTS=1 RUN_BASE_FORK_SLOW_TESTS=1 vitest run --config vitest.integration.config.ts tests/integration/base-factory.integration.ts",
+    "test:integration:base:smoke": "node ./scripts/run-base-fork-profile.mjs smoke",
+    "test:integration:base": "node ./scripts/run-base-fork-profile.mjs default",
+    "test:integration:base:slow": "node ./scripts/run-base-fork-profile.mjs slow",
     "test:integration:base:stress": "node ./scripts/run-base-fork-profile.mjs stress",
     "test:integration:base:experimental": "node ./scripts/run-base-fork-profile.mjs experimental",
     "test:integration:base:all": "node ./scripts/run-base-fork-profile.mjs all"

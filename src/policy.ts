@@ -68,6 +68,10 @@ function semanticSnapshotMetadataSignature(snapshot: PoolSnapshot): string | und
   return parts.join(":");
 }
 
+function findCandidate(snapshot: PoolSnapshot, candidateId: string) {
+  return snapshot.candidates.find((candidate) => candidate.id === candidateId);
+}
+
 function coarseSnapshotSignature(snapshot: PoolSnapshot): string {
   return [
     snapshot.poolId,
@@ -190,15 +194,29 @@ export function preSubmitRecheck(
   }
 
   if (
-    plan.selectedCandidateId &&
-    !freshSnapshot.candidates.some(
-      (candidate) => candidate.id === plan.selectedCandidateId
-    )
+    plan.selectedCandidateId
   ) {
-    return {
-      code: "CANDIDATE_INVALIDATED",
-      reason: "selected candidate is no longer valid in the fresh snapshot"
-    };
+    const previousCandidate = findCandidate(previousSnapshot, plan.selectedCandidateId);
+    const freshCandidate = findCandidate(freshSnapshot, plan.selectedCandidateId);
+
+    if (!freshCandidate) {
+      return {
+        code: "CANDIDATE_INVALIDATED",
+        reason: "selected candidate is no longer valid in the fresh snapshot"
+      };
+    }
+
+    if (
+      previousCandidate?.validationSignature !== undefined ||
+      freshCandidate.validationSignature !== undefined
+    ) {
+      if (previousCandidate?.validationSignature !== freshCandidate.validationSignature) {
+        return {
+          code: "CANDIDATE_INVALIDATED",
+          reason: "selected candidate context changed between planning and execution"
+        };
+      }
+    }
   }
 
   if (

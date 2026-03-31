@@ -118,6 +118,37 @@ describe("resolveKeeperConfig", () => {
     ).toThrow(/bucketIndex/);
   });
 
+  it("rejects manual candidates with negative step amounts", () => {
+    expect(() =>
+      resolveKeeperConfig({
+        chainId: 8453,
+        poolAddress: "0x1111111111111111111111111111111111111111",
+        targetRateBps: 1200,
+        toleranceBps: 1000,
+        maxQuoteTokenExposure: "1000000",
+        maxBorrowExposure: "500000",
+        manualCandidates: [
+          {
+            id: "borrow",
+            intent: "BORROW",
+            minimumExecutionSteps: [
+              {
+                type: "DRAW_DEBT",
+                amount: "-100",
+                limitIndex: 3000
+              }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 1100,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: "100",
+            explanation: "bad borrow"
+          }
+        ]
+      })
+    ).toThrow(/amount/);
+  });
+
   it("rejects invalid completion policy", () => {
     expect(() =>
       resolveKeeperConfig({
