@@ -76,11 +76,67 @@ const REPRESENTATIVE_LEND_AND_DUAL_FIXTURE_MANIFEST = {
 } as const;
 const REPRESENTATIVE_EXISTING_BORROWER_SAME_CYCLE_SCENARIOS = [
   { initialQuoteAmount: 1_000n, borrowAmount: 100n, collateralAmount: 1_000n },
-  { initialQuoteAmount: 2_000n, borrowAmount: 150n, collateralAmount: 1_200n }
+  { initialQuoteAmount: 1_000n, borrowAmount: 250n, collateralAmount: 1_000n },
+  { initialQuoteAmount: 2_000n, borrowAmount: 150n, collateralAmount: 1_200n },
+  { initialQuoteAmount: 2_000n, borrowAmount: 400n, collateralAmount: 1_500n }
+] as const;
+const EXPERIMENTAL_BORROWER_HEAVY_EXISTING_BORROWER_SCENARIOS = [
+  { initialQuoteAmount: 500n, borrowAmount: 450n, collateralAmount: 1_000n },
+  { initialQuoteAmount: 750n, borrowAmount: 700n, collateralAmount: 1_200n },
+  { initialQuoteAmount: 1_000n, borrowAmount: 950n, collateralAmount: 1_500n }
 ] as const;
 const REPRESENTATIVE_EXISTING_BORROWER_SAME_CYCLE_CONFIG_CANDIDATES = [
-  { targetRateBps: 1000, toleranceBps: 50 },
-  { targetRateBps: 1100, toleranceBps: 50 }
+  {
+    targetRateBps: 950,
+    toleranceBps: 50,
+    toleranceMode: "absolute" as const,
+    drawDebtLimitIndexes: [2750, 3000, 3250] as const,
+    drawDebtCollateralAmounts: ["0", "1000000000000000000", "10000000000000000000"] as const
+  },
+  {
+    targetRateBps: 1000,
+    toleranceBps: 50,
+    toleranceMode: "absolute" as const,
+    drawDebtLimitIndexes: [2750, 3000, 3250] as const,
+    drawDebtCollateralAmounts: ["0", "1000000000000000000", "10000000000000000000"] as const
+  },
+  {
+    targetRateBps: 1050,
+    toleranceBps: 50,
+    toleranceMode: "absolute" as const,
+    drawDebtLimitIndexes: [2750, 3000, 3250] as const,
+    drawDebtCollateralAmounts: ["0", "1000000000000000000", "10000000000000000000"] as const
+  },
+  {
+    targetRateBps: 1100,
+    toleranceBps: 50,
+    toleranceMode: "absolute" as const,
+    drawDebtLimitIndexes: [2750, 3000, 3250] as const,
+    drawDebtCollateralAmounts: ["0", "1000000000000000000", "10000000000000000000"] as const
+  }
+] as const;
+const EXPERIMENTAL_BORROWER_HEAVY_EXISTING_BORROWER_CONFIG_CANDIDATES = [
+  {
+    targetRateBps: 950,
+    toleranceBps: 50,
+    toleranceMode: "absolute" as const,
+    drawDebtLimitIndexes: [2500, 2750, 3000, 3250, 3500] as const,
+    drawDebtCollateralAmounts: ["0", "1000000000000000000", "5000000000000000000"] as const
+  },
+  {
+    targetRateBps: 1000,
+    toleranceBps: 50,
+    toleranceMode: "absolute" as const,
+    drawDebtLimitIndexes: [2500, 2750, 3000, 3250, 3500] as const,
+    drawDebtCollateralAmounts: ["0", "1000000000000000000", "5000000000000000000"] as const
+  },
+  {
+    targetRateBps: 1050,
+    toleranceBps: 50,
+    toleranceMode: "absolute" as const,
+    drawDebtLimitIndexes: [2500, 2750, 3000, 3250, 3500] as const,
+    drawDebtCollateralAmounts: ["0", "1000000000000000000", "5000000000000000000"] as const
+  }
 ] as const;
 const REPRESENTATIVE_MULTI_CYCLE_BORROW_CONFIG = {
   targetRateBps: 1300,
@@ -1242,7 +1298,22 @@ async function findExistingBorrowerSameCycleBorrowMatch(
   publicClient: any,
   walletClient: any,
   testClient: any,
-  artifact: { abi: unknown[]; bytecode: `0x${string}` }
+  artifact: { abi: unknown[]; bytecode: `0x${string}` },
+  options: {
+    borrowSimulationLookaheadUpdates?: number;
+    scenarios?: readonly {
+      initialQuoteAmount: bigint;
+      borrowAmount: bigint;
+      collateralAmount: bigint;
+    }[];
+    configCandidates?: readonly {
+      targetRateBps: number;
+      toleranceBps: number;
+      toleranceMode: "absolute" | "relative";
+      drawDebtLimitIndexes: readonly number[];
+      drawDebtCollateralAmounts: readonly string[];
+    }[];
+  } = {}
 ): Promise<
   | {
       poolAddress: `0x${string}`;
@@ -1253,7 +1324,12 @@ async function findExistingBorrowerSameCycleBorrowMatch(
     }
   | undefined
 > {
-  for (const scenario of REPRESENTATIVE_EXISTING_BORROWER_SAME_CYCLE_SCENARIOS) {
+  const scenarios =
+    options.scenarios ?? REPRESENTATIVE_EXISTING_BORROWER_SAME_CYCLE_SCENARIOS;
+  const configCandidates =
+    options.configCandidates ?? REPRESENTATIVE_EXISTING_BORROWER_SAME_CYCLE_CONFIG_CANDIDATES;
+
+  for (const scenario of scenarios) {
     const poolAddress = await createExistingBorrowerSameCycleFixture(
       account,
       publicClient,
@@ -1271,16 +1347,36 @@ async function findExistingBorrowerSameCycleBorrowMatch(
       testClient,
       poolAddress
     );
+    const [loansInfo, borrowerInfo] = await Promise.all([
+      publicClient.readContract({
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "loansInfo",
+        args: []
+      }),
+      publicClient.readContract({
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "borrowerInfo",
+        args: [account.address]
+      })
+    ]);
+    const noOfLoans = loansInfo[2] as bigint;
+    const borrowerT0Debt = borrowerInfo[0] as bigint;
+    const borrowerCollateral = borrowerInfo[1] as bigint;
+    if (noOfLoans === 0n || (borrowerT0Debt === 0n && borrowerCollateral === 0n)) {
+      continue;
+    }
 
-    for (const candidate of REPRESENTATIVE_EXISTING_BORROWER_SAME_CYCLE_CONFIG_CANDIDATES) {
-      const config = resolveKeeperConfig({
+    for (const candidate of configCandidates) {
+      const heuristicConfig = resolveKeeperConfig({
         chainId: 8453,
         poolAddress,
         poolId: `8453:${poolAddress.toLowerCase()}`,
         rpcUrl: LOCAL_RPC_URL,
         targetRateBps: candidate.targetRateBps,
         toleranceBps: candidate.toleranceBps,
-        toleranceMode: "relative",
+        toleranceMode: candidate.toleranceMode,
         completionPolicy: "next_move_would_overshoot",
         executionBufferBps: 0,
         maxQuoteTokenExposure: "1000000000000000000000000",
@@ -1291,9 +1387,31 @@ async function findExistingBorrowerSameCycleBorrowMatch(
         recheckBeforeSubmit: true,
         borrowerAddress: account.address,
         simulationSenderAddress: account.address,
+        enableSimulationBackedBorrowSynthesis: false,
+        enableHeuristicBorrowSynthesis: true,
+        drawDebtLimitIndexes: [...candidate.drawDebtLimitIndexes],
+        drawDebtCollateralAmounts: [...candidate.drawDebtCollateralAmounts],
+        ...(options.borrowSimulationLookaheadUpdates === undefined
+          ? {}
+          : { borrowSimulationLookaheadUpdates: options.borrowSimulationLookaheadUpdates })
+      });
+      if (options.borrowSimulationLookaheadUpdates === 1) {
+        const heuristicSnapshot = await new AjnaRpcSnapshotSource(heuristicConfig, {
+          publicClient,
+          now: () => chainNow
+        }).getSnapshot();
+        const heuristicBorrowCandidate = heuristicSnapshot.candidates.find(
+          (innerCandidate) => innerCandidate.intent === "BORROW"
+        );
+        if (!heuristicBorrowCandidate) {
+          continue;
+        }
+      }
+
+      const config = resolveKeeperConfig({
+        ...heuristicConfig,
         enableSimulationBackedBorrowSynthesis: true,
-        drawDebtLimitIndexes: [3000],
-        drawDebtCollateralAmounts: ["10000000000000000000"]
+        enableHeuristicBorrowSynthesis: true
       });
       const snapshot = await new AjnaRpcSnapshotSource(config, {
         publicClient,
@@ -1724,7 +1842,35 @@ describeIf("Base factory fork integration", () => {
         publicClient,
         walletClient,
         testClient,
-        artifact
+        artifact,
+        {
+          borrowSimulationLookaheadUpdates: 1
+        }
+      );
+
+      expect(match).toBeUndefined();
+    },
+    180_000
+  );
+
+  itBaseExperimental(
+    "does not yet find an exact same-cycle borrow steering candidate across borrower-heavy existing-borrower fixtures",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const match = await findExistingBorrowerSameCycleBorrowMatch(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        artifact,
+        {
+          borrowSimulationLookaheadUpdates: 1,
+          scenarios: EXPERIMENTAL_BORROWER_HEAVY_EXISTING_BORROWER_SCENARIOS,
+          configCandidates: EXPERIMENTAL_BORROWER_HEAVY_EXISTING_BORROWER_CONFIG_CANDIDATES
+        }
       );
 
       expect(match).toBeUndefined();
