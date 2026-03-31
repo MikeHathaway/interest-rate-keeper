@@ -1534,7 +1534,7 @@ describeIf("Base factory fork integration", () => {
   );
 
   itBaseDefault(
-    "brand-new quote-only pool does not yet find an exact same-cycle borrow steering candidate after the first passive update",
+    "brand-new quote-only pool does not yet find an exact same-cycle borrow steering candidate after the first passive update when exact search is restricted to one update",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
       const artifact = await ensureMockArtifact();
@@ -1598,6 +1598,7 @@ describeIf("Base factory fork integration", () => {
         borrowerAddress: account.address,
         simulationSenderAddress: account.address,
         enableSimulationBackedBorrowSynthesis: true,
+        borrowSimulationLookaheadUpdates: 1,
         drawDebtLimitIndexes: [3000],
         drawDebtCollateralAmounts: ["10000000000000000000"]
       });

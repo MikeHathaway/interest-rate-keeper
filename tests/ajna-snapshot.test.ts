@@ -4,6 +4,7 @@ import {
   classifyAjnaNextRate,
   forecastAjnaNextEligibleRate,
   resolveSimulationBorrowCollateralAmounts,
+  resolveBorrowSimulationLookaheadAttempts,
   resolveSimulationBorrowLimitIndexes,
   searchCoarseToFineDualSpace,
   synthesizeAjnaBorrowCandidate,
@@ -421,7 +422,7 @@ describe("resolveSimulationBorrowLimitIndexes", () => {
         ...baseConfig,
         drawDebtLimitIndex: 3000
       })
-    ).toEqual([2500, 2750, 3000, 3250, 3500, 4000, 5000, 6000, 7000, 7388]);
+    ).toEqual([500, 1000, 1500, 2000, 2500, 2750, 3000, 3250, 3500, 4000, 5000, 6000, 7000, 7388]);
   });
 
   it("preserves explicitly configured multiple limit indexes without adding neighbors", () => {
@@ -476,6 +477,21 @@ describe("resolveSimulationBorrowCollateralAmounts", () => {
         }
       )
     ).toEqual([0n, 1n, 2n, 5n, 10n, 20n, 50n, 100n].map((amount) => amount * WAD));
+  });
+});
+
+describe("resolveBorrowSimulationLookaheadAttempts", () => {
+  it("tries same-cycle first, then falls back to the default multi-cycle window when no explicit lookahead is configured", () => {
+    expect(resolveBorrowSimulationLookaheadAttempts(baseConfig)).toEqual([1, 3]);
+  });
+
+  it("preserves an explicit lookahead override without adding a fallback attempt", () => {
+    expect(
+      resolveBorrowSimulationLookaheadAttempts({
+        ...baseConfig,
+        borrowSimulationLookaheadUpdates: 4
+      })
+    ).toEqual([4]);
   });
 });
 

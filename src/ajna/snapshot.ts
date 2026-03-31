@@ -43,12 +43,26 @@ const EXACT_DUAL_MAX_QUOTE_SAMPLES = 6;
 const EXACT_DUAL_MAX_BORROW_SAMPLES = 6;
 const EXACT_DUAL_MAX_PROMISING_BASINS = 3;
 const EXACT_BORROW_LIMIT_INDEX_OFFSETS = [-500, -250, 0, 250, 500] as const;
+const EXACT_BORROW_PROTOCOL_SAMPLE_POINTS = [
+  500,
+  1_000,
+  1_500,
+  2_000,
+  2_500,
+  3_000,
+  3_500,
+  4_000,
+  5_000,
+  6_000,
+  7_000
+] as const;
 const BORROW_BUCKET_PROBE_OFFSETS = [-250, -100, -50, 0, 50, 100, 250] as const;
 const MAX_AJNA_LIMIT_INDEX = 7_388;
 const MAX_SIMULATION_BORROW_COLLATERAL_SAMPLES = 12;
 const MAX_SIMULATION_ACCOUNT_STATE_CACHE_ENTRIES = 256;
 const MAX_EXACT_SIMULATION_PATH_CACHE_ENTRIES = 20_000;
 const MAX_SIMULATION_CANDIDATE_CACHE_ENTRIES = 2_048;
+const DEFAULT_BORROW_LOOKAHEAD_FALLBACK_UPDATES = 3;
 
 interface SimulationAccountState {
   simulationSenderAddress: HexAddress;
@@ -391,15 +405,13 @@ export function resolveSimulationBorrowLimitIndexes(config: KeeperConfig): numbe
   }
 
   const anchor = configured[0]!;
-  const highSideAnchors = [4_000, 5_000, 6_000, 7_000, MAX_AJNA_LIMIT_INDEX].filter(
-    (limitIndex) => limitIndex > anchor
-  );
 
   return Array.from(
     new Set(
       [
         ...EXACT_BORROW_LIMIT_INDEX_OFFSETS.map((offset) => anchor + offset),
-        ...highSideAnchors
+        ...EXACT_BORROW_PROTOCOL_SAMPLE_POINTS,
+        MAX_AJNA_LIMIT_INDEX
       ].filter((limitIndex) => limitIndex >= 0)
     )
   ).sort((left, right) => left - right);
@@ -977,6 +989,14 @@ function compareCandidatePreference(left: PlanCandidate, right: PlanCandidate): 
 
 function resolveBorrowSimulationLookaheadUpdates(config: KeeperConfig): number {
   return config.borrowSimulationLookaheadUpdates ?? 1;
+}
+
+export function resolveBorrowSimulationLookaheadAttempts(config: KeeperConfig): number[] {
+  if (config.borrowSimulationLookaheadUpdates !== undefined) {
+    return [config.borrowSimulationLookaheadUpdates];
+  }
+
+  return [1, DEFAULT_BORROW_LOOKAHEAD_FALLBACK_UPDATES];
 }
 
 function buildSnapshotFingerprint(
@@ -3742,16 +3762,30 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
         }
 
         if (this.config.enableSimulationBackedBorrowSynthesis) {
-          const borrowResult = await synthesizeAjnaBorrowCandidateViaSimulation(
-            readState,
-            this.config,
-            {
-              poolAddress: this.poolAddress,
-              rpcUrl,
-              baselinePrediction: readState.prediction,
-              accountState: simulationAccountState
+          let borrowResult: BorrowSimulationSynthesisResult | undefined;
+          for (const lookaheadUpdates of resolveBorrowSimulationLookaheadAttempts(this.config)) {
+            const borrowConfig =
+              this.config.borrowSimulationLookaheadUpdates === lookaheadUpdates
+                ? this.config
+                : {
+                    ...this.config,
+                    borrowSimulationLookaheadUpdates: lookaheadUpdates
+                  };
+            borrowResult = await synthesizeAjnaBorrowCandidateViaSimulation(
+              readState,
+              borrowConfig,
+              {
+                poolAddress: this.poolAddress,
+                rpcUrl,
+                baselinePrediction: readState.prediction,
+                accountState: simulationAccountState
+              }
+            );
+            if (borrowResult?.candidate) {
+              break;
             }
-          );
+          }
+
           borrowCandidate = borrowResult?.candidate;
           if (borrowCandidate) {
             synthesizedCandidates.push(borrowCandidate);
@@ -3761,7 +3795,11 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
             planningLookaheadUpdates = borrowResult.planningLookaheadUpdates;
           }
 
-          if (this.config.enableSimulationBackedLendSynthesis) {
+          if (
+            this.config.enableSimulationBackedLendSynthesis &&
+            (borrowResult?.planningLookaheadUpdates === undefined ||
+              borrowResult.planningLookaheadUpdates <= 1)
+          ) {
             const dualCandidate = await synthesizeAjnaLendAndBorrowCandidateViaSimulation(
               readState,
               this.config,

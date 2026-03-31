@@ -33,6 +33,7 @@ Today, the snapshot builder reads real pool state and predicts the next Ajna rat
 - heuristic `ADD_QUOTE` synthesis remains useful for exploratory planning and dry-run validation
 - heuristic `DRAW_DEBT` synthesis now provides exploratory upward-steering candidates when exact same-cycle borrow remains too conservative
 - heuristic `LEND_AND_BORROW` synthesis is deliberately narrow: it looks for `ADD_QUOTE -> DRAW_DEBT` plans that soften a borrow overshoot rather than trying to solve a full two-dimensional optimizer
+- when `borrowSimulationLookaheadUpdates` is unset, the live exact borrower path now tries one-update exact borrow first, then falls back to the default 3-update exact borrow path
 - snapshot `predictedNextOutcome` / `predictedNextRateBps` now describe the next eligible Ajna rate update, even when that update is not due yet
 - candidate usefulness is now judged against the do-nothing next update path, not just against the current rate, so the planner can prefer neutralizing a bad upcoming move over letting the pool drift farther away
 
@@ -64,6 +65,7 @@ This is the "new pool should move up faster than passive updates would allow" ca
 
 What is proven today:
 - representative multi-cycle `BORROW` planning and live execution
+- the live exact borrower path now automatically attempts a multi-cycle fallback when same-cycle exact borrow is unavailable and no explicit lookahead is configured
 
 What is not proven today:
 - exact same-cycle borrower-side steering
@@ -319,13 +321,13 @@ npm run test:integration:base
 - `manualCandidates` are still the bridge for live steering plans.
 - live snapshots now attach validation signatures to `manualCandidates`, so recheck can invalidate them when pool, borrower, loan, or referenced-bucket context drifts before execution.
 - Exact simulation-backed lend synthesis is opt-in and currently limited to due-window representative lend fixtures.
-- Exact simulation-backed borrow synthesis is opt-in and now supports multi-cycle planning through `borrowSimulationLookaheadUpdates`, with representative Base-fork coverage for a live-executed 3-update borrower path.
+- Exact simulation-backed borrow synthesis is opt-in and now supports multi-cycle planning through `borrowSimulationLookaheadUpdates`, with representative Base-fork coverage for a live-executed 3-update borrower path. When `borrowSimulationLookaheadUpdates` is unset, the live snapshot source tries `[1, 3]` exact borrow planning in that order.
 - Heuristic borrow synthesis is opt-in and now covers exploratory upward-steering candidates through the same heuristic search path used by the pure planner tests.
 - Brand-new pool upward-convergence and abandoned-pool recovery should not be treated as the same keeper mode; they share engine pieces, but the proven execution paths are different.
 - Exact simulation-backed `LEND_AND_BORROW` synthesis is now wired into the live snapshot path when both exact lend and borrow synthesis are enabled, and it benchmarks candidate dual paths against the best exact single-action paths before emitting them.
 - Adding multi-bucket quote search made that stricter benchmark productive again in the representative Base fixture: the keeper now surfaces and naturally selects a real exact `LEND_AND_BORROW` candidate there.
 - The representative live-execution equivalence check for the exact dual plan is now covered on the fork: the executed due-window plan lands on the same first-update rate the simulation predicted.
-- Exact same-cycle borrow synthesis now uses Ajna `bucketInfo` reads to prioritize funded live bucket indexes, reads `borrowerInfo` and `loansInfo` to ground borrower-side search, broadens a single configured `drawDebtLimitIndex` toward Ajna’s wider limit-index space, expands a single configured `drawDebtCollateralAmount` toward the live account’s available collateral during simulation, includes `0` additional collateral for existing borrowers, and seeds exact search from pure borrow thresholds per collateral amount. Even with that broader and more pool-aware borrower search, it still remains conservative in both the representative brand-new quote-only fixture and a small representative existing-borrower fixture set: the fork reaches eligible states, yet no same-cycle live `DRAW_DEBT` candidate is appearing there.
+- Exact same-cycle borrow synthesis now uses Ajna `bucketInfo` reads to prioritize funded live bucket indexes, reads `borrowerInfo` and `loansInfo` to ground borrower-side search, broadens a single configured `drawDebtLimitIndex` into a wider protocol sample set, expands a single configured `drawDebtCollateralAmount` toward the live account’s available collateral during simulation, includes `0` additional collateral for existing borrowers, and seeds exact search from pure borrow thresholds per collateral amount. Even with that broader and more pool-aware borrower search, it still remains conservative in both the representative brand-new quote-only fixture and a small representative existing-borrower fixture set: the fork reaches eligible states, yet no same-cycle live `DRAW_DEBT` candidate is appearing there.
 - Heuristic `LEND_AND_BORROW` synthesis only covers the “temper an oversized borrow with a small quote deposit” case today; it is not yet a general liquidity-seeding or multi-dimensional search strategy.
 - Heuristic lend synthesis is opt-in and currently validated for live planning/dry-run discovery, not for blind live execution in borrowed pools.
 - Repeated natural update-only convergence is covered by integration tests, including week-scale multi-cycle operation.
