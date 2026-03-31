@@ -19,7 +19,7 @@ export interface ExecutionBackend {
 }
 
 export class DryRunExecutionBackend implements ExecutionBackend {
-  async execute(plan: CyclePlan, _context: ExecutionContext): Promise<ExecutionOutcome> {
+  async execute(plan: CyclePlan): Promise<ExecutionOutcome> {
     return {
       status: "EXECUTED",
       transactionHashes: [],

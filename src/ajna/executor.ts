@@ -3,21 +3,19 @@ import {
   createWalletClient,
   http,
   type Hex,
-  type PublicClient,
-  type WalletClient
+  type PublicClient
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import { ajnaPoolAbi, erc20Abi } from "./abi.js";
 import { DryRunExecutionBackend, StepwiseExecutionBackend } from "../execute.js";
 import {
-  type AddCollateralStep,
-  type AddQuoteStep,
-  type DrawDebtStep,
-  type ExecutionStep,
-  type HexAddress,
-  type KeeperConfig,
-  type RemoveCollateralStep,
+    type AddCollateralStep,
+    type AddQuoteStep,
+    type DrawDebtStep,
+    type HexAddress,
+    type KeeperConfig,
+    type RemoveCollateralStep,
   type RemoveQuoteStep,
   type RepayDebtStep
 } from "../types.js";
@@ -308,7 +306,7 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
         transactionHash: await waitForSuccess(publicClient, hash)
       };
     },
-    UPDATE_INTEREST: async (_step: ExecutionStep) => {
+    UPDATE_INTEREST: async () => {
       const hash = await walletClient.writeContract({
         account,
         chain: undefined,

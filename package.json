@@ -1,12 +1,41 @@
 {
   "name": "interest-rate-keeper",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
   "description": "Ajna interest rate keeper",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MikeHathaway/interest-rate-keeper.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MikeHathaway/interest-rate-keeper/issues"
+  },
+  "homepage": "https://github.com/MikeHathaway/interest-rate-keeper#readme",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "bin": {
+    "interest-rate-keeper": "./dist/src/cli.js"
+  },
+  "files": [
+    "dist/src",
+    "README.md",
+    "DESIGN.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint .",
+    "verify": "npm run lint && npm run typecheck && npm test && npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
@@ -15,7 +44,8 @@
     "test:integration:base:slow": "node ./scripts/run-base-fork-profile.mjs slow",
     "test:integration:base:stress": "node ./scripts/run-base-fork-profile.mjs stress",
     "test:integration:base:experimental": "node ./scripts/run-base-fork-profile.mjs experimental",
-    "test:integration:base:all": "node ./scripts/run-base-fork-profile.mjs all"
+    "test:integration:base:all": "node ./scripts/run-base-fork-profile.mjs all",
+    "prepack": "npm run build"
   },
   "engines": {
     "node": ">=20.5.0"
@@ -25,7 +55,12 @@
     "viem": "^2.23.5"
   },
   "devDependencies": {
+    "@eslint/js": "^9.24.0",
     "@types/node": "^24.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.29.0",
+    "@typescript-eslint/parser": "^8.29.0",
+    "eslint": "^9.24.0",
+    "globals": "^16.0.0",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   }

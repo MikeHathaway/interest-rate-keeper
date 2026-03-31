@@ -81,7 +81,6 @@ interface CachedSimulationCandidates {
 const simulationAccountStateCache = new Map<string, SimulationAccountState>();
 const lendSimulationPathCache = new Map<string, LendSimulationPathResult | null>();
 const borrowSimulationPathCache = new Map<string, BorrowSimulationPathResult | null>();
-const dualSimulationPathCache = new Map<string, DualSimulationPathResult | null>();
 const simulationCandidateCache = new Map<string, CachedSimulationCandidates>();
 
 function setBoundedCacheEntry<K, V>(cache: Map<K, V>, key: K, value: V, maxEntries: number): void {
@@ -1877,10 +1876,6 @@ async function synthesizeAjnaLendCandidateViaSimulation(
   }
 
   const baselinePrediction = options.baselinePrediction ?? readState.prediction;
-  const baselineDistance = distanceToTargetBand(
-    baselinePrediction.predictedNextRateBps,
-    targetBand
-  );
   const minimumAmount =
     config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
   const simulationSenderAddress =
@@ -2636,10 +2631,6 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
   }
 
   const baselinePrediction = options.baselinePrediction ?? readState.prediction;
-  const baselineDistance = distanceToTargetBand(
-    baselinePrediction.predictedNextRateBps,
-    targetBand
-  );
   const minimumAmount =
     config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
   const maxAmount = config.maxBorrowExposure;

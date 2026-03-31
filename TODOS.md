@@ -44,18 +44,6 @@
 
 ## Review Follow-Ups
 
-### Release and CI Automation
-
-**What:** Finish the distribution automation that the design calls for: GitHub Actions for lint/typecheck/test/build, publish-on-tag, and release packaging.
-
-**Why:** The core keeper exists, but the release path from the design is still not implemented. The package is still private and there is no checked-in GitHub Actions workflow yet.
-
-**Context:** The current repo already has stable unit coverage and multiple Base fork test profiles. The missing piece is the automation layer that turns that into a repeatable release and verification pipeline.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** Stable test profile split and a decision on package publication scope
-
 ### External Local Anvil Cleanliness Contract
 
 **What:** Keep documenting and possibly enforcing the trust contract around `BASE_LOCAL_ANVIL_URL`.
@@ -69,3 +57,5 @@
 **Depends on:** None
 
 ## Completed
+
+- Release and CI automation: package metadata, lint/verify scripts, GitHub Actions CI, and publish-on-tag workflow are now in place.

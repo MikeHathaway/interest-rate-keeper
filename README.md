@@ -107,7 +107,9 @@ npm install
 
 ```bash
 npm run build
+npm run lint
 npm run typecheck
+npm run verify
 npm test
 npm run test:integration:base:smoke
 npm run test:integration:base
@@ -118,6 +120,8 @@ npm run test:integration:base:experimental
 
 Notes:
 - `npm test` runs the fast unit suite only.
+- `npm run lint` runs the source-focused ESLint pass over `src/**/*.ts` plus the release runner script.
+- `npm run verify` runs `lint + typecheck + unit tests + build` and is the same gate used by CI and publish workflows.
 - `npm run test:integration:base:smoke` runs the smallest Base-fork health checks through the managed fork runner.
 - `npm run test:integration:base` runs the broader default Base-fork integration profile in [`tests/integration/base-factory.integration.ts`](./tests/integration/base-factory.integration.ts) through the managed fork runner.
 - `npm run test:integration:base:slow` runs the slower but still routine exact-path proofs through the managed fork runner.
@@ -128,6 +132,12 @@ Notes:
 - If `BASE_LOCAL_ANVIL_URL` is unset, the managed fork runner picks a profile-specific free local port, starts its own local Anvil fork there, and tears it down after the run.
 - If `BASE_LOCAL_ANVIL_URL` is set, the test harness reuses that already-running local Anvil fork instead of spawning a fresh one.
 - The Base integration test logs the selected profile plus either the explicit reused local fork host or the spawned upstream/local hosts at startup.
+
+## CI/CD
+
+- [ci.yml](./.github/workflows/ci.yml) runs `npm run verify` on every push/PR and runs the Base smoke profile when `BASE_RPC_URL` is available as a GitHub secret.
+- [publish.yml](./.github/workflows/publish.yml) runs on `v*` tags, reruns `npm run verify`, publishes to npm using `NPM_TOKEN`, and creates a GitHub release.
+- `npm pack --dry-run` now produces a clean package containing the built CLI/library artifacts from `dist/src`.
 
 ## Env Files
 
