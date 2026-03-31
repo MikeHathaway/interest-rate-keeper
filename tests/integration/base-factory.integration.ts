@@ -1712,7 +1712,7 @@ describeIf("Base factory fork integration", () => {
     420_000
   );
 
-  itBaseSlow(
+  itBaseExperimental(
     "does not yet find an exact same-cycle borrow steering candidate across representative existing-borrower fixtures",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();

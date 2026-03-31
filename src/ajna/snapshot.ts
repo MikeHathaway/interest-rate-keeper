@@ -1509,16 +1509,14 @@ export function synthesizeAjnaLendCandidate(
   }
 
   const targetBand = buildTargetBand(config);
-  const currentRateBps = toRateBps(state.currentRateWad);
-  if (currentRateBps <= targetBand.maxRateBps) {
-    return undefined;
-  }
-
   const baselinePrediction = options.baselinePrediction ?? classifyAjnaNextRate(state);
   const baselineDistance = distanceToTargetBand(
     baselinePrediction.predictedNextRateBps,
     targetBand
   );
+  if (baselineDistance === 0) {
+    return undefined;
+  }
   const minimumAmount =
     config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
   const maxAmount = config.maxQuoteTokenExposure;
@@ -1888,16 +1886,14 @@ async function synthesizeAjnaLendCandidateViaSimulation(
   }
 
   const targetBand = buildTargetBand(config);
-  const currentRateBps = toRateBps(readState.rateState.currentRateWad);
-  if (currentRateBps <= targetBand.maxRateBps) {
-    return undefined;
-  }
-
   if (readState.immediatePrediction.secondsUntilNextRateUpdate > 0) {
     return undefined;
   }
 
   const baselinePrediction = options.baselinePrediction ?? readState.prediction;
+  if (distanceToTargetBand(baselinePrediction.predictedNextRateBps, targetBand) === 0) {
+    return undefined;
+  }
   const minimumAmount =
     config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
   const simulationSenderAddress =
@@ -2261,16 +2257,14 @@ export function synthesizeAjnaBorrowCandidate(
   }
 
   const targetBand = buildTargetBand(config);
-  const currentRateBps = toRateBps(state.currentRateWad);
-  if (currentRateBps >= targetBand.minRateBps) {
-    return undefined;
-  }
-
   const baselinePrediction = options.baselinePrediction ?? forecastAjnaNextEligibleRate(state);
   const baselineDistance = distanceToTargetBand(
     baselinePrediction.predictedNextRateBps,
     targetBand
   );
+  if (baselineDistance === 0) {
+    return undefined;
+  }
   const minimumAmount =
     config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
   const maxAmount = config.maxBorrowExposure;
@@ -2447,16 +2441,14 @@ export function synthesizeAjnaLendAndBorrowCandidate(
   }
 
   const targetBand = buildTargetBand(config);
-  const currentRateBps = toRateBps(state.currentRateWad);
-  if (currentRateBps >= targetBand.minRateBps) {
-    return undefined;
-  }
-
   const baselinePrediction = options.baselinePrediction ?? forecastAjnaNextEligibleRate(state);
   const baselineDistance = distanceToTargetBand(
     baselinePrediction.predictedNextRateBps,
     targetBand
   );
+  if (baselineDistance === 0) {
+    return undefined;
+  }
   const minimumAmount =
     config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
   const maxQuoteAmount = config.maxQuoteTokenExposure;
@@ -2648,7 +2640,9 @@ export function synthesizeAjnaHeuristicCandidates(
   const candidates: PlanCandidate[] = [];
   const heuristicBorrowCandidate = config.enableHeuristicBorrowSynthesis
     ? synthesizeAjnaBorrowCandidate(state, config, {
-        baselinePrediction: options.baselinePrediction
+        ...(options.baselinePrediction === undefined
+          ? {}
+          : { baselinePrediction: options.baselinePrediction })
       })
     : undefined;
 
@@ -2660,7 +2654,9 @@ export function synthesizeAjnaHeuristicCandidates(
     const lendCandidate = synthesizeAjnaLendCandidate(state, config, {
       quoteTokenScale: options.quoteTokenScale,
       nowTimestamp: options.nowTimestamp,
-      baselinePrediction: options.baselinePrediction
+      ...(options.baselinePrediction === undefined
+        ? {}
+        : { baselinePrediction: options.baselinePrediction })
     });
     if (lendCandidate) {
       candidates.push(lendCandidate);
@@ -2672,7 +2668,9 @@ export function synthesizeAjnaHeuristicCandidates(
       {
         quoteTokenScale: options.quoteTokenScale,
         nowTimestamp: options.nowTimestamp,
-        baselinePrediction: options.baselinePrediction,
+        ...(options.baselinePrediction === undefined
+          ? {}
+          : { baselinePrediction: options.baselinePrediction }),
         ...(heuristicBorrowCandidate === undefined
           ? {}
           : { anchorBorrowCandidate: heuristicBorrowCandidate })
@@ -2697,11 +2695,6 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
   }
 ): Promise<BorrowSimulationSynthesisResult | undefined> {
   const targetBand = buildTargetBand(config);
-  const currentRateBps = toRateBps(readState.rateState.currentRateWad);
-  if (currentRateBps >= targetBand.minRateBps) {
-    return undefined;
-  }
-
   const baselinePrediction = options.baselinePrediction ?? readState.prediction;
   const minimumAmount =
     config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
@@ -2716,6 +2709,13 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
     options.accountState?.borrowerAddress ??
     resolveSimulationBorrowerAddress(config, simulationSenderAddress);
   const lookaheadUpdates = resolveBorrowSimulationLookaheadUpdates(config);
+  const heuristicBorrowAnchor =
+    lookaheadUpdates === 1
+      ? synthesizeAjnaBorrowCandidate(readState.rateState, config, {
+          baselinePrediction
+        })
+      : undefined;
+  const heuristicDrawDebtStep = extractDrawDebtStep(heuristicBorrowAnchor);
   const initialLastInterestRateUpdateTimestamp =
     readState.rateState.lastInterestRateUpdateTimestamp;
   const snapshotFingerprint = buildSnapshotFingerprint(
@@ -2723,6 +2723,15 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
     readState.blockNumber,
     readState.rateState
   );
+  if (
+    lookaheadUpdates === 1 &&
+    distanceToTargetBand(baselinePrediction.predictedNextRateBps, targetBand) === 0
+  ) {
+    return undefined;
+  }
+  if (lookaheadUpdates === 1 && !heuristicDrawDebtStep) {
+    return undefined;
+  }
 
   return withLazyTemporaryAnvilFork(
     {
@@ -2779,24 +2788,35 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
           effectiveAccountState.collateralBalance ?? 0n,
           effectiveAccountState.collateralAllowance ?? 0n
         );
-        const candidateCollateralAmounts = resolveSimulationBorrowCollateralAmounts(
-          config,
-          maxAvailableCollateral,
-          {
-            borrowerHasExistingPosition:
-              (readState.borrowerState?.t0Debt ?? 0n) > 0n ||
-              (readState.borrowerState?.collateral ?? 0n) > 0n
-          }
-        );
+        const candidateCollateralAmounts =
+          lookaheadUpdates === 1 && heuristicDrawDebtStep
+            ? [heuristicDrawDebtStep.collateralAmount ?? 0n].filter(
+                (collateralAmount) => collateralAmount <= maxAvailableCollateral
+              )
+            : resolveSimulationBorrowCollateralAmounts(
+                config,
+                maxAvailableCollateral,
+                {
+                  borrowerHasExistingPosition:
+                    (readState.borrowerState?.t0Debt ?? 0n) > 0n ||
+                    (readState.borrowerState?.collateral ?? 0n) > 0n
+                }
+              );
         if (candidateCollateralAmounts.length === 0) {
           return undefined;
         }
-        const limitIndexes = await resolvePoolAwareBorrowLimitIndexes(
+        const allLimitIndexes = await resolvePoolAwareBorrowLimitIndexes(
           publicClient,
           options.poolAddress,
           readState.blockNumber,
           config
         );
+        const limitIndexes =
+          lookaheadUpdates === 1 && heuristicDrawDebtStep
+            ? allLimitIndexes.filter(
+                (limitIndex) => limitIndex === heuristicDrawDebtStep.limitIndex
+              )
+            : allLimitIndexes;
         if (limitIndexes.length === 0) {
           return undefined;
         }
@@ -2805,14 +2825,25 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
             collateralAmount,
             pureThresholdAmount:
               lookaheadUpdates === 1
-                ? findPureBorrowImprovementThresholdForCollateral(
-                    readState.rateState,
-                    targetBand,
-                    baselinePrediction,
-                    minimumAmount,
-                    maxAmount,
-                    collateralAmount
-                  )
+                ? (() => {
+                    const heuristicCollateralAmount =
+                      heuristicDrawDebtStep?.collateralAmount ?? 0n;
+                    const heuristicThresholdAmount =
+                      heuristicDrawDebtStep?.amount !== undefined &&
+                      heuristicCollateralAmount === collateralAmount
+                        ? heuristicDrawDebtStep.amount
+                        : undefined;
+                    return (
+                      findPureBorrowImprovementThresholdForCollateral(
+                        readState.rateState,
+                        targetBand,
+                        baselinePrediction,
+                        minimumAmount,
+                        maxAmount,
+                        collateralAmount
+                      ) ?? heuristicThresholdAmount
+                    );
+                  })()
                 : undefined
           }))
           .filter(
@@ -3132,12 +3163,10 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
   }
 
   const targetBand = buildTargetBand(config);
-  const currentRateBps = toRateBps(readState.rateState.currentRateWad);
-  if (currentRateBps >= targetBand.minRateBps) {
+  const baselinePrediction = options.baselinePrediction ?? readState.prediction;
+  if (distanceToTargetBand(baselinePrediction.predictedNextRateBps, targetBand) === 0) {
     return undefined;
   }
-
-  const baselinePrediction = options.baselinePrediction ?? readState.prediction;
   const simulationSenderAddress =
     options.accountState?.simulationSenderAddress ?? resolveSimulationSenderAddress(config);
   const borrowerAddress =

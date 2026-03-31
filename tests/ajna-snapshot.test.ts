@@ -199,6 +199,71 @@ describe("synthesizeAjnaLendCandidate", () => {
 
     expect(candidate).toBeUndefined();
   });
+
+  it("still synthesizes a lend candidate when the current rate is in band but the next eligible move would step above it", () => {
+    let matched:
+      | {
+          state: Parameters<typeof synthesizeAjnaLendCandidate>[0];
+          candidate: NonNullable<ReturnType<typeof synthesizeAjnaLendCandidate>>;
+        }
+      | undefined;
+
+    const holdInBandConfig: KeeperConfig = {
+      ...baseConfig,
+      targetRateBps: 1_000,
+      toleranceBps: 50
+    };
+    const baselinePrediction = {
+      predictedOutcome: "STEP_UP" as const,
+      predictedNextRateWad: 110_000_000_000_000_000n,
+      predictedNextRateBps: 1_100,
+      secondsUntilNextRateUpdate: 0
+    };
+
+    for (const debtEmaWad of [
+      750_000_000_000_000_000n,
+      900_000_000_000_000_000n,
+      1_000_000_000_000_000_000n,
+      1_100_000_000_000_000_000n,
+      1_250_000_000_000_000_000n
+    ]) {
+      for (const debtColEmaWad of [
+        50_000_000_000_000_000n,
+        100_000_000_000_000_000n,
+        150_000_000_000_000_000n,
+        200_000_000_000_000_000n,
+        250_000_000_000_000_000n
+      ]) {
+        const state = {
+          currentRateWad: 100_000_000_000_000_000n,
+          currentDebtWad: 1_000n,
+          debtEmaWad,
+          depositEmaWad: 1_000_000_000_000_000_000n,
+          debtColEmaWad,
+          lupt0DebtEmaWad: WAD,
+          lastInterestRateUpdateTimestamp: 0,
+          nowTimestamp: 50_000
+        } as const;
+        const candidate = synthesizeAjnaLendCandidate(state, holdInBandConfig, {
+          quoteTokenScale: 1n,
+          nowTimestamp: state.nowTimestamp,
+          baselinePrediction
+        });
+
+        if (candidate) {
+          matched = { state, candidate };
+          break;
+        }
+      }
+
+      if (matched) {
+        break;
+      }
+    }
+
+    expect(matched).toBeDefined();
+    expect(matched?.candidate.predictedRateBpsAfterNextUpdate).toBeLessThanOrEqual(1_050);
+  });
 });
 
 describe("synthesizeAjnaBorrowCandidate", () => {
@@ -279,6 +344,75 @@ describe("synthesizeAjnaBorrowCandidate", () => {
     );
 
     expect(belowThreshold).toBeUndefined();
+  });
+
+  it("still synthesizes a borrow candidate when the current rate is in band but the next eligible move would step below it", () => {
+    let matched:
+      | {
+          state: Parameters<typeof synthesizeAjnaBorrowCandidate>[0];
+          candidate: NonNullable<ReturnType<typeof synthesizeAjnaBorrowCandidate>>;
+        }
+      | undefined;
+
+    const borrowConfig: KeeperConfig = {
+      ...baseConfig,
+      targetRateBps: 1_000,
+      toleranceBps: 50,
+      drawDebtLimitIndex: 3000,
+      drawDebtCollateralAmounts: [0n, 5n]
+    };
+    const baselinePrediction = {
+      predictedOutcome: "STEP_DOWN" as const,
+      predictedNextRateWad: 90_000_000_000_000_000n,
+      predictedNextRateBps: 900,
+      secondsUntilNextRateUpdate: 0
+    };
+
+    for (const debtEmaWad of [
+      50_000_000_000_000_000n,
+      100_000_000_000_000_000n,
+      150_000_000_000_000_000n,
+      200_000_000_000_000_000n,
+      250_000_000_000_000_000n
+    ]) {
+      for (const debtColEmaWad of [
+        10_000_000_000_000_000n,
+        25_000_000_000_000_000n,
+        50_000_000_000_000_000n,
+        75_000_000_000_000_000n,
+        100_000_000_000_000_000n,
+        150_000_000_000_000_000n,
+        200_000_000_000_000_000n,
+        250_000_000_000_000_000n,
+        300_000_000_000_000_000n
+      ]) {
+        const state = {
+          currentRateWad: 100_000_000_000_000_000n,
+          currentDebtWad: 1_000n,
+          debtEmaWad,
+          depositEmaWad: 1_000_000_000_000_000_000n,
+          debtColEmaWad,
+          lupt0DebtEmaWad: WAD,
+          lastInterestRateUpdateTimestamp: 0,
+          nowTimestamp: 50_000
+        } as const;
+        const candidate = synthesizeAjnaBorrowCandidate(state, borrowConfig, {
+          baselinePrediction
+        });
+
+        if (candidate) {
+          matched = { state, candidate };
+          break;
+        }
+      }
+
+      if (matched) {
+        break;
+      }
+    }
+
+    expect(matched).toBeDefined();
+    expect(matched?.candidate.predictedRateBpsAfterNextUpdate).toBeGreaterThanOrEqual(950);
   });
 });
 
