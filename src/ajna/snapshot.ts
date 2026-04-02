@@ -61,6 +61,9 @@ const EXACT_BORROW_PROTOCOL_SAMPLE_POINTS = [
   7_000
 ] as const;
 const BORROW_BUCKET_PROBE_OFFSETS = [-250, -100, -50, 0, 50, 100, 250] as const;
+const PREWINDOW_LEND_BUCKET_OFFSETS = [-1_000, -500, -250, -100, -50, -20, -10, -5, 0] as const;
+const AJNA_COLLATERALIZATION_FACTOR_WAD = 1_040_000_000_000_000_000n;
+const AJNA_FLOAT_STEP = 1.005;
 const MAX_AJNA_LIMIT_INDEX = 7_388;
 const MAX_SIMULATION_BORROW_COLLATERAL_SAMPLES = 12;
 const MAX_SIMULATION_ACCOUNT_STATE_CACHE_ENTRIES = 256;
@@ -88,11 +91,11 @@ interface LendSimulationPathResult {
   firstRateWadAfterNextUpdate: bigint;
   firstRateBpsAfterNextUpdate: number;
   firstOutcome: RateMoveOutcome;
+  terminalRateBps: number;
+  terminalDistanceToTargetBps: number;
 }
 
 interface BorrowSimulationPathResult extends LendSimulationPathResult {
-  terminalRateBps: number;
-  terminalDistanceToTargetBps: number;
 }
 
 type DualSimulationPathResult = BorrowSimulationPathResult;
@@ -293,6 +296,11 @@ interface AjnaPoolStateRead {
   rateState: AjnaRateState;
   prediction: AjnaRatePrediction;
   immediatePrediction: AjnaRatePrediction;
+  inflatorWad: bigint;
+  totalT0Debt: bigint;
+  totalT0DebtInAuction: bigint;
+  t0Debt2ToCollateralWad: bigint;
+  meaningfulDepositThresholdFenwickIndex?: number;
   quoteTokenAddress: HexAddress;
   collateralAddress: HexAddress;
   quoteTokenScale: bigint;
@@ -311,6 +319,12 @@ interface AjnaPoolStateRead {
 }
 
 interface BorrowSimulationSynthesisResult {
+  candidate?: PlanCandidate;
+  baselinePlanningRateBps?: number;
+  planningLookaheadUpdates?: number;
+}
+
+interface LendSimulationSynthesisResult {
   candidate?: PlanCandidate;
   baselinePlanningRateBps?: number;
   planningLookaheadUpdates?: number;
@@ -436,6 +450,64 @@ function resolveAddQuoteBucketIndexes(config: KeeperConfig): number[] {
   ];
 
   return Array.from(new Set(configured)).sort((left, right) => left - right);
+}
+
+function priceToFenwickIndex(priceWad: bigint): number | undefined {
+  const price = Number(priceWad) / 1e18;
+  if (!Number.isFinite(price) || price <= 0) {
+    return undefined;
+  }
+
+  const rawIndex = Math.log(price) / Math.log(AJNA_FLOAT_STEP);
+  const ceilIndex = Math.ceil(rawIndex);
+  const fenwickIndex =
+    rawIndex < 0 && ceilIndex - rawIndex > 0.5 ? 4157 - ceilIndex : 4156 - ceilIndex;
+
+  if (!Number.isFinite(fenwickIndex)) {
+    return undefined;
+  }
+
+  return Math.max(0, Math.min(MAX_AJNA_LIMIT_INDEX, fenwickIndex));
+}
+
+function deriveMeaningfulDepositThresholdFenwickIndex(
+  inflatorWad: bigint,
+  totalT0Debt: bigint,
+  totalT0DebtInAuction: bigint,
+  t0Debt2ToCollateralWad: bigint
+): number | undefined {
+  if (totalT0Debt <= totalT0DebtInAuction) {
+    return undefined;
+  }
+
+  const nonAuctionedT0Debt = totalT0Debt - totalT0DebtInAuction;
+  const dwatpWad = wdiv(
+    wmul(wmul(inflatorWad, t0Debt2ToCollateralWad), AJNA_COLLATERALIZATION_FACTOR_WAD),
+    nonAuctionedT0Debt
+  );
+
+  return priceToFenwickIndex(dwatpWad);
+}
+
+function resolvePreWindowLendBucketIndexes(
+  readState: AjnaPoolStateRead,
+  config: KeeperConfig
+): number[] {
+  const configured = resolveAddQuoteBucketIndexes(config);
+  if (readState.immediatePrediction.secondsUntilNextRateUpdate <= 0) {
+    return configured;
+  }
+
+  const thresholdIndex = readState.meaningfulDepositThresholdFenwickIndex;
+  if (thresholdIndex === undefined) {
+    return configured;
+  }
+
+  return Array.from(
+    new Set(PREWINDOW_LEND_BUCKET_OFFSETS.map((offset) => thresholdIndex + offset))
+  )
+    .filter((bucketIndex) => bucketIndex >= 0 && bucketIndex <= MAX_AJNA_LIMIT_INDEX)
+    .sort((left, right) => left - right);
 }
 
 function resolveDrawDebtCollateralAmounts(config: KeeperConfig): bigint[] {
@@ -1303,8 +1375,11 @@ async function readAjnaPoolState(
 
   const [
     [currentRateWad, interestRateUpdateTimestamp],
-    [currentDebtWad],
+    [currentDebtWad, , , t0Debt2ToCollateralWad],
     [debtColEmaWad, lupt0DebtEmaWad, debtEmaWad, depositEmaWad],
+    [inflatorWad],
+    totalT0Debt,
+    totalT0DebtInAuction,
     quoteTokenAddress,
     collateralAddress,
     quoteTokenScale,
@@ -1328,6 +1403,24 @@ async function readAjnaPoolState(
       address: poolAddress,
       abi: ajnaPoolAbi,
       functionName: "emasInfo",
+      blockNumber: effectiveBlockNumber
+    }),
+    publicClient.readContract({
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "inflatorInfo",
+      blockNumber: effectiveBlockNumber
+    }),
+    publicClient.readContract({
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "totalT0Debt",
+      blockNumber: effectiveBlockNumber
+    }),
+    publicClient.readContract({
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "totalT0DebtInAuction",
       blockNumber: effectiveBlockNumber
     }),
     publicClient.readContract({
@@ -1381,6 +1474,12 @@ async function readAjnaPoolState(
     lastInterestRateUpdateTimestamp: Number(interestRateUpdateTimestamp),
     nowTimestamp: effectiveNowSeconds
   };
+  const meaningfulDepositThresholdFenwickIndex = deriveMeaningfulDepositThresholdFenwickIndex(
+    inflatorWad,
+    totalT0Debt,
+    totalT0DebtInAuction,
+    t0Debt2ToCollateralWad
+  );
 
   return {
     blockNumber: effectiveBlockNumber,
@@ -1388,6 +1487,13 @@ async function readAjnaPoolState(
     rateState,
     prediction: forecastAjnaNextEligibleRate(rateState),
     immediatePrediction: classifyAjnaNextRate(rateState),
+    inflatorWad,
+    totalT0Debt,
+    totalT0DebtInAuction,
+    t0Debt2ToCollateralWad,
+    ...(meaningfulDepositThresholdFenwickIndex === undefined
+      ? {}
+      : { meaningfulDepositThresholdFenwickIndex }),
     quoteTokenAddress,
     collateralAddress,
     quoteTokenScale,
@@ -1956,23 +2062,33 @@ async function synthesizeAjnaLendCandidateViaSimulation(
     baselinePrediction?: AjnaRatePrediction;
     accountState?: SimulationAccountState;
   }
-): Promise<PlanCandidate | undefined> {
+): Promise<LendSimulationSynthesisResult | undefined> {
   const addQuoteBucketIndexes = resolveAddQuoteBucketIndexes(config);
   if (addQuoteBucketIndexes.length === 0) {
     return undefined;
   }
 
   const targetBand = buildTargetBand(config);
-  if (readState.immediatePrediction.secondsUntilNextRateUpdate > 0) {
-    return undefined;
-  }
-
   const baselinePrediction = options.baselinePrediction ?? readState.prediction;
   if (distanceToTargetBand(baselinePrediction.predictedNextRateBps, targetBand) === 0) {
     return undefined;
   }
+  const lookaheadUpdates = readState.immediatePrediction.secondsUntilNextRateUpdate > 0 ? 2 : 1;
   const minimumAmount =
     config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
+  const heuristicSeedCandidate = synthesizeAjnaLendCandidate(readState.rateState, config, {
+    quoteTokenScale: readState.quoteTokenScale,
+    nowTimestamp: readState.rateState.nowTimestamp,
+    baselinePrediction
+  });
+  const heuristicSeedAmounts = new Map<number, bigint>();
+  if (heuristicSeedCandidate) {
+    for (const step of heuristicSeedCandidate.minimumExecutionSteps) {
+      if (step.type === "ADD_QUOTE") {
+        heuristicSeedAmounts.set(step.bucketIndex, step.amount);
+      }
+    }
+  }
   const simulationSenderAddress =
     options.accountState?.simulationSenderAddress ?? resolveSimulationSenderAddress(config);
   const snapshotFingerprint = buildSnapshotFingerprint(
@@ -2085,6 +2201,7 @@ async function synthesizeAjnaLendCandidateViaSimulation(
             let firstRateWadAfterNextUpdate = readState.rateState.currentRateWad;
             let firstOutcome: RateMoveOutcome = "NO_CHANGE";
             let firstUpdateObserved = false;
+            let simulatedReadState = readState;
 
             const maybeCaptureObservedUpdate = (stateAfterAction: AjnaPoolStateRead): void => {
               if (
@@ -2123,11 +2240,12 @@ async function synthesizeAjnaLendCandidateViaSimulation(
               }
 
               const postActionReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              simulatedReadState = postActionReadState;
               maybeCaptureObservedUpdate(postActionReadState);
             }
 
             if (!firstUpdateObserved) {
-              let simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
               if (simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate > 0) {
                 await testClient.increaseTime({
                   seconds: simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate
@@ -2154,6 +2272,7 @@ async function synthesizeAjnaLendCandidateViaSimulation(
               }
 
               const postUpdateReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              simulatedReadState = postUpdateReadState;
               firstRateWadAfterNextUpdate = postUpdateReadState.rateState.currentRateWad;
               firstOutcome = deriveRateMoveOutcome(
                 readState.rateState.currentRateWad,
@@ -2161,10 +2280,50 @@ async function synthesizeAjnaLendCandidateViaSimulation(
               );
             }
 
+            let terminalRateWad = firstRateWadAfterNextUpdate;
+            for (
+              let completedLookaheadUpdates = 1;
+              completedLookaheadUpdates < lookaheadUpdates;
+              completedLookaheadUpdates += 1
+            ) {
+              if (simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate > 0) {
+                await testClient.increaseTime({
+                  seconds: simulatedReadState.immediatePrediction.secondsUntilNextRateUpdate
+                });
+                await testClient.mine({
+                  blocks: 1
+                });
+                simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              }
+
+              const updateHash = await walletClient.writeContract({
+                account: simulationSenderAddress,
+                chain: undefined,
+                address: options.poolAddress,
+                abi: ajnaPoolAbi,
+                functionName: "updateInterest",
+                args: []
+              });
+              const updateReceipt = await publicClient.waitForTransactionReceipt({
+                hash: updateHash
+              });
+              if (updateReceipt.status !== "success") {
+                throw new Error("updateInterest simulation reverted");
+              }
+
+              simulatedReadState = await readAjnaPoolState(publicClient, options.poolAddress);
+              terminalRateWad = simulatedReadState.rateState.currentRateWad;
+            }
+
             const simulationResult: LendSimulationPathResult = {
               firstRateWadAfterNextUpdate,
               firstRateBpsAfterNextUpdate: toRateBps(firstRateWadAfterNextUpdate),
-              firstOutcome
+              firstOutcome,
+              terminalRateBps: toRateBps(terminalRateWad),
+              terminalDistanceToTargetBps: distanceToTargetBand(
+                toRateBps(terminalRateWad),
+                targetBand
+              )
             };
             setBoundedCacheEntry(
               lendSimulationPathCache,
@@ -2186,11 +2345,17 @@ async function synthesizeAjnaLendCandidateViaSimulation(
           }
         }
 
-        const baselinePath = await simulateLendPath(null);
-        const baselineDistance = distanceToTargetBand(
+        let baselinePath: LendSimulationPathResult;
+        try {
+          baselinePath = await simulateLendPath(null);
+        } catch {
+          return undefined;
+        }
+        const baselineNextDistance = distanceToTargetBand(
           baselinePath.firstRateBpsAfterNextUpdate,
           targetBand
         );
+        const baselineTerminalDistance = baselinePath.terminalDistanceToTargetBps;
 
         for (const addQuoteBucketIndex of addQuoteBucketIndexes) {
           const evaluate = async (
@@ -2199,6 +2364,8 @@ async function synthesizeAjnaLendCandidateViaSimulation(
             predictedOutcome: RateMoveOutcome;
             predictedRateWadAfterNextUpdate: bigint;
             predictedRateBpsAfterNextUpdate: number;
+            terminalRateBps: number;
+            terminalDistanceToTargetBps: number;
             improvesConvergence: boolean;
           }> => {
             try {
@@ -2218,27 +2385,40 @@ async function synthesizeAjnaLendCandidateViaSimulation(
                 predictedOutcome,
                 predictedRateWadAfterNextUpdate,
                 predictedRateBpsAfterNextUpdate,
+                terminalRateBps: candidatePath.terminalRateBps,
+                terminalDistanceToTargetBps: candidatePath.terminalDistanceToTargetBps,
                 improvesConvergence:
-                  predictionChanged(baselinePredictionState, {
-                    predictedOutcome,
-                    predictedNextRateWad: predictedRateWadAfterNextUpdate,
-                    predictedNextRateBps: predictedRateBpsAfterNextUpdate,
-                    secondsUntilNextRateUpdate: 0
-                  }) &&
-                  predictedDistance < baselineDistance
+                  lookaheadUpdates > 1
+                    ? predictedDistance <= baselineNextDistance &&
+                      candidatePath.terminalDistanceToTargetBps < baselineTerminalDistance
+                    : predictionChanged(baselinePredictionState, {
+                        predictedOutcome,
+                        predictedNextRateWad: predictedRateWadAfterNextUpdate,
+                        predictedNextRateBps: predictedRateBpsAfterNextUpdate,
+                        secondsUntilNextRateUpdate: 0
+                      }) &&
+                      predictedDistance < baselineNextDistance
               };
             } catch {
               return {
                 predictedOutcome: baselinePath.firstOutcome,
                 predictedRateWadAfterNextUpdate: baselinePath.firstRateWadAfterNextUpdate,
                 predictedRateBpsAfterNextUpdate: baselinePath.firstRateBpsAfterNextUpdate,
+                terminalRateBps: baselinePath.terminalRateBps,
+                terminalDistanceToTargetBps: baselineTerminalDistance,
                 improvesConvergence: false
               };
             }
           };
 
           let lowerBound = minimumAmount - 1n;
-          let upperBound = minimumAmount;
+          let upperBound = heuristicSeedAmounts.get(addQuoteBucketIndex) ?? minimumAmount;
+          if (upperBound < minimumAmount) {
+            upperBound = minimumAmount;
+          }
+          if (upperBound > maxAmount) {
+            upperBound = maxAmount;
+          }
           let upperEvaluation = await evaluate(upperBound);
 
           while (!upperEvaluation.improvesConvergence) {
@@ -2288,13 +2468,23 @@ async function synthesizeAjnaLendCandidateViaSimulation(
             ],
             predictedOutcome: upperEvaluation.predictedOutcome,
             predictedRateBpsAfterNextUpdate: upperEvaluation.predictedRateBpsAfterNextUpdate,
-            resultingDistanceToTargetBps: distanceToTargetBand(
-              upperEvaluation.predictedRateBpsAfterNextUpdate,
-              targetBand
-            ),
+            resultingDistanceToTargetBps:
+              lookaheadUpdates > 1
+                ? upperEvaluation.terminalDistanceToTargetBps
+                : distanceToTargetBand(
+                    upperEvaluation.predictedRateBpsAfterNextUpdate,
+                    targetBand
+                  ),
             quoteTokenDelta: upperBound,
-            explanation: `simulation-backed add-quote threshold changes the next eligible Ajna move from ${baselinePath.firstOutcome} to ${upperEvaluation.predictedOutcome}`
+            explanation:
+              lookaheadUpdates > 1
+                ? `simulation-backed add-quote threshold improves the ${lookaheadUpdates}-update path from ${baselinePath.firstOutcome} to ${upperEvaluation.predictedOutcome}`
+                : `simulation-backed add-quote threshold changes the next eligible Ajna move from ${baselinePath.firstOutcome} to ${upperEvaluation.predictedOutcome}`
           };
+          if (lookaheadUpdates > 1) {
+            candidate.planningRateBps = upperEvaluation.terminalRateBps;
+            candidate.planningLookaheadUpdates = lookaheadUpdates;
+          }
           const finalizedCandidate = finalizeCandidate(candidate);
 
           if (!bestCandidate || compareCandidatePreference(finalizedCandidate, bestCandidate) < 0) {
@@ -2302,7 +2492,15 @@ async function synthesizeAjnaLendCandidateViaSimulation(
           }
         }
 
-        return bestCandidate;
+        return {
+          ...(bestCandidate ? { candidate: bestCandidate } : {}),
+          ...(lookaheadUpdates > 1
+            ? {
+                baselinePlanningRateBps: baselinePath.terminalRateBps,
+                planningLookaheadUpdates: lookaheadUpdates
+              }
+            : {})
+        };
       } finally {
         if (preparedSimulationContext) {
           const { testClient } = await getSimulationContext();
@@ -2715,9 +2913,11 @@ export function synthesizeAjnaHeuristicCandidates(
     quoteTokenScale: bigint;
     nowTimestamp: number;
     baselinePrediction?: AjnaRatePrediction;
+    allowPreWindowLend?: boolean;
   }
 ): PlanCandidate[] {
   const candidates: PlanCandidate[] = [];
+  const allowPreWindowLend = options.allowPreWindowLend ?? true;
   const heuristicBorrowCandidate = config.enableHeuristicBorrowSynthesis
     ? synthesizeAjnaBorrowCandidate(state, config, {
         ...(options.baselinePrediction === undefined
@@ -2730,12 +2930,12 @@ export function synthesizeAjnaHeuristicCandidates(
     candidates.push(heuristicBorrowCandidate);
   }
 
-  if (config.enableHeuristicLendSynthesis) {
+  if (config.enableHeuristicLendSynthesis && allowPreWindowLend) {
     const lendCandidate = synthesizeAjnaLendCandidate(state, config, {
       quoteTokenScale: options.quoteTokenScale,
       nowTimestamp: options.nowTimestamp,
       ...(options.baselinePrediction === undefined
-        ? {}
+          ? {}
         : { baselinePrediction: options.baselinePrediction })
     });
     if (lendCandidate) {
@@ -3816,7 +4016,7 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
 
   async getSnapshot(): Promise<PoolSnapshot> {
     const synthesisPolicy = resolveAjnaSynthesisPolicy(this.config);
-    const synthesisConfig: KeeperConfig = {
+    const baseSynthesisConfig: KeeperConfig = {
       ...this.config,
       enableSimulationBackedLendSynthesis: synthesisPolicy.simulationLend,
       enableSimulationBackedBorrowSynthesis: synthesisPolicy.simulationBorrow,
@@ -3828,8 +4028,19 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
       this.poolAddress,
       this.now(),
       undefined,
-      synthesisConfig.borrowerAddress
+      baseSynthesisConfig.borrowerAddress
     );
+    const derivedPreWindowBucketIndexes = resolvePreWindowLendBucketIndexes(
+      readState,
+      baseSynthesisConfig
+    );
+    const synthesisConfig: KeeperConfig =
+      derivedPreWindowBucketIndexes.length === 0
+        ? baseSynthesisConfig
+        : {
+            ...baseSynthesisConfig,
+            addQuoteBucketIndexes: derivedPreWindowBucketIndexes
+          };
     const snapshotFingerprint = buildSnapshotFingerprint(
       this.poolAddress,
       readState.blockNumber,
@@ -3868,7 +4079,7 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
         let borrowCandidate: PlanCandidate | undefined;
 
         if (synthesisPolicy.simulationLend) {
-          lendCandidate = await synthesizeAjnaLendCandidateViaSimulation(
+          const lendResult = await synthesizeAjnaLendCandidateViaSimulation(
             readState,
             synthesisConfig,
             {
@@ -3878,8 +4089,13 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
               accountState: simulationAccountState
             }
           );
+          lendCandidate = lendResult?.candidate;
           if (lendCandidate) {
             synthesizedCandidates.push(lendCandidate);
+          }
+          if (lendResult?.baselinePlanningRateBps !== undefined && planningRateBps === undefined) {
+            planningRateBps = lendResult.baselinePlanningRateBps;
+            planningLookaheadUpdates = lendResult.planningLookaheadUpdates;
           }
         }
 
@@ -3980,7 +4196,8 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
         {
           quoteTokenScale: readState.quoteTokenScale,
           nowTimestamp: readState.rateState.nowTimestamp,
-          baselinePrediction: readState.prediction
+          baselinePrediction: readState.prediction,
+          allowPreWindowLend: readState.immediatePrediction.secondsUntilNextRateUpdate <= 0
         }
       );
       if (heuristicCandidates.length > 0) {

@@ -57,6 +57,50 @@ const DECREASED_RATE_BPS = 900;
 const FORK_TIME_SKIP_SECONDS = 12 * 60 * 60 + 5;
 const STEERING_BUCKET_CANDIDATES = [2500, 2750, 3000, 3250, 3500] as const;
 const BORROW_COLLATERAL_CANDIDATES = [1n, 2n, 5n, 10n, 20n, 50n, 100n] as const;
+const DETERMINISTIC_PREWINDOW_LEND_SCENARIO_INDEXES = [0, 1, 2, 3, 4, 5, 6] as const;
+const EXPERIMENTAL_COMPLEX_PREWINDOW_LEND_SCENARIOS = [
+  {
+    initialQuoteAmount: 1_000n,
+    initialBorrowAmount: 850n,
+    initialCollateralAmount: 1_500n,
+    competingQuoteAmount: 150n,
+    competingBorrowAmount: 125n,
+    competingCollateralAmount: 300n,
+    primaryFollowupQuoteAmount: 0n,
+    competingFollowupBorrowAmount: 0n
+  },
+  {
+    initialQuoteAmount: 1_000n,
+    initialBorrowAmount: 950n,
+    initialCollateralAmount: 2_000n,
+    competingQuoteAmount: 200n,
+    competingBorrowAmount: 175n,
+    competingCollateralAmount: 400n,
+    primaryFollowupQuoteAmount: 50n,
+    competingFollowupBorrowAmount: 0n
+  },
+  {
+    initialQuoteAmount: 750n,
+    initialBorrowAmount: 650n,
+    initialCollateralAmount: 1_000n,
+    competingQuoteAmount: 250n,
+    competingBorrowAmount: 220n,
+    competingCollateralAmount: 500n,
+    primaryFollowupQuoteAmount: 0n,
+    competingFollowupBorrowAmount: 50n
+  },
+  {
+    initialQuoteAmount: 1_000n,
+    initialBorrowAmount: 900n,
+    initialCollateralAmount: 1_500n,
+    competingQuoteAmount: 300n,
+    competingBorrowAmount: 250n,
+    competingCollateralAmount: 600n,
+    primaryFollowupQuoteAmount: 100n,
+    competingFollowupBorrowAmount: 75n
+  }
+] as const;
+const EXPERIMENTAL_COMPLEX_PREWINDOW_TARGETS = [750, 800, 850, 900] as const;
 const REPRESENTATIVE_LEND_AND_DUAL_FIXTURE_MANIFEST = {
   borrowedStepUpScenarios: [
     { initialQuoteAmount: 500n, borrowAmount: 400n, collateralAmount: 600n },
@@ -145,6 +189,23 @@ const REPRESENTATIVE_MULTI_CYCLE_BORROW_CONFIG = {
 } as const;
 const MAX_EXACT_DUAL_VALIDATIONS_WITH_PURE_MATCH = 1;
 const MAX_EXACT_DUAL_VALIDATIONS_WITHOUT_PURE_MATCH = 1;
+const AJNA_COLLATERALIZATION_FACTOR_WAD = 1_040_000_000_000_000_000n;
+const AJNA_FLOAT_STEP = 1.005;
+const EXPERIMENTAL_PREWINDOW_BUCKET_OFFSETS = [-250, -100, -50, -20, -10, -5, 0, 5, 10, 20, 50, 100, 250] as const;
+const EXPERIMENTAL_PREWINDOW_QUOTE_AMOUNTS = [1n, 2n, 5n, 10n, 20n, 50n, 100n, 200n, 500n, 1_000n] as const;
+const EXPERIMENTAL_PREWINDOW_MULTI_CYCLE_BUCKET_OFFSETS = [-1_000, -500, -250, -100, -50, -20, -10, -5, 0] as const;
+const EXPERIMENTAL_PREWINDOW_MULTI_CYCLE_QUOTE_AMOUNTS = [
+  10n,
+  20n,
+  50n,
+  100n,
+  200n,
+  500n,
+  1_000n,
+  2_000n,
+  5_000n,
+  10_000n
+] as const;
 
 function currentBaseForkProfile():
   | "smoke"
@@ -509,6 +570,73 @@ async function readCurrentRateBps(
   return Number((updatedRate * 10_000n) / 1_000_000_000_000_000_000n);
 }
 
+function wmul(left: bigint, right: bigint): bigint {
+  return (left * right + 500_000_000_000_000_000n) / 1_000_000_000_000_000_000n;
+}
+
+function wdiv(left: bigint, right: bigint): bigint {
+  if (right === 0n) {
+    return 0n;
+  }
+
+  return (left * 1_000_000_000_000_000_000n + right / 2n) / right;
+}
+
+function priceToFenwickIndex(priceWad: bigint): number {
+  const price = Number(priceWad) / 1e18;
+  const rawIndex = Math.log(price) / Math.log(AJNA_FLOAT_STEP);
+  const ceilIndex = Math.ceil(rawIndex);
+  const fenwickIndex =
+    rawIndex < 0 && ceilIndex - rawIndex > 0.5 ? 4157 - ceilIndex : 4156 - ceilIndex;
+
+  return Math.max(0, Math.min(7388, fenwickIndex));
+}
+
+async function readDwatpThresholdFenwickIndex(
+  publicClient: any,
+  poolAddress: `0x${string}`
+): Promise<number | undefined> {
+  const [[, , , rawT0Debt2ToCollateral], [rawInflator], rawTotalT0Debt, rawTotalT0DebtInAuction] =
+    await Promise.all([
+      publicClient.readContract({
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "debtInfo"
+      }),
+      publicClient.readContract({
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "inflatorInfo"
+      }),
+      publicClient.readContract({
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "totalT0Debt"
+      }),
+      publicClient.readContract({
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "totalT0DebtInAuction"
+      })
+    ]);
+  const inflator = BigInt(String(rawInflator));
+  const t0Debt2ToCollateral = BigInt(String(rawT0Debt2ToCollateral));
+  const totalT0Debt = BigInt(String(rawTotalT0Debt));
+  const totalT0DebtInAuction = BigInt(String(rawTotalT0DebtInAuction));
+
+  if (totalT0Debt <= totalT0DebtInAuction) {
+    return undefined;
+  }
+
+  const nonAuctionedT0Debt = totalT0Debt - totalT0DebtInAuction;
+  const dwatpWad = wdiv(
+    wmul(wmul(inflator, t0Debt2ToCollateral), AJNA_COLLATERALIZATION_FACTOR_WAD),
+    nonAuctionedT0Debt
+  );
+
+  return priceToFenwickIndex(dwatpWad);
+}
+
 async function advanceAndApplyEligibleUpdates(
   account: { address: `0x${string}` },
   publicClient: any,
@@ -556,6 +684,114 @@ async function advanceAndApplyEligibleUpdates(
   return {
     chainNow,
     currentRateBps: await readCurrentRateBps(publicClient, config.poolAddress)
+  };
+}
+
+async function findManualPreWindowLendMatch(
+  account: { address: `0x${string}` },
+  publicClient: any,
+  walletClient: any,
+  testClient: any,
+  matched: Awaited<ReturnType<typeof createDeterministicPreWindowLendForecastFixture>>,
+  options: {
+    bucketOffsets: readonly number[];
+    quoteAmounts: readonly bigint[];
+    updateCount: number;
+  }
+): Promise<{
+  passivePath: {
+    chainNow: number;
+    currentRateBps: number;
+  };
+  thresholdIndex: number | undefined;
+  observations: string[];
+  positiveMatch:
+    | {
+        bucketIndex: number;
+        amount: bigint;
+        resultingRateBps: number;
+      }
+    | undefined;
+}> {
+  const thresholdIndex = await readDwatpThresholdFenwickIndex(publicClient, matched.poolAddress);
+  const passiveBranchId = await testClient.snapshot();
+  const passivePath = await advanceAndApplyEligibleUpdates(
+    account,
+    publicClient,
+    walletClient,
+    testClient,
+    matched.config,
+    options.updateCount
+  );
+  await testClient.revert({ id: passiveBranchId });
+
+  const observations: string[] = [];
+  let positiveMatch:
+    | {
+        bucketIndex: number;
+        amount: bigint;
+        resultingRateBps: number;
+      }
+    | undefined;
+
+  for (const offset of options.bucketOffsets) {
+    const bucketIndex = Math.max(0, Math.min(7388, (thresholdIndex ?? 0) + offset));
+
+    for (const quoteAmount of options.quoteAmounts) {
+      const quoteAmountWad = quoteAmount * 10n ** 18n;
+      const branchId = await testClient.snapshot();
+
+      try {
+        const latestBlock = await publicClient.getBlock();
+        const hash = await walletClient.writeContract({
+          account,
+          chain: undefined,
+          address: matched.poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "addQuoteToken",
+          args: [quoteAmountWad, BigInt(bucketIndex), latestBlock.timestamp + 3600n]
+        });
+        await publicClient.waitForTransactionReceipt({ hash });
+
+        const activePath = await advanceAndApplyEligibleUpdates(
+          account,
+          publicClient,
+          walletClient,
+          testClient,
+          matched.config,
+          options.updateCount
+        );
+        observations.push(
+          `bucket=${bucketIndex} amount=${quoteAmount.toString()} rate=${activePath.currentRateBps}`
+        );
+
+        if (activePath.currentRateBps < passivePath.currentRateBps) {
+          positiveMatch = {
+            bucketIndex,
+            amount: quoteAmountWad,
+            resultingRateBps: activePath.currentRateBps
+          };
+          break;
+        }
+      } catch (error) {
+        observations.push(
+          `bucket=${bucketIndex} amount=${quoteAmount.toString()} error=${error instanceof Error ? error.message : String(error)}`
+        );
+      } finally {
+        await testClient.revert({ id: branchId });
+      }
+    }
+
+    if (positiveMatch) {
+      break;
+    }
+  }
+
+  return {
+    passivePath,
+    thresholdIndex,
+    observations,
+    positiveMatch
   };
 }
 
@@ -847,6 +1083,478 @@ async function createExistingBorrowerSameCycleFixture(
   await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
 
   return poolAddress;
+}
+
+async function createBorrowedStepUpFixture(
+  account: { address: `0x${string}` },
+  publicClient: any,
+  walletClient: any,
+  artifact: { abi: unknown[]; bytecode: `0x${string}` },
+  scenario: {
+    initialQuoteAmount: bigint;
+    borrowAmount: bigint;
+    collateralAmount: bigint;
+  },
+  labels: {
+    collateralName: string;
+    collateralSymbol: string;
+    quoteName: string;
+    quoteSymbol: string;
+  }
+): Promise<`0x${string}` | undefined> {
+  const collateralToken = await deployMockToken(
+    walletClient,
+    publicClient,
+    artifact,
+    labels.collateralName,
+    labels.collateralSymbol
+  );
+  const quoteToken = await deployMockToken(
+    walletClient,
+    publicClient,
+    artifact,
+    labels.quoteName,
+    labels.quoteSymbol
+  );
+
+  for (const tokenAddress of [collateralToken, quoteToken]) {
+    await mintToken(
+      walletClient,
+      publicClient,
+      artifact,
+      tokenAddress,
+      account.address,
+      1_000_000n * 10n ** 18n
+    );
+  }
+
+  const poolAddress = await deployPoolThroughFactory(
+    walletClient,
+    publicClient,
+    collateralToken,
+    quoteToken
+  );
+
+  await approveToken(
+    walletClient,
+    publicClient,
+    quoteToken,
+    poolAddress,
+    1_000_000n * 10n ** 18n,
+    artifact.abi
+  );
+  await approveToken(
+    walletClient,
+    publicClient,
+    collateralToken,
+    poolAddress,
+    5_000n * 10n ** 18n,
+    artifact.abi
+  );
+
+  const latestBlock = await publicClient.getBlock();
+  const initialQuoteAmount = scenario.initialQuoteAmount * 10n ** 18n;
+  const borrowAmount = scenario.borrowAmount * 10n ** 18n;
+  const collateralAmount = scenario.collateralAmount * 10n ** 18n;
+
+  try {
+    const addQuoteHash = await walletClient.writeContract({
+      account,
+      chain: undefined,
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "addQuoteToken",
+      args: [initialQuoteAmount, 3_000n, latestBlock.timestamp + 3600n]
+    });
+    await publicClient.waitForTransactionReceipt({ hash: addQuoteHash });
+
+    const drawDebtHash = await walletClient.writeContract({
+      account,
+      chain: undefined,
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "drawDebt",
+      args: [account.address, borrowAmount, 3_000n, collateralAmount]
+    });
+    await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
+  } catch {
+    return undefined;
+  }
+
+  return poolAddress;
+}
+
+async function createDeterministicPreWindowLendForecastFixture(
+  account: { address: `0x${string}` },
+  publicClient: any,
+  walletClient: any,
+  testClient: any,
+  artifact: { abi: unknown[]; bytecode: `0x${string}` }
+): Promise<{
+  poolAddress: `0x${string}`;
+  chainNow: number;
+  config: KeeperConfig;
+  snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+}> {
+  const failures: string[] = [];
+  for (const scenarioIndex of DETERMINISTIC_PREWINDOW_LEND_SCENARIO_INDEXES) {
+    const scenario =
+      REPRESENTATIVE_LEND_AND_DUAL_FIXTURE_MANIFEST.borrowedStepUpScenarios[scenarioIndex]!;
+    const poolAddress = await createBorrowedStepUpFixture(
+      account,
+      publicClient,
+      walletClient,
+      artifact,
+      scenario,
+      {
+        collateralName: `Deterministic Pre Position Collateral ${scenarioIndex}`,
+        collateralSymbol: `DPC${scenarioIndex}`,
+        quoteName: `Deterministic Pre Position Quote ${scenarioIndex}`,
+        quoteSymbol: `DPQ${scenarioIndex}`
+      }
+    );
+    if (!poolAddress) {
+      failures.push(`scenario ${scenarioIndex}: fixture creation failed`);
+      continue;
+    }
+
+    await testClient.increaseTime({
+      seconds: FORK_TIME_SKIP_SECONDS
+    });
+    await testClient.mine({
+      blocks: 1
+    });
+
+    let chainNow = Number((await publicClient.getBlock()).timestamp);
+    const config = resolveKeeperConfig({
+      chainId: 8453,
+      poolAddress,
+      poolId: `8453:${poolAddress.toLowerCase()}`,
+      rpcUrl: LOCAL_RPC_URL,
+      targetRateBps: 800,
+      toleranceBps: 50,
+      toleranceMode: "relative",
+      completionPolicy: "next_move_would_overshoot",
+      enableSimulationBackedLendSynthesis: false,
+      enableSimulationBackedBorrowSynthesis: false,
+      enableHeuristicLendSynthesis: false,
+      enableHeuristicBorrowSynthesis: false,
+      executionBufferBps: 0,
+      maxQuoteTokenExposure: "1000000000000000000000000",
+      maxBorrowExposure: "5000000000000000000000",
+      snapshotAgeMaxSeconds: 3600,
+      minTimeBeforeRateWindowSeconds: 120,
+      minExecutableActionQuoteToken: "1",
+      recheckBeforeSubmit: true
+    });
+
+    let snapshot = await new AjnaRpcSnapshotSource(config, {
+      publicClient,
+      now: () => chainNow
+    }).getSnapshot();
+
+    if (snapshot.predictedNextOutcome === "STEP_DOWN") {
+      const updateHash = await walletClient.writeContract({
+        account,
+        chain: undefined,
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "updateInterest"
+      });
+      await publicClient.waitForTransactionReceipt({ hash: updateHash });
+
+      chainNow = Number((await publicClient.getBlock()).timestamp);
+      snapshot = await new AjnaRpcSnapshotSource(config, {
+        publicClient,
+        now: () => chainNow
+      }).getSnapshot();
+    }
+
+    if (
+      snapshot.currentRateBps > config.targetRateBps &&
+      snapshot.secondsUntilNextRateUpdate > 0 &&
+      snapshot.predictedNextOutcome === "STEP_UP"
+    ) {
+      return {
+        poolAddress,
+        chainNow,
+        config,
+        snapshot
+      };
+    }
+
+    failures.push(
+      `scenario ${scenarioIndex}: currentRate=${snapshot.currentRateBps} secondsUntil=${snapshot.secondsUntilNextRateUpdate} next=${snapshot.predictedNextOutcome}`
+    );
+  }
+
+  throw new Error(
+    `deterministic pre-window fixture did not land on the expected not-due step-up state across saved scenarios: ${failures.join("; ")}`
+  );
+}
+
+async function createComplexOngoingPreWindowLendFixture(
+  account: { address: `0x${string}` },
+  publicClient: any,
+  walletClient: any,
+  testClient: any,
+  competing: ReturnType<typeof createClientsForPrivateKey>,
+  artifact: { abi: unknown[]; bytecode: `0x${string}` }
+): Promise<{
+  poolAddress: `0x${string}`;
+  chainNow: number;
+  config: KeeperConfig;
+  snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+  scenarioIndex: number;
+}> {
+  const failures: string[] = [];
+  await testClient.setBalance({
+    address: competing.account.address,
+    value: 10n ** 24n
+  });
+
+  for (const [scenarioIndex, scenario] of EXPERIMENTAL_COMPLEX_PREWINDOW_LEND_SCENARIOS.entries()) {
+    const collateralToken = await deployMockToken(
+      walletClient,
+      publicClient,
+      artifact,
+      `Complex Pre Position Collateral ${scenarioIndex}`,
+      `CPC${scenarioIndex}`
+    );
+    const quoteToken = await deployMockToken(
+      walletClient,
+      publicClient,
+      artifact,
+      `Complex Pre Position Quote ${scenarioIndex}`,
+      `CPQ${scenarioIndex}`
+    );
+
+    for (const tokenAddress of [collateralToken, quoteToken]) {
+      await mintToken(
+        walletClient,
+        publicClient,
+        artifact,
+        tokenAddress,
+        account.address,
+        1_000_000n * 10n ** 18n
+      );
+      await mintToken(
+        walletClient,
+        publicClient,
+        artifact,
+        tokenAddress,
+        competing.account.address,
+        1_000_000n * 10n ** 18n
+      );
+    }
+
+    const poolAddress = await deployPoolThroughFactory(
+      walletClient,
+      publicClient,
+      collateralToken,
+      quoteToken
+    );
+
+    for (const actorClients of [
+      { walletClient, publicClient },
+      { walletClient: competing.walletClient, publicClient: competing.publicClient }
+    ]) {
+      await approveToken(
+        actorClients.walletClient,
+        actorClients.publicClient,
+        quoteToken,
+        poolAddress,
+        1_000_000n * 10n ** 18n,
+        artifact.abi
+      );
+      await approveToken(
+        actorClients.walletClient,
+        actorClients.publicClient,
+        collateralToken,
+        poolAddress,
+        1_000_000n * 10n ** 18n,
+        artifact.abi
+      );
+    }
+
+    try {
+      const latestBlock = await publicClient.getBlock();
+      const addQuoteHash = await walletClient.writeContract({
+        account,
+        chain: undefined,
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "addQuoteToken",
+        args: [
+          scenario.initialQuoteAmount * 10n ** 18n,
+          3_000n,
+          latestBlock.timestamp + 3600n
+        ]
+      });
+      await publicClient.waitForTransactionReceipt({ hash: addQuoteHash });
+
+      const drawDebtHash = await walletClient.writeContract({
+        account,
+        chain: undefined,
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "drawDebt",
+        args: [
+          account.address,
+          scenario.initialBorrowAmount * 10n ** 18n,
+          3_000n,
+          scenario.initialCollateralAmount * 10n ** 18n
+        ]
+      });
+      await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
+    } catch {
+      failures.push(`scenario ${scenarioIndex}: initial primary positioning failed`);
+      continue;
+    }
+
+    await testClient.increaseTime({
+      seconds: FORK_TIME_SKIP_SECONDS
+    });
+    await testClient.mine({
+      blocks: 1
+    });
+
+    try {
+      const updateHash = await walletClient.writeContract({
+        account,
+        chain: undefined,
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "updateInterest"
+      });
+      await publicClient.waitForTransactionReceipt({ hash: updateHash });
+    } catch {
+      failures.push(`scenario ${scenarioIndex}: initial updateInterest failed`);
+      continue;
+    }
+
+    try {
+      const competingBlock = await competing.publicClient.getBlock();
+      const competingAddQuoteHash = await competing.walletClient.writeContract({
+        account: competing.account,
+        chain: undefined,
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "addQuoteToken",
+        args: [
+          scenario.competingQuoteAmount * 10n ** 18n,
+          3_000n,
+          competingBlock.timestamp + 3600n
+        ]
+      });
+      await competing.publicClient.waitForTransactionReceipt({ hash: competingAddQuoteHash });
+
+      const competingDrawDebtHash = await competing.walletClient.writeContract({
+        account: competing.account,
+        chain: undefined,
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "drawDebt",
+        args: [
+          competing.account.address,
+          scenario.competingBorrowAmount * 10n ** 18n,
+          3_000n,
+          scenario.competingCollateralAmount * 10n ** 18n
+        ]
+      });
+      await competing.publicClient.waitForTransactionReceipt({ hash: competingDrawDebtHash });
+
+      if (scenario.primaryFollowupQuoteAmount > 0n) {
+        const primaryBlock = await publicClient.getBlock();
+        const primaryFollowupQuoteHash = await walletClient.writeContract({
+          account,
+          chain: undefined,
+          address: poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "addQuoteToken",
+          args: [
+            scenario.primaryFollowupQuoteAmount * 10n ** 18n,
+            3_000n,
+            primaryBlock.timestamp + 3600n
+          ]
+        });
+        await publicClient.waitForTransactionReceipt({ hash: primaryFollowupQuoteHash });
+      }
+
+      if (scenario.competingFollowupBorrowAmount > 0n) {
+        const competingFollowupBorrowHash = await competing.walletClient.writeContract({
+          account: competing.account,
+          chain: undefined,
+          address: poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "drawDebt",
+          args: [
+            competing.account.address,
+            scenario.competingFollowupBorrowAmount * 10n ** 18n,
+            3_000n,
+            scenario.competingCollateralAmount * 10n ** 18n
+          ]
+        });
+        await competing.publicClient.waitForTransactionReceipt({
+          hash: competingFollowupBorrowHash
+        });
+      }
+    } catch {
+      failures.push(`scenario ${scenarioIndex}: not-due competing positioning failed`);
+      continue;
+    }
+
+    const chainNow = Number((await publicClient.getBlock()).timestamp);
+    for (const targetRateBps of EXPERIMENTAL_COMPLEX_PREWINDOW_TARGETS) {
+      const config = resolveKeeperConfig({
+        chainId: 8453,
+        poolAddress,
+        poolId: `8453:${poolAddress.toLowerCase()}`,
+        rpcUrl: LOCAL_RPC_URL,
+        targetRateBps,
+        toleranceBps: 50,
+        toleranceMode: "relative",
+        completionPolicy: "next_move_would_overshoot",
+        enableSimulationBackedLendSynthesis: false,
+        enableSimulationBackedBorrowSynthesis: false,
+        enableHeuristicLendSynthesis: false,
+        enableHeuristicBorrowSynthesis: false,
+        executionBufferBps: 0,
+        maxQuoteTokenExposure: "1000000000000000000000000",
+        maxBorrowExposure: "5000000000000000000000",
+        snapshotAgeMaxSeconds: 3600,
+        minTimeBeforeRateWindowSeconds: 120,
+        minExecutableActionQuoteToken: "1",
+        recheckBeforeSubmit: true
+      });
+      const snapshot = await new AjnaRpcSnapshotSource(config, {
+        publicClient,
+        now: () => chainNow
+      }).getSnapshot();
+
+      if (
+        snapshot.currentRateBps > config.targetRateBps &&
+        snapshot.secondsUntilNextRateUpdate > 0 &&
+        snapshot.predictedNextOutcome === "STEP_UP"
+      ) {
+        return {
+          poolAddress,
+          chainNow,
+          config,
+          snapshot,
+          scenarioIndex
+        };
+      }
+
+      failures.push(
+        `scenario ${scenarioIndex}/target ${targetRateBps}: currentRate=${snapshot.currentRateBps} secondsUntil=${snapshot.secondsUntilNextRateUpdate} next=${snapshot.predictedNextOutcome}`
+      );
+    }
+  }
+
+  throw new Error(
+    `complex multi-actor pre-window fixture did not land on the expected not-due step-up state across saved scenarios: ${failures.join("; ")}`
+  );
 }
 
 async function moveToFirstBorrowLookaheadState(
@@ -2476,169 +3184,19 @@ describeIf("Base factory fork integration", () => {
     240_000
   );
 
-  itBaseSlow(
-    "forecasts the next-cycle rate from a post-update state and does not yet surface an exact pre-window lend plan before the next window",
+  itBaseExperimental(
+    "forecasts the next-cycle rate from a post-update state and does not yet surface an exact next-update pre-window lend plan before the next window",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
       const artifact = await ensureMockArtifact();
       process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
-
-      let matched:
-        | {
-            poolAddress: `0x${string}`;
-            chainNow: number;
-            snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
-          }
-        | undefined;
-
-      for (const [index, scenario] of REPRESENTATIVE_LEND_AND_DUAL_FIXTURE_MANIFEST.borrowedStepUpScenarios.entries()) {
-        const collateralToken = await deployMockToken(
-          walletClient,
-          publicClient,
-          artifact,
-          `Pre Position Collateral ${index}`,
-          `PPC${index}`
-        );
-        const quoteToken = await deployMockToken(
-          walletClient,
-          publicClient,
-          artifact,
-          `Pre Position Quote ${index}`,
-          `PPQ${index}`
-        );
-
-        for (const tokenAddress of [collateralToken, quoteToken]) {
-          await mintToken(
-            walletClient,
-            publicClient,
-            artifact,
-            tokenAddress,
-            account.address,
-            1_000_000n * 10n ** 18n
-          );
-        }
-
-        const poolAddress = await deployPoolThroughFactory(
-          walletClient,
-          publicClient,
-          collateralToken,
-          quoteToken
-        );
-
-        await approveToken(
-          walletClient,
-          publicClient,
-          quoteToken,
-          poolAddress,
-          1_000_000n * 10n ** 18n,
-          artifact.abi
-        );
-        await approveToken(
-          walletClient,
-          publicClient,
-          collateralToken,
-          poolAddress,
-          5_000n * 10n ** 18n,
-          artifact.abi
-        );
-
-        const latestBlock = await publicClient.getBlock();
-        const initialQuoteAmount = scenario.initialQuoteAmount * 10n ** 18n;
-        const borrowAmount = scenario.borrowAmount * 10n ** 18n;
-        const collateralAmount = scenario.collateralAmount * 10n ** 18n;
-
-        try {
-          const addQuoteHash = await walletClient.writeContract({
-            account,
-            chain: undefined,
-            address: poolAddress,
-            abi: ajnaPoolAbi,
-            functionName: "addQuoteToken",
-            args: [initialQuoteAmount, 3_000n, latestBlock.timestamp + 3600n]
-          });
-          await publicClient.waitForTransactionReceipt({ hash: addQuoteHash });
-
-          const drawDebtHash = await walletClient.writeContract({
-            account,
-            chain: undefined,
-            address: poolAddress,
-            abi: ajnaPoolAbi,
-            functionName: "drawDebt",
-            args: [account.address, borrowAmount, 3_000n, collateralAmount]
-          });
-          await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
-        } catch {
-          continue;
-        }
-
-        await testClient.increaseTime({
-          seconds: FORK_TIME_SKIP_SECONDS
-        });
-        await testClient.mine({
-          blocks: 1
-        });
-
-        let chainNow = Number((await publicClient.getBlock()).timestamp);
-        const config = resolveKeeperConfig({
-          chainId: 8453,
-          poolAddress,
-          poolId: `8453:${poolAddress.toLowerCase()}`,
-          rpcUrl: LOCAL_RPC_URL,
-          targetRateBps: 800,
-          toleranceBps: 50,
-          toleranceMode: "relative",
-          completionPolicy: "next_move_would_overshoot",
-          executionBufferBps: 0,
-          maxQuoteTokenExposure: "1000000000000000000000000",
-          maxBorrowExposure: "5000000000000000000000",
-          snapshotAgeMaxSeconds: 3600,
-          minTimeBeforeRateWindowSeconds: 120,
-          minExecutableActionQuoteToken: "1",
-          recheckBeforeSubmit: true,
-          addQuoteBucketIndex: 3000,
-          addQuoteExpirySeconds: 3600,
-          enableSimulationBackedLendSynthesis: true,
-          simulationSenderAddress: account.address
-        });
-        let snapshot = await new AjnaRpcSnapshotSource(config, {
-          publicClient,
-          now: () => chainNow
-        }).getSnapshot();
-
-        if (snapshot.predictedNextOutcome === "STEP_DOWN") {
-          const updateHash = await walletClient.writeContract({
-            account,
-            chain: undefined,
-            address: poolAddress,
-            abi: ajnaPoolAbi,
-            functionName: "updateInterest"
-          });
-          await publicClient.waitForTransactionReceipt({ hash: updateHash });
-
-          chainNow = Number((await publicClient.getBlock()).timestamp);
-          snapshot = await new AjnaRpcSnapshotSource(config, {
-            publicClient,
-            now: () => chainNow
-          }).getSnapshot();
-        }
-
-        if (
-          snapshot.currentRateBps > config.targetRateBps &&
-          snapshot.secondsUntilNextRateUpdate > 0 &&
-          snapshot.predictedNextOutcome === "STEP_UP"
-        ) {
-          matched = {
-            poolAddress,
-            chainNow,
-            snapshot
-          };
-          break;
-        }
-      }
-
-      if (!matched) {
-        throw new Error("failed to find a post-update not-due step-up forecast scenario");
-      }
+      const matched = await createDeterministicPreWindowLendForecastFixture(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        artifact
+      );
 
       const exactConfig = resolveKeeperConfig({
         chainId: 8453,
@@ -2656,7 +3214,6 @@ describeIf("Base factory fork integration", () => {
         minTimeBeforeRateWindowSeconds: 120,
         minExecutableActionQuoteToken: "1",
         recheckBeforeSubmit: true,
-        addQuoteBucketIndex: STEERING_BUCKET_CANDIDATES[0],
         addQuoteExpirySeconds: 3600,
         enableSimulationBackedLendSynthesis: true,
         simulationSenderAddress: account.address
@@ -2685,6 +3242,193 @@ describeIf("Base factory fork integration", () => {
 
       const updatedRateBps = await readCurrentRateBps(publicClient, matched.poolAddress);
       expect(updatedRateBps).toBe(matched.snapshot.predictedNextRateBps);
+    },
+    240_000
+  );
+
+  itBaseSlow(
+    "does not surface a heuristic pre-window lend plan from the deterministic not-due step-up fixture",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const matched = await createDeterministicPreWindowLendForecastFixture(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        artifact
+      );
+      const heuristicConfig = resolveKeeperConfig({
+        ...matched.config,
+        enableHeuristicLendSynthesis: true
+      });
+      const heuristicSnapshot = await new AjnaRpcSnapshotSource(heuristicConfig, {
+        publicClient,
+        now: () => matched.chainNow
+      }).getSnapshot();
+      expect(heuristicSnapshot.candidates.some((candidate) => candidate.intent === "LEND")).toBe(
+        false
+      );
+      expect(
+        heuristicSnapshot.candidates.some((candidate) => candidate.intent === "LEND_AND_BORROW")
+      ).toBe(false);
+    },
+    120_000
+  );
+
+  itBaseExperimental(
+    "does not surface pre-window lend plans across representative complex ongoing multi-actor fixtures",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const competing = createClientsForPrivateKey(COMPETING_ANVIL_PRIVATE_KEY);
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const matched = await createComplexOngoingPreWindowLendFixture(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        competing,
+        artifact
+      );
+
+      const exactConfig = resolveKeeperConfig({
+        ...matched.config,
+        enableSimulationBackedLendSynthesis: true
+      });
+      const exactSnapshot = await new AjnaRpcSnapshotSource(exactConfig, {
+        publicClient,
+        now: () => matched.chainNow
+      }).getSnapshot();
+      expect(exactSnapshot.candidates.some((candidate) => candidate.intent === "LEND")).toBe(false);
+      expect(
+        exactSnapshot.candidates.some((candidate) => candidate.intent === "LEND_AND_BORROW")
+      ).toBe(false);
+
+      const heuristicConfig = resolveKeeperConfig({
+        ...matched.config,
+        enableHeuristicLendSynthesis: true
+      });
+      const heuristicSnapshot = await new AjnaRpcSnapshotSource(heuristicConfig, {
+        publicClient,
+        now: () => matched.chainNow
+      }).getSnapshot();
+      expect(
+        heuristicSnapshot.candidates.some((candidate) => candidate.intent === "LEND")
+      ).toBe(false);
+      expect(
+        heuristicSnapshot.candidates.some((candidate) => candidate.intent === "LEND_AND_BORROW")
+      ).toBe(false);
+    },
+    240_000
+  );
+
+  itBaseExperimental(
+    "does not yet find a positive next-update manual pre-window lend near the DWATP threshold in the deterministic fixture",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const matched = await createDeterministicPreWindowLendForecastFixture(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        artifact
+      );
+      const { passivePath, thresholdIndex, observations, positiveMatch } =
+        await findManualPreWindowLendMatch(
+          account,
+          publicClient,
+          walletClient,
+          testClient,
+          matched,
+          {
+            bucketOffsets: EXPERIMENTAL_PREWINDOW_BUCKET_OFFSETS,
+            quoteAmounts: EXPERIMENTAL_PREWINDOW_QUOTE_AMOUNTS,
+            updateCount: 1
+          }
+        );
+
+      expect(thresholdIndex).toBeDefined();
+
+      expect(
+        positiveMatch,
+        `no positive pre-window lend match near dwatpIndex=${thresholdIndex}; passiveRate=${passivePath.currentRateBps}; observations=${observations.join(" | ")}`
+      ).toBeUndefined();
+    },
+    240_000
+  );
+
+  itBaseExperimental(
+    "searches for a multi-cycle manual pre-window lend improvement near the DWATP threshold in the deterministic fixture",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const matched = await createDeterministicPreWindowLendForecastFixture(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        artifact
+      );
+
+      const { passivePath, thresholdIndex, observations, positiveMatch } =
+        await findManualPreWindowLendMatch(
+          account,
+          publicClient,
+          walletClient,
+          testClient,
+          matched,
+          {
+            bucketOffsets: EXPERIMENTAL_PREWINDOW_MULTI_CYCLE_BUCKET_OFFSETS,
+            quoteAmounts: EXPERIMENTAL_PREWINDOW_MULTI_CYCLE_QUOTE_AMOUNTS,
+            updateCount: 2
+          }
+        );
+
+      expect(thresholdIndex).toBeDefined();
+      expect(
+        positiveMatch,
+        `no multi-cycle pre-window lend improvement near dwatpIndex=${thresholdIndex}; passiveRate=${passivePath.currentRateBps}; observations=${observations.join(" | ")}`
+      ).toBeDefined();
+    },
+    240_000
+  );
+
+  itBaseExperimental(
+    "does not yet surface an exact pre-window lend plan from the deterministic fixture with threshold-aware buckets",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const matched = await createDeterministicPreWindowLendForecastFixture(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        artifact
+      );
+
+      const exactConfig = resolveKeeperConfig({
+        ...matched.config,
+        enableSimulationBackedLendSynthesis: true,
+        simulationSenderAddress: account.address
+      });
+      const exactSnapshot = await new AjnaRpcSnapshotSource(exactConfig, {
+        publicClient,
+        now: () => matched.chainNow
+      }).getSnapshot();
+      const lendCandidate = exactSnapshot.candidates.find((candidate) => candidate.intent === "LEND");
+
+      expect(lendCandidate).toBeUndefined();
     },
     240_000
   );

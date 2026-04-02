@@ -743,6 +743,42 @@ describe("synthesizeAjnaHeuristicCandidates", () => {
       false
     );
   });
+
+  it("suppresses heuristic lend and dual candidates when pre-window lend is disabled", () => {
+    const config: KeeperConfig = {
+      ...baseConfig,
+      targetRateBps: 800,
+      enableHeuristicLendSynthesis: true,
+      enableHeuristicBorrowSynthesis: false,
+      drawDebtLimitIndex: 3000
+    };
+    const state = {
+      currentRateWad: 100_000_000_000_000_000n,
+      currentDebtWad: 1_000n,
+      debtEmaWad: 1_250_000_000_000_000_000n,
+      depositEmaWad: 1_000_000_000_000_000_000n,
+      debtColEmaWad: 100_000_000_000_000_000n,
+      lupt0DebtEmaWad: WAD,
+      lastInterestRateUpdateTimestamp: 0,
+      nowTimestamp: 50_000
+    } as const;
+
+    const allowedCandidates = synthesizeAjnaHeuristicCandidates(state, config, {
+      quoteTokenScale: 1n,
+      nowTimestamp: state.nowTimestamp
+    });
+    const blockedCandidates = synthesizeAjnaHeuristicCandidates(state, config, {
+      quoteTokenScale: 1n,
+      nowTimestamp: state.nowTimestamp,
+      allowPreWindowLend: false
+    });
+
+    expect(allowedCandidates.some((candidate) => candidate.intent === "LEND")).toBe(true);
+    expect(blockedCandidates.some((candidate) => candidate.intent === "LEND")).toBe(false);
+    expect(blockedCandidates.some((candidate) => candidate.intent === "LEND_AND_BORROW")).toBe(
+      false
+    );
+  });
 });
 
 describe("synthesizeAjnaLendAndBorrowCandidate", () => {
