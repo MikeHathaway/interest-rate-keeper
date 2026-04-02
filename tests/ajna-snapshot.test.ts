@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyAjnaNextRate,
   forecastAjnaNextEligibleRate,
+  resolveAjnaSynthesisPolicy,
   resolveSimulationBorrowCollateralAmounts,
   resolveBorrowSimulationLookaheadAttempts,
   resolveSimulationBorrowLimitIndexes,
@@ -101,6 +102,55 @@ describe("classifyAjnaNextRate", () => {
 
     expect(prediction.predictedOutcome).toBe("STEP_UP");
     expect(prediction.predictedNextRateBps).toBe(1100);
+  });
+});
+
+describe("resolveAjnaSynthesisPolicy", () => {
+  it("auto-enables exact plus heuristic synthesis when a simulation sender is available", () => {
+    const policy = resolveAjnaSynthesisPolicy(
+      {
+        ...baseConfig,
+        simulationSenderAddress: "0x2222222222222222222222222222222222222222"
+      },
+      {}
+    );
+
+    expect(policy).toEqual({
+      simulationLend: true,
+      simulationBorrow: true,
+      heuristicLend: true,
+      heuristicBorrow: true
+    });
+  });
+
+  it("falls back to heuristics when no simulation sender is available", () => {
+    const policy = resolveAjnaSynthesisPolicy(baseConfig, {});
+
+    expect(policy).toEqual({
+      simulationLend: false,
+      simulationBorrow: false,
+      heuristicLend: true,
+      heuristicBorrow: true
+    });
+  });
+
+  it("respects explicit synthesis flags when provided", () => {
+    const policy = resolveAjnaSynthesisPolicy(
+      {
+        ...baseConfig,
+        enableSimulationBackedBorrowSynthesis: true,
+        enableHeuristicBorrowSynthesis: true,
+        enableHeuristicLendSynthesis: false
+      },
+      {}
+    );
+
+    expect(policy).toEqual({
+      simulationLend: false,
+      simulationBorrow: true,
+      heuristicLend: false,
+      heuristicBorrow: true
+    });
   });
 });
 

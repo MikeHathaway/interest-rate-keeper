@@ -8,14 +8,31 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     permissions:
       contents: write
       id-token: write
+    env:
+      BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Check Base RPC configuration
+        id: base-rpc
+        shell: bash
+        run: |
+          if [ -n "${BASE_RPC_URL}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "BASE_RPC_URL is not configured; skipping Base slow profile."
+          fi
+
+      - name: Install Foundry
+        if: steps.base-rpc.outputs.enabled == 'true'
+        uses: foundry-rs/foundry-toolchain@v1
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -29,6 +46,10 @@ jobs:
 
       - name: Verify
         run: npm run verify
+
+      - name: Run Base slow profile
+        if: steps.base-rpc.outputs.enabled == 'true'
+        run: npm run test:integration:base:slow
 
       - name: Publish package
         env:

@@ -224,7 +224,7 @@ describe("keeperhub", () => {
           toleranceBps: 1000,
           toleranceMode: "relative",
           completionPolicy: "next_move_would_overshoot",
-          executionBufferBps: 0,
+          executionBufferBps: 50,
           maxQuoteTokenExposure: "1000",
           maxBorrowExposure: "1000",
           snapshotAgeMaxSeconds: 90,
@@ -276,9 +276,9 @@ describe("keeperhub", () => {
     };
 
     expect(formatted.capital).toEqual({
-      quoteTokenDelta: "50",
+      quoteTokenDelta: "51",
       additionalCollateralRequired: "25",
-      netQuoteBorrowed: "50",
+      netQuoteBorrowed: "51",
       operatorCapitalRequired: "25",
       operatorCapitalAtRisk: "25"
     });

@@ -29,7 +29,7 @@ jobs:
 
   base-fork-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
 
@@ -66,3 +66,7 @@ jobs:
       - name: Run Base smoke profile
         if: steps.base-rpc.outputs.enabled == 'true'
         run: npm run test:integration:base:smoke
+
+      - name: Run Base default profile
+        if: steps.base-rpc.outputs.enabled == 'true'
+        run: npm run test:integration:base

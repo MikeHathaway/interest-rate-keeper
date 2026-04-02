@@ -42,25 +42,6 @@
 **Priority:** P3
 **Depends on:** Stable action-plan schema, direct executor backend, and a fully tested sequential-execution baseline
 
-## Borrower Strategy
-
-### Internal Borrower Policy Ladder
-
-**What:** Encode upward rate steering as an internal policy ladder instead of exposing borrower strategy choice to operators.
-
-**Why:** The current fork evidence is now strong enough to support a product conclusion: exact same-cycle borrower steering remains negative across brand-new pools, true existing-borrower pools, and deliberately borrower-heavy existing-loan fixtures, while representative multi-cycle borrower steering is positively proven.
-
-**Context:** This should likely become the primary documented upward-convergence mode for v1/v1.1. Concretely, that means:
-- keep the user-facing config simple: target rate/band plus limits
-- have the engine try exact same-cycle borrower steering only when it is actually supported by evidence for the current state
-- otherwise fall back automatically to exact multi-cycle borrower steering
-- keep heuristic same-cycle `BORROW` as exploratory recommendation support, not required operator configuration
-- avoid over-investing in near-global same-cycle exact search unless a real positive borrower-side fixture appears
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** Current exact multi-cycle borrower path, experimental borrower-side evidence, and clear docs around internal policy selection
-
 ## Review Follow-Ups
 
 ### External Local Anvil Cleanliness Contract
@@ -78,3 +59,4 @@
 ## Completed
 
 - Release and CI automation: package metadata, lint/verify scripts, GitHub Actions CI, and publish-on-tag workflow are now in place.
+- Internal borrower policy ladder: the live snapshot source now auto-attempts exact borrower synthesis, falls back to exact multi-cycle borrower planning, and only then uses heuristic borrower guidance when flags are left unset.

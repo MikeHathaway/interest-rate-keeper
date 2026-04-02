@@ -1,4 +1,7 @@
-import { derivePlanCandidateCapitalMetrics } from "./candidate-metrics.js";
+import {
+  derivePlanCandidateCapitalMetrics,
+  resolveCandidateCapitalMetrics
+} from "./candidate-metrics.js";
 import {
   type CyclePlan,
   type ExecutionStep,
@@ -23,17 +26,11 @@ const ZERO_PLAN_CAPITAL = {
 } as const;
 
 function resolveCandidateCapital(candidate: PlanCandidate) {
-  const derived = derivePlanCandidateCapitalMetrics(candidate.minimumExecutionSteps);
+  return resolveCandidateCapitalMetrics(candidate);
+}
 
-  return {
-    quoteTokenDelta: candidate.quoteTokenDelta,
-    additionalCollateralRequired:
-      candidate.additionalCollateralRequired ?? derived.additionalCollateralRequired,
-    netQuoteBorrowed: candidate.netQuoteBorrowed ?? derived.netQuoteBorrowed,
-    operatorCapitalRequired:
-      candidate.operatorCapitalRequired ?? derived.operatorCapitalRequired,
-    operatorCapitalAtRisk: candidate.operatorCapitalAtRisk ?? derived.operatorCapitalAtRisk
-  };
+function resolvePlanCapital(steps: ExecutionStep[]) {
+  return derivePlanCandidateCapitalMetrics(steps);
 }
 
 function calculateRelativeTolerance(targetRateBps: number, toleranceBps: number): number {
@@ -184,6 +181,8 @@ function chooseBestCandidate(
   return candidates
     .slice()
     .sort((left, right) => {
+      const leftCapital = resolveCandidateCapital(left);
+      const rightCapital = resolveCandidateCapital(right);
       const leftInBand = isRateInBand(
         left.planningRateBps ?? left.predictedRateBpsAfterNextUpdate,
         band
@@ -208,8 +207,25 @@ function chooseBestCandidate(
         return left.minimumExecutionSteps.length - right.minimumExecutionSteps.length;
       }
 
-      if (left.quoteTokenDelta !== right.quoteTokenDelta) {
-        return left.quoteTokenDelta < right.quoteTokenDelta ? -1 : 1;
+      if (leftCapital.operatorCapitalRequired !== rightCapital.operatorCapitalRequired) {
+        return leftCapital.operatorCapitalRequired < rightCapital.operatorCapitalRequired ? -1 : 1;
+      }
+
+      if (leftCapital.operatorCapitalAtRisk !== rightCapital.operatorCapitalAtRisk) {
+        return leftCapital.operatorCapitalAtRisk < rightCapital.operatorCapitalAtRisk ? -1 : 1;
+      }
+
+      if (
+        leftCapital.additionalCollateralRequired !== rightCapital.additionalCollateralRequired
+      ) {
+        return leftCapital.additionalCollateralRequired <
+          rightCapital.additionalCollateralRequired
+          ? -1
+          : 1;
+      }
+
+      if (leftCapital.quoteTokenDelta !== rightCapital.quoteTokenDelta) {
+        return leftCapital.quoteTokenDelta < rightCapital.quoteTokenDelta ? -1 : 1;
       }
 
       return left.id.localeCompare(right.id);
@@ -236,17 +252,18 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
   );
   const selected = chooseBestCandidate(viableCandidates, targetBand);
   if (selected) {
-    const capital = resolveCandidateCapital(selected);
+    const requiredSteps = maybeAppendUpdateInterest(
+      selected.minimumExecutionSteps.map((step) => withExecutionBuffer(step, config)),
+      snapshot
+    );
+    const capital = resolvePlanCapital(requiredSteps);
 
     return {
       intent: selected.intent,
       reason: selected.explanation,
       targetBand,
       selectedCandidateId: selected.id,
-      requiredSteps: maybeAppendUpdateInterest(
-        selected.minimumExecutionSteps.map((step) => withExecutionBuffer(step, config)),
-        snapshot
-      ),
+      requiredSteps,
       predictedOutcomeAfterPlan: selected.predictedOutcome,
       predictedRateBpsAfterNextUpdate: selected.predictedRateBpsAfterNextUpdate,
       ...capital

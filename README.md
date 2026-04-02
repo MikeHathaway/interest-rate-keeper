@@ -15,16 +15,16 @@ The detailed product and engineering decisions are in [DESIGN.md](./DESIGN.md). 
 
 This is still an early implementation. The core keeper loop exists and the live Ajna path is wired, but fully automatic steering is still incomplete:
 
-- exact simulation-backed `ADD_QUOTE` synthesis now exists behind `enableSimulationBackedLendSynthesis`
-- exact simulation-backed `DRAW_DEBT` synthesis now exists behind `enableSimulationBackedBorrowSynthesis`
-- exact simulation-backed `LEND_AND_BORROW` synthesis now exists when both exact lend and borrow synthesis are enabled
-- heuristic `ADD_QUOTE` synthesis still exists behind `enableHeuristicLendSynthesis`
-- heuristic `DRAW_DEBT` synthesis now exists behind `enableHeuristicBorrowSynthesis`
+- exact simulation-backed `ADD_QUOTE` synthesis now exists and is auto-attempted in live snapshots when runtime simulation prerequisites are available, unless explicit flags override that behavior
+- exact simulation-backed `DRAW_DEBT` synthesis now exists and is auto-attempted in live snapshots when runtime simulation prerequisites are available, unless explicit flags override that behavior
+- exact simulation-backed `LEND_AND_BORROW` synthesis now exists when both exact lend and borrow synthesis are enabled by that internal policy or by explicit flags
+- heuristic `ADD_QUOTE` synthesis still exists and now acts as the default exploratory fallback when explicit flags are unset and no exact lend candidate surfaced
+- heuristic `DRAW_DEBT` synthesis now exists and acts as the default exploratory fallback when explicit flags are unset and no exact borrower candidate surfaced
 - heuristic `LEND_AND_BORROW` synthesis now exists for the narrow case where adding quote tempers an oversized borrow path toward the target band
 
 Today, the snapshot builder reads real pool state and predicts the next Ajna rate move. For steering candidates:
 
-- `manualCandidates` are still the general bridge for live steering plans
+- `manualCandidates` are now an optional override/fallback bridge for live steering plans rather than the default live path
 - `manualCandidates` can now carry `planningRateBps` and `planningLookaheadUpdates`, so manually supplied multi-cycle plans are ranked correctly
 - candidates now expose derived capital metrics from their execution steps: `additionalCollateralRequired`, `netQuoteBorrowed`, `operatorCapitalRequired`, and `operatorCapitalAtRisk`
 - live Ajna snapshots now bind `manualCandidates` to snapshot-specific validation signatures that include pool, borrower, loan, and referenced-bucket context, so recheck can invalidate stale manual plans before execution
@@ -35,6 +35,7 @@ Today, the snapshot builder reads real pool state and predicts the next Ajna rat
 - heuristic `DRAW_DEBT` synthesis now provides exploratory upward-steering candidates when exact same-cycle borrow remains too conservative
 - heuristic `LEND_AND_BORROW` synthesis is deliberately narrow: it looks for `ADD_QUOTE -> DRAW_DEBT` plans that soften a borrow overshoot rather than trying to solve a full two-dimensional optimizer
 - when `borrowSimulationLookaheadUpdates` is unset, the live exact borrower path now tries one-update exact borrow first, then falls back to the default 3-update exact borrow path
+- when synthesis flags are unset, the live snapshot source now follows an internal ladder: attempt exact same-cycle borrower steering, fall back to exact multi-cycle borrower steering, then surface heuristic borrower guidance if exact search still cannot produce a candidate
 - snapshot `predictedNextOutcome` / `predictedNextRateBps` now describe the next eligible Ajna rate update, even when that update is not due yet
 - candidate usefulness is now judged against the do-nothing next update path, not just against the current rate, so the planner can prefer neutralizing a bad upcoming move over letting the pool drift farther away
 
@@ -67,6 +68,7 @@ This is the "new pool should move up faster than passive updates would allow" ca
 What is proven today:
 - representative multi-cycle `BORROW` planning and live execution
 - the live exact borrower path now automatically attempts a multi-cycle fallback when same-cycle exact borrow is unavailable and no explicit lookahead is configured
+- the live snapshot source now encodes that borrower policy internally when synthesis flags are unset, instead of requiring operators to choose a borrower strategy
 
 What is not proven today:
 - exact same-cycle borrower-side steering
@@ -166,8 +168,8 @@ Notes:
 
 ## CI/CD
 
-- [ci.yml](./.github/workflows/ci.yml) runs `npm run verify` on every push/PR and runs the Base smoke profile when `BASE_RPC_URL` is available as a GitHub secret.
-- [publish.yml](./.github/workflows/publish.yml) runs on `v*` tags, reruns `npm run verify`, publishes to npm using `NPM_TOKEN`, and creates a GitHub release.
+- [ci.yml](./.github/workflows/ci.yml) runs `npm run verify` on every push/PR and, when `BASE_RPC_URL` is available as a GitHub secret, runs both the Base smoke and routine default fork profiles.
+- [publish.yml](./.github/workflows/publish.yml) runs on `v*` tags, reruns `npm run verify`, conditionally runs the routine Base slow fork profile when `BASE_RPC_URL` is available, publishes to npm using `NPM_TOKEN`, and creates a GitHub release.
 - `npm pack --dry-run` now produces a clean package containing the built CLI/library artifacts from `dist/src`.
 
 ## Env Files
@@ -295,6 +297,8 @@ Optional live-execution fields:
 - `enableHeuristicLendSynthesis`
 - `enableHeuristicBorrowSynthesis`
 
+The synthesis flags are now best thought of as explicit overrides. When they are left unset, the live Ajna snapshot source auto-selects a default internal synthesis policy from the available runtime context.
+
 ## Live Execution Notes
 
 The live executor currently:
@@ -346,8 +350,8 @@ npm run test:integration:base
 
 ## Current Limitations
 
-- The planner does not yet synthesize the minimum directional threshold directly from live Ajna pool state.
-- `manualCandidates` are still the bridge for live steering plans.
+- The planner does not yet synthesize the minimum directional threshold directly from live Ajna pool state across every keeper mode.
+- `manualCandidates` remain an optional fallback for unsupported or operator-specified live steering plans.
 - live snapshots now attach validation signatures to `manualCandidates`, so recheck can invalidate them when pool, borrower, loan, or referenced-bucket context drifts before execution.
 - Exact simulation-backed lend synthesis is opt-in and currently limited to due-window representative lend fixtures.
 - Exact simulation-backed borrow synthesis is opt-in and now supports multi-cycle planning through `borrowSimulationLookaheadUpdates`, with representative Base-fork coverage for a live-executed 3-update borrower path. When `borrowSimulationLookaheadUpdates` is unset, the live snapshot source tries `[1, 3]` exact borrow planning in that order.

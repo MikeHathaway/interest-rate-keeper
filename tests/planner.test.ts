@@ -111,11 +111,11 @@ describe("planCycle", () => {
 
     expect(plan.intent).toBe("LEND_AND_BORROW");
     expect(plan.requiredSteps).toHaveLength(2);
-    expect(plan.quoteTokenDelta).toBe(150n);
+    expect(plan.quoteTokenDelta).toBe(152n);
     expect(plan.additionalCollateralRequired).toBe(0n);
     expect(plan.netQuoteBorrowed).toBe(-50n);
-    expect(plan.operatorCapitalRequired).toBe(100n);
-    expect(plan.operatorCapitalAtRisk).toBe(100n);
+    expect(plan.operatorCapitalRequired).toBe(101n);
+    expect(plan.operatorCapitalAtRisk).toBe(101n);
     expect(plan.requiredSteps[0]).toMatchObject({
       type: "ADD_QUOTE",
       amount: 101n
@@ -309,8 +309,55 @@ describe("planCycle", () => {
     expect(plan.intent).toBe("BORROW");
     expect(plan.reason).toMatch(/3-update path/);
     expect(plan.additionalCollateralRequired).toBe(10n);
-    expect(plan.netQuoteBorrowed).toBe(5n);
+    expect(plan.netQuoteBorrowed).toBe(6n);
     expect(plan.operatorCapitalRequired).toBe(10n);
     expect(plan.operatorCapitalAtRisk).toBe(10n);
+  });
+
+  it("prefers lower operator capital over a smaller quote delta when outcomes tie", () => {
+    const plan = planCycle(
+      snapshot({
+        candidates: [
+          {
+            id: "capital-heavy-borrow",
+            intent: "BORROW",
+            minimumExecutionSteps: [
+              {
+                type: "DRAW_DEBT",
+                amount: 80n,
+                limitIndex: 3000,
+                collateralAmount: 500n
+              }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 950,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 80n,
+            explanation: "borrow path reaches the band"
+          },
+          {
+            id: "lighter-lend",
+            intent: "LEND",
+            minimumExecutionSteps: [
+              {
+                type: "ADD_QUOTE",
+                amount: 100n,
+                bucketIndex: 3000,
+                expiry: 2_000
+              }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 950,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 100n,
+            explanation: "lend path reaches the band with less operator capital"
+          }
+        ]
+      }),
+      baseConfig
+    );
+
+    expect(plan.intent).toBe("LEND");
+    expect(plan.reason).toMatch(/less operator capital|lend path reaches the band/);
   });
 });

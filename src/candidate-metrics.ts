@@ -4,6 +4,7 @@ import {
 } from "./types.js";
 
 export interface PlanCandidateCapitalMetrics {
+  quoteTokenDelta: bigint;
   additionalCollateralRequired: bigint;
   netQuoteBorrowed: bigint;
   operatorCapitalRequired: bigint;
@@ -13,6 +14,7 @@ export interface PlanCandidateCapitalMetrics {
 export function derivePlanCandidateCapitalMetrics(
   steps: readonly ExecutionStep[]
 ): PlanCandidateCapitalMetrics {
+  let quoteTokenDelta = 0n;
   let additionalCollateralRequired = 0n;
   let netQuoteBorrowed = 0n;
   let operatorCapitalRequired = 0n;
@@ -21,16 +23,19 @@ export function derivePlanCandidateCapitalMetrics(
   for (const step of steps) {
     switch (step.type) {
       case "ADD_QUOTE":
+        quoteTokenDelta += step.amount;
         netQuoteBorrowed -= step.amount;
         operatorCapitalRequired += step.amount;
         operatorCapitalAtRisk += step.amount;
         break;
       case "REMOVE_QUOTE":
+        quoteTokenDelta += step.amount;
         netQuoteBorrowed += step.amount;
         operatorCapitalAtRisk -= step.amount;
         break;
       case "DRAW_DEBT": {
         const collateralAmount = step.collateralAmount ?? 0n;
+        quoteTokenDelta += step.amount;
         additionalCollateralRequired += collateralAmount;
         netQuoteBorrowed += step.amount;
         operatorCapitalRequired += collateralAmount;
@@ -38,6 +43,7 @@ export function derivePlanCandidateCapitalMetrics(
         break;
       }
       case "REPAY_DEBT":
+        quoteTokenDelta += step.amount;
         netQuoteBorrowed -= step.amount;
         operatorCapitalRequired += step.amount;
         operatorCapitalAtRisk -= step.collateralAmountToPull ?? 0n;
@@ -56,6 +62,7 @@ export function derivePlanCandidateCapitalMetrics(
   }
 
   return {
+    quoteTokenDelta,
     additionalCollateralRequired,
     netQuoteBorrowed,
     operatorCapitalRequired,
@@ -63,9 +70,26 @@ export function derivePlanCandidateCapitalMetrics(
   };
 }
 
+export function resolveCandidateCapitalMetrics(
+  candidate: PlanCandidate
+): PlanCandidateCapitalMetrics {
+  const derived = derivePlanCandidateCapitalMetrics(candidate.minimumExecutionSteps);
+
+  return {
+    quoteTokenDelta: candidate.quoteTokenDelta,
+    additionalCollateralRequired:
+      candidate.additionalCollateralRequired ?? derived.additionalCollateralRequired,
+    netQuoteBorrowed: candidate.netQuoteBorrowed ?? derived.netQuoteBorrowed,
+    operatorCapitalRequired:
+      candidate.operatorCapitalRequired ?? derived.operatorCapitalRequired,
+    operatorCapitalAtRisk:
+      candidate.operatorCapitalAtRisk ?? derived.operatorCapitalAtRisk
+  };
+}
+
 export function withPlanCandidateCapitalMetrics(candidate: PlanCandidate): PlanCandidate {
   return {
     ...candidate,
-    ...derivePlanCandidateCapitalMetrics(candidate.minimumExecutionSteps)
+    ...resolveCandidateCapitalMetrics(candidate)
   };
 }

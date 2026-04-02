@@ -15,7 +15,10 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 
 import { ajnaPoolAbi, erc20Abi } from "./abi.js";
-import { withPlanCandidateCapitalMetrics } from "../candidate-metrics.js";
+import {
+  resolveCandidateCapitalMetrics,
+  withPlanCandidateCapitalMetrics
+} from "../candidate-metrics.js";
 import { buildTargetBand, distanceToTargetBand } from "../planner.js";
 import { type SnapshotSource } from "../snapshot.js";
 import {
@@ -72,6 +75,13 @@ interface SimulationAccountState {
   quoteTokenAllowance?: bigint;
   collateralBalance?: bigint;
   collateralAllowance?: bigint;
+}
+
+export interface AjnaSynthesisPolicy {
+  simulationLend: boolean;
+  simulationBorrow: boolean;
+  heuristicLend: boolean;
+  heuristicBorrow: boolean;
 }
 
 interface LendSimulationPathResult {
@@ -156,6 +166,50 @@ function buildSimulationCandidateCacheKey(
     accountState.collateralBalance,
     accountState.collateralAllowance
   ]);
+}
+
+function hasExplicitSynthesisFlags(config: KeeperConfig): boolean {
+  return (
+    config.enableSimulationBackedLendSynthesis !== undefined ||
+    config.enableSimulationBackedBorrowSynthesis !== undefined ||
+    config.enableHeuristicLendSynthesis !== undefined ||
+    config.enableHeuristicBorrowSynthesis !== undefined
+  );
+}
+
+function hasResolvableSimulationSenderAddress(
+  config: KeeperConfig,
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  if (config.simulationSenderAddress) {
+    return true;
+  }
+
+  const candidate = env.AJNA_KEEPER_PRIVATE_KEY ?? env.PRIVATE_KEY;
+  return candidate !== undefined && /^0x[a-fA-F0-9]{64}$/.test(candidate);
+}
+
+export function resolveAjnaSynthesisPolicy(
+  config: KeeperConfig,
+  env: NodeJS.ProcessEnv = process.env
+): AjnaSynthesisPolicy {
+  if (hasExplicitSynthesisFlags(config)) {
+    return {
+      simulationLend: config.enableSimulationBackedLendSynthesis === true,
+      simulationBorrow: config.enableSimulationBackedBorrowSynthesis === true,
+      heuristicLend: config.enableHeuristicLendSynthesis === true,
+      heuristicBorrow: config.enableHeuristicBorrowSynthesis === true
+    };
+  }
+
+  const canSimulate = hasResolvableSimulationSenderAddress(config, env);
+
+  return {
+    simulationLend: canSimulate,
+    simulationBorrow: canSimulate,
+    heuristicLend: true,
+    heuristicBorrow: true
+  };
 }
 
 function wmul(left: bigint, right: bigint): bigint {
@@ -969,6 +1023,8 @@ function finalizeCandidate(candidate: PlanCandidate): PlanCandidate {
 }
 
 function compareCandidatePreference(left: PlanCandidate, right: PlanCandidate): number {
+  const leftCapital = resolveCandidateCapitalMetrics(left);
+  const rightCapital = resolveCandidateCapitalMetrics(right);
   const leftInBand = left.resultingDistanceToTargetBps === 0 ? 0 : 1;
   const rightInBand = right.resultingDistanceToTargetBps === 0 ? 0 : 1;
   if (leftInBand !== rightInBand) {
@@ -979,8 +1035,23 @@ function compareCandidatePreference(left: PlanCandidate, right: PlanCandidate): 
     return left.resultingDistanceToTargetBps - right.resultingDistanceToTargetBps;
   }
 
-  if (left.quoteTokenDelta !== right.quoteTokenDelta) {
-    return left.quoteTokenDelta < right.quoteTokenDelta ? -1 : 1;
+  if (leftCapital.operatorCapitalRequired !== rightCapital.operatorCapitalRequired) {
+    return leftCapital.operatorCapitalRequired < rightCapital.operatorCapitalRequired ? -1 : 1;
+  }
+
+  if (leftCapital.operatorCapitalAtRisk !== rightCapital.operatorCapitalAtRisk) {
+    return leftCapital.operatorCapitalAtRisk < rightCapital.operatorCapitalAtRisk ? -1 : 1;
+  }
+
+  if (leftCapital.additionalCollateralRequired !== rightCapital.additionalCollateralRequired) {
+    return leftCapital.additionalCollateralRequired <
+      rightCapital.additionalCollateralRequired
+      ? -1
+      : 1;
+  }
+
+  if (leftCapital.quoteTokenDelta !== rightCapital.quoteTokenDelta) {
+    return leftCapital.quoteTokenDelta < rightCapital.quoteTokenDelta ? -1 : 1;
   }
 
   const leftCollateral = collateralAmountForCandidate(left);
@@ -3744,12 +3815,20 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
   }
 
   async getSnapshot(): Promise<PoolSnapshot> {
+    const synthesisPolicy = resolveAjnaSynthesisPolicy(this.config);
+    const synthesisConfig: KeeperConfig = {
+      ...this.config,
+      enableSimulationBackedLendSynthesis: synthesisPolicy.simulationLend,
+      enableSimulationBackedBorrowSynthesis: synthesisPolicy.simulationBorrow,
+      enableHeuristicLendSynthesis: synthesisPolicy.heuristicLend,
+      enableHeuristicBorrowSynthesis: synthesisPolicy.heuristicBorrow
+    };
     const readState = await readAjnaPoolState(
       this.publicClient,
       this.poolAddress,
       this.now(),
       undefined,
-      this.config.borrowerAddress
+      synthesisConfig.borrowerAddress
     );
     const snapshotFingerprint = buildSnapshotFingerprint(
       this.poolAddress,
@@ -3763,23 +3842,23 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
     let planningLookaheadUpdates: number | undefined;
 
     if (
-      this.config.enableSimulationBackedLendSynthesis ||
-      this.config.enableSimulationBackedBorrowSynthesis
+      synthesisPolicy.simulationLend ||
+      synthesisPolicy.simulationBorrow
     ) {
-      const rpcUrl = assertLiveReadConfig(this.config).rpcUrl;
+      const rpcUrl = assertLiveReadConfig(synthesisConfig).rpcUrl;
       const simulationAccountState = await readSimulationAccountState(
         this.publicClient,
         this.poolAddress,
         readState,
-        this.config,
+        synthesisConfig,
         {
-          needsQuoteState: this.config.enableSimulationBackedLendSynthesis === true,
-          needsCollateralState: this.config.enableSimulationBackedBorrowSynthesis === true
+          needsQuoteState: synthesisPolicy.simulationLend,
+          needsCollateralState: synthesisPolicy.simulationBorrow
         }
       );
       const simulationCacheKey = buildSimulationCandidateCacheKey(
         snapshotFingerprint,
-        this.config,
+        synthesisConfig,
         simulationAccountState
       );
 
@@ -3788,10 +3867,10 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
         let lendCandidate: PlanCandidate | undefined;
         let borrowCandidate: PlanCandidate | undefined;
 
-        if (this.config.enableSimulationBackedLendSynthesis) {
+        if (synthesisPolicy.simulationLend) {
           lendCandidate = await synthesizeAjnaLendCandidateViaSimulation(
             readState,
-            this.config,
+            synthesisConfig,
             {
               poolAddress: this.poolAddress,
               rpcUrl,
@@ -3804,14 +3883,16 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
           }
         }
 
-        if (this.config.enableSimulationBackedBorrowSynthesis) {
+        if (synthesisPolicy.simulationBorrow) {
           let borrowResult: BorrowSimulationSynthesisResult | undefined;
-          for (const lookaheadUpdates of resolveBorrowSimulationLookaheadAttempts(this.config)) {
+          for (const lookaheadUpdates of resolveBorrowSimulationLookaheadAttempts(
+            synthesisConfig
+          )) {
             const borrowConfig =
-              this.config.borrowSimulationLookaheadUpdates === lookaheadUpdates
-                ? this.config
+              synthesisConfig.borrowSimulationLookaheadUpdates === lookaheadUpdates
+                ? synthesisConfig
                 : {
-                    ...this.config,
+                    ...synthesisConfig,
                     borrowSimulationLookaheadUpdates: lookaheadUpdates
                   };
             borrowResult = await synthesizeAjnaBorrowCandidateViaSimulation(
@@ -3839,13 +3920,13 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
           }
 
           if (
-            this.config.enableSimulationBackedLendSynthesis &&
+            synthesisPolicy.simulationLend &&
             (borrowResult?.planningLookaheadUpdates === undefined ||
               borrowResult.planningLookaheadUpdates <= 1)
           ) {
             const dualCandidate = await synthesizeAjnaLendAndBorrowCandidateViaSimulation(
               readState,
-              this.config,
+              synthesisConfig,
               {
                 poolAddress: this.poolAddress,
                 rpcUrl,
@@ -3891,11 +3972,11 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
 
     if (
       autoCandidates.length === 0 &&
-      (this.config.enableHeuristicLendSynthesis || this.config.enableHeuristicBorrowSynthesis)
+      (synthesisPolicy.heuristicLend || synthesisPolicy.heuristicBorrow)
     ) {
       const heuristicCandidates = synthesizeAjnaHeuristicCandidates(
         readState.rateState,
-        this.config,
+        synthesisConfig,
         {
           quoteTokenScale: readState.quoteTokenScale,
           nowTimestamp: readState.rateState.nowTimestamp,
@@ -3912,12 +3993,12 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
       this.publicClient,
       this.poolAddress,
       readState,
-      this.config.manualCandidates ?? []
+      synthesisConfig.manualCandidates ?? []
     );
 
     return buildPoolSnapshot(
-      this.config.poolId,
-      this.config.chainId,
+      synthesisConfig.poolId,
+      synthesisConfig.chainId,
       this.poolAddress,
       readState,
       autoCandidates,
