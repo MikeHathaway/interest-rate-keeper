@@ -61,7 +61,7 @@ const EXACT_BORROW_PROTOCOL_SAMPLE_POINTS = [
   7_000
 ] as const;
 const BORROW_BUCKET_PROBE_OFFSETS = [-250, -100, -50, 0, 50, 100, 250] as const;
-const PREWINDOW_LEND_BUCKET_OFFSETS = [-1_000, -500, -250, -100, -50, -20, -10, -5, 0] as const;
+const PREWINDOW_LEND_BUCKET_OFFSETS = [0, -5, -10, -20, -50, -100, -250, -500, -1_000] as const;
 const AJNA_COLLATERALIZATION_FACTOR_WAD = 1_040_000_000_000_000_000n;
 const AJNA_FLOAT_STEP = 1.005;
 const MAX_AJNA_LIMIT_INDEX = 7_388;
@@ -71,6 +71,8 @@ const MAX_EXACT_SIMULATION_PATH_CACHE_ENTRIES = 20_000;
 const MAX_SIMULATION_CANDIDATE_CACHE_ENTRIES = 2_048;
 const DEFAULT_BORROW_LOOKAHEAD_FALLBACK_UPDATES = 3;
 const MULTI_CYCLE_LEND_SEARCH_EXPANSION_FACTOR = 1_000n;
+const EXACT_MULTI_CYCLE_LEND_MAX_QUOTE_SAMPLES = 12;
+const EXACT_MULTI_CYCLE_LEND_LOW_END_QUOTE_SAMPLES = 8;
 
 interface SimulationAccountState {
   simulationSenderAddress: HexAddress;
@@ -508,11 +510,20 @@ function resolvePreWindowLendBucketIndexes(
     return configured;
   }
 
-  return Array.from(
-    new Set(PREWINDOW_LEND_BUCKET_OFFSETS.map((offset) => thresholdIndex + offset))
-  )
-    .filter((bucketIndex) => bucketIndex >= 0 && bucketIndex <= MAX_AJNA_LIMIT_INDEX)
-    .sort((left, right) => left - right);
+  const resolvedIndexes: number[] = [];
+  const seen = new Set<number>();
+
+  for (const offset of PREWINDOW_LEND_BUCKET_OFFSETS) {
+    const bucketIndex = thresholdIndex + offset;
+    if (bucketIndex < 0 || bucketIndex > MAX_AJNA_LIMIT_INDEX || seen.has(bucketIndex)) {
+      continue;
+    }
+
+    seen.add(bucketIndex);
+    resolvedIndexes.push(bucketIndex);
+  }
+
+  return resolvedIndexes;
 }
 
 function resolveDrawDebtCollateralAmounts(config: KeeperConfig): bigint[] {
@@ -922,6 +933,53 @@ function buildMultiCycleLendSearchAmounts(
   );
 }
 
+function buildTokenScaleAnchorAmounts(
+  tokenScale: bigint,
+  minimumAmount: bigint,
+  maximumAmount: bigint
+): bigint[] {
+  if (tokenScale <= 0n || minimumAmount > maximumAmount) {
+    return [];
+  }
+
+  const values: bigint[] = [];
+  let amount = tokenScale;
+  for (let step = 0; step < 6; step += 1) {
+    if (amount >= minimumAmount && amount <= maximumAmount) {
+      values.push(amount);
+    }
+
+    if (amount > maximumAmount / 10n) {
+      break;
+    }
+
+    amount *= 10n;
+  }
+
+  return values;
+}
+
+function buildExposureFractionAnchorAmounts(
+  maximumAmount: bigint,
+  minimumAmount: bigint
+): bigint[] {
+  if (maximumAmount <= 0n || minimumAmount > maximumAmount) {
+    return [];
+  }
+
+  const values = new Set<bigint>();
+  for (const denominator of [1_000_000n, 100_000n, 10_000n, 1_000n, 100n, 10n, 2n]) {
+    const amount = maximumAmount / denominator;
+    if (amount >= minimumAmount && amount <= maximumAmount) {
+      values.add(amount);
+    }
+  }
+
+  return Array.from(values).sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0
+  );
+}
+
 function buildAxisSearchAmounts(
   minimumAmount: bigint,
   maximumAmount: bigint,
@@ -984,6 +1042,69 @@ function compressSearchAmounts(
   return Array.from(retained).sort((left, right) =>
     left < right ? -1 : left > right ? 1 : 0
   );
+}
+
+function compressCapitalAwareSearchAmounts(
+  amounts: bigint[],
+  anchorAmounts: Array<bigint | undefined>,
+  maxSamples: number,
+  lowEndSamples: number
+): bigint[] {
+  if (amounts.length <= maxSamples) {
+    return amounts;
+  }
+
+  const required = new Set<bigint>([amounts[0]!, amounts[amounts.length - 1]!]);
+  for (const anchorAmount of anchorAmounts) {
+    if (anchorAmount !== undefined && amounts.includes(anchorAmount)) {
+      required.add(anchorAmount);
+    }
+  }
+
+  const retained = new Set<bigint>(required);
+  for (const amount of amounts.slice(0, Math.min(lowEndSamples, amounts.length))) {
+    if (required.has(amount)) {
+      continue;
+    }
+
+    retained.add(amount);
+    if (retained.size >= maxSamples) {
+      break;
+    }
+  }
+
+  if (retained.size < maxSamples) {
+    const remainingIndexes = amounts
+      .map((_, index) => index)
+      .filter((index) => !retained.has(amounts[index]!));
+    const remainingSamples = maxSamples - retained.size;
+
+    if (remainingSamples > 0 && remainingIndexes.length > 0) {
+      const evenlySpacedIndexes = new Set<number>();
+      if (remainingSamples === 1) {
+        evenlySpacedIndexes.add(remainingIndexes[remainingIndexes.length - 1]!);
+      } else {
+        for (let sampleIndex = 0; sampleIndex < remainingSamples; sampleIndex += 1) {
+          evenlySpacedIndexes.add(
+            remainingIndexes[
+              Math.round((sampleIndex * (remainingIndexes.length - 1)) / (remainingSamples - 1))
+            ]!
+          );
+        }
+      }
+
+      for (const amountIndex of Array.from(evenlySpacedIndexes).sort((left, right) => left - right)) {
+        retained.add(amounts[amountIndex]!);
+        if (retained.size >= maxSamples) {
+          break;
+        }
+      }
+    }
+  }
+
+  return Array.from(retained)
+    .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
+    .slice(0, maxSamples);
 }
 
 export async function searchCoarseToFineDualSpace<T>(options: {
@@ -2285,6 +2406,7 @@ async function synthesizeAjnaLendCandidateViaSimulation(
           const cacheKey = buildSimulationCacheKey([
             "lend",
             snapshotFingerprint,
+            lookaheadUpdates,
             simulationSenderAddress,
             addQuote?.bucketIndex,
             addQuote?.amount ?? 0n
@@ -2494,8 +2616,7 @@ async function synthesizeAjnaLendCandidateViaSimulation(
                 terminalDistanceToTargetBps: candidatePath.terminalDistanceToTargetBps,
                 improvesConvergence:
                   lookaheadUpdates > 1
-                    ? predictedDistance <= baselineNextDistance &&
-                      candidatePath.terminalDistanceToTargetBps < baselineTerminalDistance
+                    ? candidatePath.terminalDistanceToTargetBps < baselineTerminalDistance
                     : predictionChanged(baselinePredictionState, {
                         predictedOutcome,
                         predictedNextRateWad: predictedRateWadAfterNextUpdate,
@@ -2533,12 +2654,23 @@ async function synthesizeAjnaLendCandidateViaSimulation(
           if (lookaheadUpdates > 1) {
             const anchorAmounts = [
               heuristicSeedAmounts.get(addQuoteBucketIndex),
-              minimumAmount
-            ];
-            const searchAmounts = buildMultiCycleLendSearchAmounts(
               minimumAmount,
-              maxAmount,
-              anchorAmounts
+              ...buildExposureFractionAnchorAmounts(maxAmount, minimumAmount),
+              ...buildTokenScaleAnchorAmounts(
+                readState.quoteTokenScale,
+                minimumAmount,
+                maxAmount
+              )
+            ];
+            const searchAmounts = compressCapitalAwareSearchAmounts(
+              buildMultiCycleLendSearchAmounts(
+                minimumAmount,
+                maxAmount,
+                anchorAmounts
+              ),
+              anchorAmounts,
+              EXACT_MULTI_CYCLE_LEND_MAX_QUOTE_SAMPLES,
+              EXACT_MULTI_CYCLE_LEND_LOW_END_QUOTE_SAMPLES
             );
             const improvingMatches: Array<
               ScalarSearchMatch<{
@@ -2567,6 +2699,10 @@ async function synthesizeAjnaLendCandidateViaSimulation(
             }
 
             improvingMatches.sort((left, right) => {
+              if (left.amount !== right.amount) {
+                return left.amount < right.amount ? -1 : 1;
+              }
+
               if (
                 left.evaluation.terminalDistanceToTargetBps !==
                 right.evaluation.terminalDistanceToTargetBps
@@ -2575,10 +2711,6 @@ async function synthesizeAjnaLendCandidateViaSimulation(
                   left.evaluation.terminalDistanceToTargetBps -
                   right.evaluation.terminalDistanceToTargetBps
                 );
-              }
-
-              if (left.amount !== right.amount) {
-                return left.amount < right.amount ? -1 : 1;
               }
 
               if (

@@ -3543,7 +3543,7 @@ describeIf("Base factory fork integration", () => {
   );
 
   itBaseExperimental(
-    "does not yet surface an exact pre-window lend plan from the deterministic fixture with threshold-aware buckets",
+    "surfaces and executes an exact pre-window lend plan from the deterministic fixture with threshold-aware buckets",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
       const artifact = await ensureMockArtifact();
@@ -3555,6 +3555,18 @@ describeIf("Base factory fork integration", () => {
         walletClient,
         testClient,
         artifact
+      );
+      const { passivePath } = await findManualPreWindowLendMatch(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        matched,
+        {
+          bucketOffsets: EXPERIMENTAL_PREWINDOW_MULTI_CYCLE_BUCKET_OFFSETS,
+          quoteAmounts: EXPERIMENTAL_PREWINDOW_MULTI_CYCLE_QUOTE_AMOUNTS,
+          updateCount: 2
+        }
       );
 
       const exactConfig = resolveKeeperConfig({
@@ -3568,7 +3580,45 @@ describeIf("Base factory fork integration", () => {
       }).getSnapshot();
       const lendCandidate = exactSnapshot.candidates.find((candidate) => candidate.intent === "LEND");
 
-      expect(lendCandidate).toBeUndefined();
+      expect(lendCandidate).toBeDefined();
+      expect(lendCandidate?.planningLookaheadUpdates).toBe(2);
+      expect(planCycle(exactSnapshot, exactConfig).intent).toBe("LEND");
+      const surfacedAddQuoteStep = lendCandidate?.minimumExecutionSteps.find(
+        (step) => step.type === "ADD_QUOTE"
+      );
+      expect(surfacedAddQuoteStep?.type).toBe("ADD_QUOTE");
+      expect(surfacedAddQuoteStep?.amount).toBeLessThan(
+        exactConfig.maxQuoteTokenExposure / 10n
+      );
+
+      let chainNow = matched.chainNow;
+      const snapshotSource = new AjnaRpcSnapshotSource(exactConfig, {
+        publicClient,
+        now: () => chainNow
+      });
+      const result = await runCycle(exactConfig, {
+        snapshotSource,
+        executor: createAjnaExecutionBackend(exactConfig)
+      });
+
+      expect(result.status).toBe("EXECUTED");
+      expect(result.plan.intent).toBe("LEND");
+      expect(result.plan.requiredSteps.some((step) => step.type === "ADD_QUOTE")).toBe(true);
+      expect(result.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")).toBe(
+        false
+      );
+
+      chainNow = Number((await publicClient.getBlock()).timestamp);
+      const activePath = await advanceAndApplyEligibleUpdates(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        exactConfig,
+        2
+      );
+
+      expect(activePath.currentRateBps).toBeLessThan(passivePath.currentRateBps);
     },
     240_000
   );
