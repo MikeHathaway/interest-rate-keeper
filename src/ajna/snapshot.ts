@@ -102,8 +102,7 @@ interface LendSimulationPathResult {
   terminalDistanceToTargetBps: number;
 }
 
-interface BorrowSimulationPathResult extends LendSimulationPathResult {
-}
+type BorrowSimulationPathResult = LendSimulationPathResult;
 
 type DualSimulationPathResult = BorrowSimulationPathResult;
 

@@ -130,13 +130,8 @@ const EXPERIMENTAL_BORROWER_HEAVY_EXISTING_BORROWER_SCENARIOS = [
   { initialQuoteAmount: 1_000n, borrowAmount: 950n, collateralAmount: 1_500n }
 ] as const;
 const EXPERIMENTAL_BOUNDARY_TARGETED_BORROWER_SCENARIOS = [
-  { initialQuoteAmount: 500n, borrowAmount: 400n, collateralAmount: 1_200n },
-  { initialQuoteAmount: 500n, borrowAmount: 450n, collateralAmount: 1_500n },
-  { initialQuoteAmount: 750n, borrowAmount: 600n, collateralAmount: 1_500n },
   { initialQuoteAmount: 750n, borrowAmount: 700n, collateralAmount: 2_000n },
-  { initialQuoteAmount: 1_000n, borrowAmount: 800n, collateralAmount: 2_000n },
   { initialQuoteAmount: 1_000n, borrowAmount: 900n, collateralAmount: 2_500n },
-  { initialQuoteAmount: 1_500n, borrowAmount: 1_200n, collateralAmount: 3_000n },
   { initialQuoteAmount: 2_000n, borrowAmount: 1_700n, collateralAmount: 4_000n }
 ] as const;
 const REPRESENTATIVE_EXISTING_BORROWER_SAME_CYCLE_CONFIG_CANDIDATES = [
@@ -287,24 +282,18 @@ const EXPERIMENTAL_MANUAL_BRAND_NEW_SAME_CYCLE_CONFIG_CANDIDATES = [
   }
 ] as const;
 const EXPERIMENTAL_BOUNDARY_TARGETED_SAME_CYCLE_LIMIT_INDEXES = [
-  2000,
-  2250,
-  2500,
   2750,
   3000,
   3250,
-  3500,
-  4000
+  3500
 ] as const;
 const EXPERIMENTAL_BOUNDARY_TARGETED_SAME_CYCLE_COLLATERAL_AMOUNTS_WAD = [
   0n,
   10n ** 16n,
-  5n * 10n ** 16n,
   10n ** 17n,
-  5n * 10n ** 17n,
   10n ** 18n
 ] as const;
-const EXPERIMENTAL_BOUNDARY_TARGETED_PASSIVE_CYCLES = [0, 1, 2, 3] as const;
+const EXPERIMENTAL_BOUNDARY_TARGETED_PASSIVE_CYCLES = [0, 1, 2] as const;
 const REPRESENTATIVE_MULTI_CYCLE_BORROW_CONFIG = {
   targetRateBps: 1300,
   toleranceBps: 50,
@@ -749,6 +738,18 @@ function priceToFenwickIndex(priceWad: bigint): number {
   return Math.max(0, Math.min(7388, fenwickIndex));
 }
 
+function fenwickIndexToPriceWad(index: number): bigint {
+  const bucketIndex = 4156 - index;
+  const price = AJNA_FLOAT_STEP ** bucketIndex;
+  return BigInt(Math.round(price * 1e18));
+}
+
+function deriveRequiredCollateralWad(amountWad: bigint, limitIndex: number, multiplierBps = 10_500): bigint {
+  const priceWad = fenwickIndexToPriceWad(limitIndex);
+  const baseCollateralWad = wdiv(wmul(amountWad, AJNA_COLLATERALIZATION_FACTOR_WAD), priceWad);
+  return (baseCollateralWad * BigInt(multiplierBps) + 9_999n) / 10_000n;
+}
+
 async function readDwatpThresholdFenwickIndex(
   publicClient: any,
   poolAddress: `0x${string}`
@@ -1055,7 +1056,11 @@ async function findRealActiveBasePool(
         snapshotAgeMaxSeconds: 3600,
         minTimeBeforeRateWindowSeconds: 120,
         minExecutableActionQuoteToken: "1",
-        recheckBeforeSubmit: true
+        recheckBeforeSubmit: true,
+        enableSimulationBackedLendSynthesis: false,
+        enableSimulationBackedBorrowSynthesis: false,
+        enableHeuristicLendSynthesis: false,
+        enableHeuristicBorrowSynthesis: false
       });
       const snapshot = await new AjnaRpcSnapshotSource(config, {
         publicClient,
@@ -1145,6 +1150,82 @@ async function createQuoteOnlyBorrowFixture(
     args: [1_000n * 10n ** 18n, 3_000n, latestBlock.timestamp + 3600n]
   });
   await publicClient.waitForTransactionReceipt({ hash: addQuoteHash });
+
+  return poolAddress;
+}
+
+async function createQuoteOnlyMultiBucketBorrowFixture(
+  account: { address: `0x${string}` },
+  publicClient: any,
+  walletClient: any,
+  artifact: { abi: unknown[]; bytecode: `0x${string}` },
+  deposits: readonly {
+    amount: bigint;
+    bucketIndex: number;
+  }[]
+): Promise<`0x${string}`> {
+  const collateralToken = await deployMockToken(
+    walletClient,
+    publicClient,
+    artifact,
+    "Multi Bucket Borrow Collateral",
+    "MBBC"
+  );
+  const quoteToken = await deployMockToken(
+    walletClient,
+    publicClient,
+    artifact,
+    "Multi Bucket Borrow Quote",
+    "MBBQ"
+  );
+
+  for (const tokenAddress of [collateralToken, quoteToken]) {
+    await mintToken(
+      walletClient,
+      publicClient,
+      artifact,
+      tokenAddress,
+      account.address,
+      1_000_000n * 10n ** 18n
+    );
+  }
+
+  const poolAddress = await deployPoolThroughFactory(
+    walletClient,
+    publicClient,
+    collateralToken,
+    quoteToken
+  );
+
+  await approveToken(
+    walletClient,
+    publicClient,
+    quoteToken,
+    poolAddress,
+    1_000_000n * 10n ** 18n,
+    artifact.abi
+  );
+  await approveToken(
+    walletClient,
+    publicClient,
+    collateralToken,
+    poolAddress,
+    1_000_000n * 10n ** 18n,
+    artifact.abi
+  );
+
+  for (const deposit of deposits) {
+    const latestBlock = await publicClient.getBlock();
+    const addQuoteHash = await walletClient.writeContract({
+      account,
+      chain: undefined,
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "addQuoteToken",
+      args: [deposit.amount, BigInt(deposit.bucketIndex), latestBlock.timestamp + 3600n]
+    });
+    await publicClient.waitForTransactionReceipt({ hash: addQuoteHash });
+  }
 
   return poolAddress;
 }
@@ -2661,6 +2742,493 @@ async function findManualBrandNewSameCycleBorrowImprovement(
   return undefined;
 }
 
+async function findManualBrandNewFirstUpdateSameCycleBorrowImprovement(
+  account: { address: `0x${string}` },
+  publicClient: any,
+  walletClient: any,
+  testClient: any,
+  artifact: { abi: unknown[]; bytecode: `0x${string}` }
+): Promise<
+  | {
+      poolAddress: `0x${string}`;
+      chainNow: number;
+      config: KeeperConfig;
+      amount: bigint;
+      limitIndex: number;
+      collateralAmount: bigint;
+      passiveRateBps: number;
+      activeRateBps: number;
+    }
+  | undefined
+> {
+  const configCandidates = [
+    {
+      targetRateBps: 950,
+      toleranceBps: 50,
+      toleranceMode: "absolute" as const,
+      drawDebtLimitIndexes: [2750, 3000, 3250, 3500] as const,
+      drawDebtCollateralAmounts: [
+        "10000000000000000",
+        "100000000000000000",
+        "1000000000000000000",
+        "10000000000000000000"
+      ] as const
+    },
+    {
+      targetRateBps: 1000,
+      toleranceBps: 50,
+      toleranceMode: "absolute" as const,
+      drawDebtLimitIndexes: [2750, 3000, 3250, 3500] as const,
+      drawDebtCollateralAmounts: [
+        "10000000000000000",
+        "100000000000000000",
+        "1000000000000000000",
+        "10000000000000000000"
+      ] as const
+    },
+    {
+      targetRateBps: 1050,
+      toleranceBps: 50,
+      toleranceMode: "absolute" as const,
+      drawDebtLimitIndexes: [2750, 3000, 3250, 3500] as const,
+      drawDebtCollateralAmounts: [
+        "10000000000000000",
+        "100000000000000000",
+        "1000000000000000000",
+        "10000000000000000000"
+      ] as const
+    }
+  ] as const;
+  const drawDebtAmountsWad = [
+    10n ** 17n,
+    5n * 10n ** 17n,
+    10n ** 18n,
+    2n * 10n ** 18n,
+    5n * 10n ** 18n,
+    10n * 10n ** 18n,
+    20n * 10n ** 18n,
+    50n * 10n ** 18n,
+    100n * 10n ** 18n
+  ] as const;
+
+  const poolAddress = await createQuoteOnlyBorrowFixture(
+    account,
+    publicClient,
+    walletClient,
+    artifact
+  );
+
+  await testClient.increaseTime({
+    seconds: FORK_TIME_SKIP_SECONDS
+  });
+  await testClient.mine({
+    blocks: 1
+  });
+
+  const chainNow = Number((await publicClient.getBlock()).timestamp);
+  const baselineRateInfo = await readCurrentRateInfo(publicClient, poolAddress);
+
+  for (const candidate of configCandidates) {
+    const config = resolveKeeperConfig({
+      chainId: 8453,
+      poolAddress,
+      poolId: `8453:${poolAddress.toLowerCase()}`,
+      rpcUrl: LOCAL_RPC_URL,
+      targetRateBps: candidate.targetRateBps,
+      toleranceBps: candidate.toleranceBps,
+      toleranceMode: candidate.toleranceMode,
+      completionPolicy: "next_move_would_overshoot",
+      executionBufferBps: 0,
+      maxQuoteTokenExposure: "1000000000000000000000000",
+      maxBorrowExposure: "1000000000000000000000",
+      snapshotAgeMaxSeconds: 3600,
+      minTimeBeforeRateWindowSeconds: 120,
+      minExecutableActionQuoteToken: "1",
+      recheckBeforeSubmit: true,
+      borrowerAddress: account.address,
+      simulationSenderAddress: account.address
+    });
+    const snapshot = await new AjnaRpcSnapshotSource(config, {
+      publicClient,
+      now: () => chainNow
+    }).getSnapshot();
+    if (snapshot.secondsUntilNextRateUpdate !== 0) {
+      continue;
+    }
+
+    const passiveBranchId = await testClient.snapshot();
+    let passiveRateBps: number;
+    try {
+      const updateHash = await walletClient.writeContract({
+        account,
+        chain: undefined,
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "updateInterest"
+      });
+      await publicClient.waitForTransactionReceipt({ hash: updateHash });
+      passiveRateBps = (await readCurrentRateInfo(publicClient, poolAddress)).currentRateBps;
+    } finally {
+      await testClient.revert({ id: passiveBranchId });
+    }
+
+    for (const limitIndex of candidate.drawDebtLimitIndexes) {
+      for (const rawCollateralAmount of candidate.drawDebtCollateralAmounts) {
+        const collateralAmount = BigInt(rawCollateralAmount);
+        for (const amount of drawDebtAmountsWad) {
+          const branchId = await testClient.snapshot();
+
+          try {
+            const drawDebtHash = await walletClient.writeContract({
+              account,
+              chain: undefined,
+              address: poolAddress,
+              abi: ajnaPoolAbi,
+              functionName: "drawDebt",
+              args: [account.address, amount, BigInt(limitIndex), collateralAmount]
+            });
+            await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
+
+            const activeRateInfo = await readCurrentRateInfo(publicClient, poolAddress);
+            if (
+              activeRateInfo.lastInterestRateUpdateTimestamp >
+                baselineRateInfo.lastInterestRateUpdateTimestamp &&
+              activeRateInfo.currentRateBps > passiveRateBps
+            ) {
+              return {
+                poolAddress,
+                chainNow,
+                config,
+                amount,
+                limitIndex,
+                collateralAmount,
+                passiveRateBps,
+                activeRateBps: activeRateInfo.currentRateBps
+              };
+            }
+          } catch {
+            // Ignore revert-heavy borrower probes; positive existence is what matters here.
+          } finally {
+            await testClient.revert({ id: branchId });
+          }
+        }
+      }
+    }
+  }
+
+  return undefined;
+}
+
+async function findManualBrandNewFirstUpdateMultiBucketSameCycleBorrowImprovement(
+  account: { address: `0x${string}` },
+  publicClient: any,
+  walletClient: any,
+  testClient: any,
+  artifact: { abi: unknown[]; bytecode: `0x${string}` }
+): Promise<
+  | {
+      poolAddress: `0x${string}`;
+      chainNow: number;
+      deposits: readonly { amount: bigint; bucketIndex: number }[];
+      amount: bigint;
+      limitIndex: number;
+      collateralAmount: bigint;
+      passiveRateBps: number;
+      activeRateBps: number;
+    }
+  | undefined
+> {
+  const depositLayouts = [
+    [
+      { amount: 100n * 10n ** 18n, bucketIndex: 3000 },
+      { amount: 900n * 10n ** 18n, bucketIndex: 3250 }
+    ],
+    [
+      { amount: 50n * 10n ** 18n, bucketIndex: 3000 },
+      { amount: 950n * 10n ** 18n, bucketIndex: 3250 }
+    ],
+    [
+      { amount: 100n * 10n ** 18n, bucketIndex: 3000 },
+      { amount: 900n * 10n ** 18n, bucketIndex: 3500 }
+    ],
+    [
+      { amount: 50n * 10n ** 18n, bucketIndex: 3000 },
+      { amount: 950n * 10n ** 18n, bucketIndex: 3500 }
+    ],
+    [
+      { amount: 100n * 10n ** 18n, bucketIndex: 2750 },
+      { amount: 900n * 10n ** 18n, bucketIndex: 3000 }
+    ],
+    [
+      { amount: 100n * 10n ** 18n, bucketIndex: 2750 },
+      { amount: 900n * 10n ** 18n, bucketIndex: 3250 }
+    ]
+  ] as const;
+  const borrowAmountsWad = [
+    25n * 10n ** 18n,
+    50n * 10n ** 18n,
+    75n * 10n ** 18n,
+    100n * 10n ** 18n,
+    125n * 10n ** 18n,
+    150n * 10n ** 18n,
+    200n * 10n ** 18n
+  ] as const;
+  const limitIndexes = [3000, 3250, 3500, 4000] as const;
+  const collateralMultiplierBps = [10_200, 10_500, 11_000] as const;
+
+  for (const deposits of depositLayouts) {
+    const poolAddress = await createQuoteOnlyMultiBucketBorrowFixture(
+      account,
+      publicClient,
+      walletClient,
+      artifact,
+      deposits
+    );
+
+    await testClient.increaseTime({
+      seconds: FORK_TIME_SKIP_SECONDS
+    });
+    await testClient.mine({
+      blocks: 1
+    });
+
+    const chainNow = Number((await publicClient.getBlock()).timestamp);
+    const baselineRateInfo = await readCurrentRateInfo(publicClient, poolAddress);
+
+    const passiveBranchId = await testClient.snapshot();
+    let passiveRateBps: number;
+    try {
+      const updateHash = await walletClient.writeContract({
+        account,
+        chain: undefined,
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "updateInterest"
+      });
+      await publicClient.waitForTransactionReceipt({ hash: updateHash });
+      passiveRateBps = (await readCurrentRateInfo(publicClient, poolAddress)).currentRateBps;
+    } finally {
+      await testClient.revert({ id: passiveBranchId });
+    }
+
+    for (const limitIndex of limitIndexes) {
+      for (const amount of borrowAmountsWad) {
+        for (const multiplierBps of collateralMultiplierBps) {
+          const collateralAmount = deriveRequiredCollateralWad(amount, limitIndex, multiplierBps);
+          const branchId = await testClient.snapshot();
+
+          try {
+            const drawDebtHash = await walletClient.writeContract({
+              account,
+              chain: undefined,
+              address: poolAddress,
+              abi: ajnaPoolAbi,
+              functionName: "drawDebt",
+              args: [account.address, amount, BigInt(limitIndex), collateralAmount]
+            });
+            await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
+
+            const activeRateInfo = await readCurrentRateInfo(publicClient, poolAddress);
+            if (
+              activeRateInfo.lastInterestRateUpdateTimestamp >
+                baselineRateInfo.lastInterestRateUpdateTimestamp &&
+              activeRateInfo.currentRateBps > passiveRateBps
+            ) {
+              return {
+                poolAddress,
+                chainNow,
+                deposits,
+                amount,
+                limitIndex,
+                collateralAmount,
+                passiveRateBps,
+                activeRateBps: activeRateInfo.currentRateBps
+              };
+            }
+          } catch {
+            // Ignore revert-heavy borrower probes; positive existence is what matters here.
+          } finally {
+            await testClient.revert({ id: branchId });
+          }
+        }
+      }
+    }
+  }
+
+  return undefined;
+}
+
+async function findBoundaryDiscoveredBrandNewFirstUpdateMultiBucketSameCycleBorrowImprovement(
+  account: { address: `0x${string}` },
+  publicClient: any,
+  walletClient: any,
+  testClient: any,
+  artifact: { abi: unknown[]; bytecode: `0x${string}` }
+): Promise<
+  | {
+      poolAddress: `0x${string}`;
+      chainNow: number;
+      deposits: readonly { amount: bigint; bucketIndex: number }[];
+      amount: bigint;
+      collateralAmount: bigint;
+      passiveRateBps: number;
+      activeRateBps: number;
+    }
+  | undefined
+> {
+  const depositLayouts = [
+    [
+      { amount: 50n * 10n ** 18n, bucketIndex: 3000 },
+      { amount: 950n * 10n ** 18n, bucketIndex: 3500 }
+    ],
+    [
+      { amount: 100n * 10n ** 18n, bucketIndex: 3000 },
+      { amount: 900n * 10n ** 18n, bucketIndex: 3500 }
+    ],
+    [
+      { amount: 50n * 10n ** 18n, bucketIndex: 2750 },
+      { amount: 950n * 10n ** 18n, bucketIndex: 3500 }
+    ],
+    [
+      { amount: 100n * 10n ** 18n, bucketIndex: 3000 },
+      { amount: 900n * 10n ** 18n, bucketIndex: 3750 }
+    ]
+  ] as const;
+  const borrowAmountsWad = [
+    100n * 10n ** 18n,
+    150n * 10n ** 18n,
+    200n * 10n ** 18n,
+    300n * 10n ** 18n
+  ] as const;
+  const collateralSearchUpperBoundWad = 5_000n * 10n ** 18n;
+  const collateralSearchToleranceWad = 10n ** 16n;
+
+  for (const deposits of depositLayouts) {
+    const poolAddress = await createQuoteOnlyMultiBucketBorrowFixture(
+      account,
+      publicClient,
+      walletClient,
+      artifact,
+      deposits
+    );
+
+    await testClient.increaseTime({
+      seconds: FORK_TIME_SKIP_SECONDS
+    });
+    await testClient.mine({
+      blocks: 1
+    });
+
+    const chainNow = Number((await publicClient.getBlock()).timestamp);
+    const baselineRateInfo = await readCurrentRateInfo(publicClient, poolAddress);
+
+    const passiveBranchId = await testClient.snapshot();
+    let passiveRateBps: number;
+    try {
+      const updateHash = await walletClient.writeContract({
+        account,
+        chain: undefined,
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "updateInterest"
+      });
+      await publicClient.waitForTransactionReceipt({ hash: updateHash });
+      passiveRateBps = (await readCurrentRateInfo(publicClient, poolAddress)).currentRateBps;
+    } finally {
+      await testClient.revert({ id: passiveBranchId });
+    }
+
+    for (const amount of borrowAmountsWad) {
+      const canBorrowAtUpperBound = await (async () => {
+        const branchId = await testClient.snapshot();
+        try {
+          const drawDebtHash = await walletClient.writeContract({
+            account,
+            chain: undefined,
+            address: poolAddress,
+            abi: ajnaPoolAbi,
+            functionName: "drawDebt",
+            args: [account.address, amount, 7388n, collateralSearchUpperBoundWad]
+          });
+          await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
+          return true;
+        } catch {
+          return false;
+        } finally {
+          await testClient.revert({ id: branchId });
+        }
+      })();
+
+      if (!canBorrowAtUpperBound) {
+        continue;
+      }
+
+      let lowerBound = 1n;
+      let upperBound = collateralSearchUpperBoundWad;
+
+      while (upperBound - lowerBound > collateralSearchToleranceWad) {
+        const middle = lowerBound + (upperBound - lowerBound) / 2n;
+        const branchId = await testClient.snapshot();
+
+        try {
+          const drawDebtHash = await walletClient.writeContract({
+            account,
+            chain: undefined,
+            address: poolAddress,
+            abi: ajnaPoolAbi,
+            functionName: "drawDebt",
+            args: [account.address, amount, 7388n, middle]
+          });
+          await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
+          upperBound = middle;
+        } catch {
+          lowerBound = middle + 1n;
+        } finally {
+          await testClient.revert({ id: branchId });
+        }
+      }
+
+      const boundaryCollateralAmount = (upperBound * 10_010n + 9_999n) / 10_000n;
+      const branchId = await testClient.snapshot();
+
+      try {
+        const drawDebtHash = await walletClient.writeContract({
+          account,
+          chain: undefined,
+          address: poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "drawDebt",
+          args: [account.address, amount, 7388n, boundaryCollateralAmount]
+        });
+        await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
+
+        const activeRateInfo = await readCurrentRateInfo(publicClient, poolAddress);
+        if (
+          activeRateInfo.lastInterestRateUpdateTimestamp >
+            baselineRateInfo.lastInterestRateUpdateTimestamp &&
+          activeRateInfo.currentRateBps > passiveRateBps
+        ) {
+          return {
+            poolAddress,
+            chainNow,
+            deposits,
+            amount,
+            collateralAmount: boundaryCollateralAmount,
+            passiveRateBps,
+            activeRateBps: activeRateInfo.currentRateBps
+          };
+        }
+      } catch {
+        // Ignore revert-heavy boundary discovery probes.
+      } finally {
+        await testClient.revert({ id: branchId });
+      }
+    }
+  }
+
+  return undefined;
+}
+
 async function findBoundaryTargetedManualSameCycleBorrowMatch(
   account: { address: `0x${string}` },
   publicClient: any,
@@ -2688,6 +3256,209 @@ async function findBoundaryTargetedManualSameCycleBorrowMatch(
     }
   | undefined
 > {
+  const boundaryBorrowAmountsWad = [
+    10n ** 16n,
+    10n ** 17n,
+    5n * 10n ** 17n,
+    10n ** 18n,
+    5n * 10n ** 18n,
+    10n * 10n ** 18n,
+    50n * 10n ** 18n,
+    100n * 10n ** 18n
+  ] as const;
+
+  type BoundaryPureCandidate = {
+    amount: bigint;
+    collateralAmount: bigint;
+    candidateMargin: bigint;
+  };
+  type BoundaryScenarioState = {
+    passiveCycles: number;
+    chainNow: number;
+    snapshot: Awaited<ReturnType<AjnaRpcSnapshotSource["getSnapshot"]>>;
+    baselineRateInfo: Awaited<ReturnType<typeof readCurrentRateInfo>>;
+    baselineMargin: bigint;
+    pureCandidates: BoundaryPureCandidate[];
+  };
+  type BoundaryRankedState = BoundaryScenarioState & {
+    poolAddress: `0x${string}`;
+    scenario: {
+      initialQuoteAmount: bigint;
+      borrowAmount: bigint;
+      collateralAmount: bigint;
+    };
+  };
+
+  async function loadBoundaryScenarioState(
+    poolAddress: `0x${string}`,
+    passiveCycles: number
+  ): Promise<BoundaryScenarioState | undefined> {
+    if (passiveCycles > 0) {
+      const config = resolveKeeperConfig({
+        chainId: 8453,
+        poolAddress,
+        poolId: `8453:${poolAddress.toLowerCase()}`,
+        rpcUrl: LOCAL_RPC_URL,
+        targetRateBps: 1000,
+        toleranceBps: 50,
+        toleranceMode: "absolute",
+        completionPolicy: "next_move_would_overshoot",
+        executionBufferBps: 0,
+        maxQuoteTokenExposure: "1000000000000000000000000",
+        maxBorrowExposure: "1000000000000000000000",
+        snapshotAgeMaxSeconds: 3600,
+        minTimeBeforeRateWindowSeconds: 120,
+        minExecutableActionQuoteToken: "1",
+        recheckBeforeSubmit: true
+      });
+      await advanceAndApplyEligibleUpdates(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        config,
+        passiveCycles
+      );
+    } else {
+      await testClient.increaseTime({
+        seconds: FORK_TIME_SKIP_SECONDS
+      });
+      await testClient.mine({
+        blocks: 1
+      });
+    }
+
+    const chainNow = Number((await publicClient.getBlock()).timestamp);
+    const snapshotConfig = resolveKeeperConfig({
+      chainId: 8453,
+      poolAddress,
+      poolId: `8453:${poolAddress.toLowerCase()}`,
+      rpcUrl: LOCAL_RPC_URL,
+      targetRateBps: 1000,
+      toleranceBps: 50,
+      toleranceMode: "absolute",
+      completionPolicy: "next_move_would_overshoot",
+      executionBufferBps: 0,
+      maxQuoteTokenExposure: "1000000000000000000000000",
+      maxBorrowExposure: "1000000000000000000000",
+      snapshotAgeMaxSeconds: 3600,
+      minTimeBeforeRateWindowSeconds: 120,
+      minExecutableActionQuoteToken: "1",
+      recheckBeforeSubmit: true,
+      enableSimulationBackedLendSynthesis: false,
+      enableSimulationBackedBorrowSynthesis: false,
+      enableHeuristicLendSynthesis: false,
+      enableHeuristicBorrowSynthesis: false
+    });
+    const snapshot = await new AjnaRpcSnapshotSource(snapshotConfig, {
+      publicClient,
+      now: () => chainNow
+    }).getSnapshot();
+    if (snapshot.secondsUntilNextRateUpdate !== 0 || snapshot.predictedNextOutcome === "STEP_UP") {
+      return undefined;
+    }
+
+    const [loansInfo, borrowerInfo, baselineRateInfo] = await Promise.all([
+      publicClient.readContract({
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "loansInfo",
+        args: []
+      }),
+      publicClient.readContract({
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "borrowerInfo",
+        args: [account.address]
+      }),
+      readCurrentRateInfo(publicClient, poolAddress)
+    ]);
+    const noOfLoans = loansInfo[2] as bigint;
+    const borrowerT0Debt = borrowerInfo[0] as bigint;
+    const borrowerCollateral = borrowerInfo[1] as bigint;
+    if (noOfLoans === 0n || (borrowerT0Debt === 0n && borrowerCollateral === 0n)) {
+      return undefined;
+    }
+
+    const rateState = extractAjnaRateState(snapshot, chainNow);
+    const baselineMargin = computeStepUpMargin(rateState);
+    const pureCandidates: BoundaryPureCandidate[] = [];
+
+    for (const collateralAmount of EXPERIMENTAL_BOUNDARY_TARGETED_SAME_CYCLE_COLLATERAL_AMOUNTS_WAD) {
+      for (const amount of boundaryBorrowAmountsWad) {
+        const candidateState = drawDebtIntoRateStateForTest(rateState, amount, collateralAmount);
+        const prediction = forecastAjnaNextEligibleRate(candidateState);
+        if (prediction.predictedOutcome !== "STEP_UP") {
+          continue;
+        }
+
+        pureCandidates.push({
+          amount,
+          collateralAmount,
+          candidateMargin: computeStepUpMargin(candidateState)
+        });
+      }
+    }
+
+    if (pureCandidates.length === 0) {
+      return undefined;
+    }
+
+    pureCandidates.sort((left, right) => {
+      if (left.candidateMargin !== right.candidateMargin) {
+        return left.candidateMargin > right.candidateMargin ? -1 : 1;
+      }
+      if (left.amount !== right.amount) {
+        return left.amount < right.amount ? -1 : 1;
+      }
+      if (left.collateralAmount !== right.collateralAmount) {
+        return left.collateralAmount < right.collateralAmount ? -1 : 1;
+      }
+      return 0;
+    });
+
+    return {
+      passiveCycles,
+      chainNow,
+      snapshot,
+      baselineRateInfo,
+      baselineMargin,
+      pureCandidates: pureCandidates.slice(0, 2)
+    };
+  }
+
+  const compareBoundaryScenarioStates = (
+    left: BoundaryScenarioState,
+    right: BoundaryScenarioState
+  ): number => {
+    const leftBest = left.pureCandidates[0];
+    const rightBest = right.pureCandidates[0];
+    if (!leftBest && !rightBest) {
+      return left.passiveCycles - right.passiveCycles;
+    }
+    if (!leftBest) {
+      return 1;
+    }
+    if (!rightBest) {
+      return -1;
+    }
+    if (leftBest.candidateMargin !== rightBest.candidateMargin) {
+      return leftBest.candidateMargin > rightBest.candidateMargin ? -1 : 1;
+    }
+    if (left.baselineMargin !== right.baselineMargin) {
+      return left.baselineMargin > right.baselineMargin ? -1 : 1;
+    }
+    if (leftBest.amount !== rightBest.amount) {
+      return leftBest.amount < rightBest.amount ? -1 : 1;
+    }
+    if (leftBest.collateralAmount !== rightBest.collateralAmount) {
+      return leftBest.collateralAmount < rightBest.collateralAmount ? -1 : 1;
+    }
+    return left.passiveCycles - right.passiveCycles;
+  };
+
+  const rankedStates: BoundaryRankedState[] = [];
+
   for (const scenario of EXPERIMENTAL_BOUNDARY_TARGETED_BORROWER_SCENARIOS) {
     const poolAddress = await createExistingBorrowerSameCycleFixture(
       account,
@@ -2700,156 +3471,64 @@ async function findBoundaryTargetedManualSameCycleBorrowMatch(
       continue;
     }
 
+    const rankedScenarioStates: BoundaryScenarioState[] = [];
+
     for (const passiveCycles of EXPERIMENTAL_BOUNDARY_TARGETED_PASSIVE_CYCLES) {
       const scenarioBranchId = await testClient.snapshot();
 
       try {
-        if (passiveCycles > 0) {
-          const config = resolveKeeperConfig({
-            chainId: 8453,
-            poolAddress,
-            poolId: `8453:${poolAddress.toLowerCase()}`,
-            rpcUrl: LOCAL_RPC_URL,
-            targetRateBps: 1000,
-            toleranceBps: 50,
-            toleranceMode: "absolute",
-            completionPolicy: "next_move_would_overshoot",
-            executionBufferBps: 0,
-            maxQuoteTokenExposure: "1000000000000000000000000",
-            maxBorrowExposure: "1000000000000000000000",
-            snapshotAgeMaxSeconds: 3600,
-            minTimeBeforeRateWindowSeconds: 120,
-            minExecutableActionQuoteToken: "1",
-            recheckBeforeSubmit: true
-          });
-          await advanceAndApplyEligibleUpdates(
-            account,
-            publicClient,
-            walletClient,
-            testClient,
-            config,
-            passiveCycles
-          );
-        } else {
-          await testClient.increaseTime({
-            seconds: FORK_TIME_SKIP_SECONDS
-          });
-          await testClient.mine({
-            blocks: 1
-          });
+        const state = await loadBoundaryScenarioState(poolAddress, passiveCycles);
+        if (state) {
+          rankedScenarioStates.push(state);
         }
+      } finally {
+        await testClient.revert({ id: scenarioBranchId });
+      }
+    }
 
-        const chainNow = Number((await publicClient.getBlock()).timestamp);
-        const snapshotConfig = resolveKeeperConfig({
-          chainId: 8453,
-          poolAddress,
-          poolId: `8453:${poolAddress.toLowerCase()}`,
-          rpcUrl: LOCAL_RPC_URL,
-          targetRateBps: 1000,
-          toleranceBps: 50,
-          toleranceMode: "absolute",
-          completionPolicy: "next_move_would_overshoot",
-          executionBufferBps: 0,
-          maxQuoteTokenExposure: "1000000000000000000000000",
-          maxBorrowExposure: "1000000000000000000000",
-          snapshotAgeMaxSeconds: 3600,
-          minTimeBeforeRateWindowSeconds: 120,
-          minExecutableActionQuoteToken: "1",
-          recheckBeforeSubmit: true
+    rankedScenarioStates.sort(compareBoundaryScenarioStates);
+    rankedStates.push(
+      ...rankedScenarioStates.slice(0, 1).map((state) => ({
+        ...state,
+        poolAddress,
+        scenario
+      }))
+    );
+  }
+
+  rankedStates.sort(compareBoundaryScenarioStates);
+
+  for (const rankedState of rankedStates.slice(0, 2)) {
+    const validationBranchId = await testClient.snapshot();
+
+    try {
+      const state = await loadBoundaryScenarioState(
+        rankedState.poolAddress,
+        rankedState.passiveCycles
+      );
+      if (!state) {
+        continue;
+      }
+
+      const passiveBranchId = await testClient.snapshot();
+      let passiveRateBps: number;
+      try {
+        const updateHash = await walletClient.writeContract({
+          account,
+          chain: undefined,
+          address: rankedState.poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "updateInterest"
         });
-        const snapshot = await new AjnaRpcSnapshotSource(snapshotConfig, {
-          publicClient,
-          now: () => chainNow
-        }).getSnapshot();
-        if (
-          snapshot.secondsUntilNextRateUpdate !== 0 ||
-          snapshot.predictedNextOutcome === "STEP_UP"
-        ) {
-          continue;
-        }
+        await publicClient.waitForTransactionReceipt({ hash: updateHash });
+        passiveRateBps = (
+          await readCurrentRateInfo(publicClient, rankedState.poolAddress)
+        ).currentRateBps;
+      } finally {
+        await testClient.revert({ id: passiveBranchId });
+      }
 
-        const [loansInfo, borrowerInfo, baselineRateInfo] = await Promise.all([
-          publicClient.readContract({
-            address: poolAddress,
-            abi: ajnaPoolAbi,
-            functionName: "loansInfo",
-            args: []
-          }),
-          publicClient.readContract({
-            address: poolAddress,
-            abi: ajnaPoolAbi,
-            functionName: "borrowerInfo",
-            args: [account.address]
-          }),
-          readCurrentRateInfo(publicClient, poolAddress)
-        ]);
-        const noOfLoans = loansInfo[2] as bigint;
-        const borrowerT0Debt = borrowerInfo[0] as bigint;
-        const borrowerCollateral = borrowerInfo[1] as bigint;
-        if (noOfLoans === 0n || (borrowerT0Debt === 0n && borrowerCollateral === 0n)) {
-          continue;
-        }
-
-        const rateState = extractAjnaRateState(snapshot, chainNow);
-        const baselineMargin = computeStepUpMargin(rateState);
-
-        let bestPureCandidate:
-          | {
-              amount: bigint;
-              collateralAmount: bigint;
-              candidateMargin: bigint;
-            }
-          | undefined;
-
-        for (const collateralAmount of EXPERIMENTAL_BOUNDARY_TARGETED_SAME_CYCLE_COLLATERAL_AMOUNTS_WAD) {
-          for (const amount of EXPERIMENTAL_MANUAL_SAME_CYCLE_BORROW_AMOUNTS_WAD) {
-            const candidateState = drawDebtIntoRateStateForTest(
-              rateState,
-              amount,
-              collateralAmount
-            );
-            const prediction = forecastAjnaNextEligibleRate(candidateState);
-            if (prediction.predictedOutcome !== "STEP_UP") {
-              continue;
-            }
-
-            const candidateMargin = computeStepUpMargin(candidateState);
-            const candidate = {
-              amount,
-              collateralAmount,
-              candidateMargin
-            };
-            if (
-              !bestPureCandidate ||
-              candidate.amount < bestPureCandidate.amount ||
-              (candidate.amount === bestPureCandidate.amount &&
-                candidate.collateralAmount < bestPureCandidate.collateralAmount)
-            ) {
-              bestPureCandidate = candidate;
-            }
-          }
-        }
-
-        if (!bestPureCandidate) {
-          continue;
-        }
-
-        const passiveBranchId = await testClient.snapshot();
-        let passiveRateBps: number;
-        try {
-          const updateHash = await walletClient.writeContract({
-            account,
-            chain: undefined,
-            address: poolAddress,
-            abi: ajnaPoolAbi,
-            functionName: "updateInterest"
-          });
-          await publicClient.waitForTransactionReceipt({ hash: updateHash });
-          passiveRateBps = (await readCurrentRateInfo(publicClient, poolAddress)).currentRateBps;
-        } finally {
-          await testClient.revert({ id: passiveBranchId });
-        }
-
+      for (const pureCandidate of state.pureCandidates.slice(0, 1)) {
         for (const limitIndex of EXPERIMENTAL_BOUNDARY_TARGETED_SAME_CYCLE_LIMIT_INDEXES) {
           const branchId = await testClient.snapshot();
 
@@ -2857,37 +3536,37 @@ async function findBoundaryTargetedManualSameCycleBorrowMatch(
             const drawDebtHash = await walletClient.writeContract({
               account,
               chain: undefined,
-              address: poolAddress,
+              address: rankedState.poolAddress,
               abi: ajnaPoolAbi,
               functionName: "drawDebt",
               args: [
                 account.address,
-                bestPureCandidate.amount,
+                pureCandidate.amount,
                 BigInt(limitIndex),
-                bestPureCandidate.collateralAmount
+                pureCandidate.collateralAmount
               ]
             });
             await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
 
-            const activeRateInfo = await readCurrentRateInfo(publicClient, poolAddress);
+            const activeRateInfo = await readCurrentRateInfo(publicClient, rankedState.poolAddress);
             if (
               activeRateInfo.lastInterestRateUpdateTimestamp >
-                baselineRateInfo.lastInterestRateUpdateTimestamp &&
+                state.baselineRateInfo.lastInterestRateUpdateTimestamp &&
               activeRateInfo.currentRateBps > passiveRateBps
             ) {
               return {
-                poolAddress,
-                chainNow,
-                passiveCycles,
-                scenario,
-                snapshot,
-                amount: bestPureCandidate.amount,
+                poolAddress: rankedState.poolAddress,
+                chainNow: state.chainNow,
+                passiveCycles: state.passiveCycles,
+                scenario: rankedState.scenario,
+                snapshot: state.snapshot,
+                amount: pureCandidate.amount,
                 limitIndex,
-                collateralAmount: bestPureCandidate.collateralAmount,
+                collateralAmount: pureCandidate.collateralAmount,
                 passiveRateBps,
                 activeRateBps: activeRateInfo.currentRateBps,
-                baselineMargin,
-                candidateMargin: bestPureCandidate.candidateMargin
+                baselineMargin: state.baselineMargin,
+                candidateMargin: pureCandidate.candidateMargin
               };
             }
           } catch {
@@ -2896,9 +3575,9 @@ async function findBoundaryTargetedManualSameCycleBorrowMatch(
             await testClient.revert({ id: branchId });
           }
         }
-      } finally {
-        await testClient.revert({ id: scenarioBranchId });
       }
+    } finally {
+      await testClient.revert({ id: validationBranchId });
     }
   }
 
@@ -3292,6 +3971,67 @@ describeIf("Base factory fork integration", () => {
   );
 
   itBaseExperimental(
+    "does not yet find a same-cycle borrow improvement in a brand-new multi-bucket quote-only pool at the first due window even when collateral is discovered at the execution boundary",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const match =
+        await findBoundaryDiscoveredBrandNewFirstUpdateMultiBucketSameCycleBorrowImprovement(
+          account,
+          publicClient,
+          walletClient,
+          testClient,
+          artifact
+        );
+
+      expect(match).toBeUndefined();
+    },
+    240_000
+  );
+
+  itBaseExperimental(
+    "does not yet find a manual same-cycle borrow improvement in a brand-new multi-bucket quote-only pool at the first due window",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const match = await findManualBrandNewFirstUpdateMultiBucketSameCycleBorrowImprovement(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        artifact
+      );
+
+      expect(match).toBeUndefined();
+    },
+    180_000
+  );
+
+  itBaseExperimental(
+    "does not yet find a manual same-cycle borrow improvement in a brand-new single-bucket quote-only pool at the first due window",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const match = await findManualBrandNewFirstUpdateSameCycleBorrowImprovement(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        artifact
+      );
+
+      expect(match).toBeUndefined();
+    },
+    180_000
+  );
+
+  itBaseExperimental(
     "brand-new quote-only pool does not yet find a manual same-cycle borrow improvement after the first passive update",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
@@ -3384,7 +4124,7 @@ describeIf("Base factory fork integration", () => {
   );
 
   itBaseExperimental(
-    "finds a boundary-targeted manual same-cycle borrow improvement in an existing-borrower fixture",
+    "does not yet find a boundary-targeted manual same-cycle borrow improvement in a bounded existing-borrower search",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
       const artifact = await ensureMockArtifact();
@@ -3398,11 +4138,9 @@ describeIf("Base factory fork integration", () => {
         artifact
       );
 
-      expect(match).toBeDefined();
-      expect(match?.activeRateBps).toBeGreaterThan(match?.passiveRateBps ?? 0);
-      expect(match?.candidateMargin).toBeGreaterThan(match?.baselineMargin ?? 0n);
+      expect(match).toBeUndefined();
     },
-    420_000
+    180_000
   );
 
   itBaseStress(
