@@ -968,7 +968,7 @@ function buildExposureFractionAnchorAmounts(
   }
 
   const values = new Set<bigint>();
-  for (const denominator of [1_000_000n, 100_000n, 10_000n, 1_000n, 100n, 10n, 2n]) {
+  for (const denominator of [1_000_000n, 100_000n, 10_000n, 1_000n, 100n, 50n, 20n, 10n, 2n]) {
     const amount = maximumAmount / denominator;
     if (amount >= minimumAmount && amount <= maximumAmount) {
       values.add(amount);
@@ -2695,7 +2695,29 @@ async function synthesizeAjnaLendCandidateViaSimulation(
             }
 
             if (improvingMatches.length === 0) {
-              continue;
+              const fallbackSearchAmounts = Array.from(
+                new Set(
+                  buildExposureFractionAnchorAmounts(maxAmount, minimumAmount)
+                )
+              ).sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+
+              for (const quoteTokenAmount of fallbackSearchAmounts) {
+                if (searchAmounts.includes(quoteTokenAmount)) {
+                  continue;
+                }
+
+                const evaluation = await evaluate(quoteTokenAmount);
+                if (evaluation.improvesConvergence) {
+                  improvingMatches.push({
+                    amount: quoteTokenAmount,
+                    evaluation
+                  });
+                }
+              }
+
+              if (improvingMatches.length === 0) {
+                continue;
+              }
             }
 
             improvingMatches.sort((left, right) => {

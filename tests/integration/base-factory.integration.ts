@@ -206,6 +206,21 @@ const EXPERIMENTAL_PREWINDOW_MULTI_CYCLE_QUOTE_AMOUNTS = [
   5_000n,
   10_000n
 ] as const;
+const EXPERIMENTAL_PREWINDOW_COMPLEX_QUOTE_AMOUNTS = [
+  10n,
+  20n,
+  50n,
+  100n,
+  200n,
+  500n,
+  1_000n,
+  2_000n,
+  5_000n,
+  10_000n,
+  20_000n,
+  50_000n,
+  100_000n
+] as const;
 
 function currentBaseForkProfile():
   | "smoke"
@@ -3279,7 +3294,7 @@ describeIf("Base factory fork integration", () => {
   );
 
   itBaseExperimental(
-    "does not surface pre-window lend plans across representative complex ongoing multi-actor fixtures",
+    "surfaces a generic exact pre-window lend plan across representative complex ongoing multi-actor fixtures",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
       const competing = createClientsForPrivateKey(COMPETING_ANVIL_PRIVATE_KEY);
@@ -3303,10 +3318,8 @@ describeIf("Base factory fork integration", () => {
         publicClient,
         now: () => matched.chainNow
       }).getSnapshot();
-      expect(exactSnapshot.candidates.some((candidate) => candidate.intent === "LEND")).toBe(false);
-      expect(
-        exactSnapshot.candidates.some((candidate) => candidate.intent === "LEND_AND_BORROW")
-      ).toBe(false);
+      expect(exactSnapshot.candidates.some((candidate) => candidate.intent === "LEND")).toBe(true);
+      expect(planCycle(exactSnapshot, exactConfig).intent).toBe("LEND");
 
       const heuristicConfig = resolveKeeperConfig({
         ...matched.config,
@@ -3322,6 +3335,201 @@ describeIf("Base factory fork integration", () => {
       expect(
         heuristicSnapshot.candidates.some((candidate) => candidate.intent === "LEND_AND_BORROW")
       ).toBe(false);
+    },
+    240_000
+  );
+
+  itBaseExperimental(
+    "finds a multi-cycle manual pre-window lend improvement across representative complex ongoing multi-actor fixtures",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const competing = createClientsForPrivateKey(COMPETING_ANVIL_PRIVATE_KEY);
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const matched = await createComplexOngoingPreWindowLendFixture(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        competing,
+        artifact
+      );
+
+      const { passivePath, thresholdIndex, observations, positiveMatch } =
+        await findManualPreWindowLendMatch(
+          account,
+          publicClient,
+          walletClient,
+          testClient,
+          matched,
+          {
+            bucketOffsets: EXPERIMENTAL_PREWINDOW_MULTI_CYCLE_BUCKET_OFFSETS,
+            quoteAmounts: EXPERIMENTAL_PREWINDOW_COMPLEX_QUOTE_AMOUNTS,
+            updateCount: 2
+          }
+        );
+
+      expect(thresholdIndex).toBeDefined();
+      expect(
+        positiveMatch,
+        `no complex ongoing multi-cycle pre-window lend improvement near dwatpIndex=${thresholdIndex}; passiveRate=${passivePath.currentRateBps}; observations=${observations.join(" | ")}`
+      ).toBeDefined();
+    },
+    240_000
+  );
+
+  itBaseExperimental(
+    "surfaces and executes a targeted exact multi-cycle pre-window lend plan from a representative complex ongoing multi-actor fixture",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const competing = createClientsForPrivateKey(COMPETING_ANVIL_PRIVATE_KEY);
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const matched = await createComplexOngoingPreWindowLendFixture(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        competing,
+        artifact
+      );
+
+      const { passivePath, positiveMatch } = await findManualPreWindowLendMatch(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        matched,
+        {
+          bucketOffsets: EXPERIMENTAL_PREWINDOW_MULTI_CYCLE_BUCKET_OFFSETS,
+          quoteAmounts: EXPERIMENTAL_PREWINDOW_COMPLEX_QUOTE_AMOUNTS,
+          updateCount: 2
+        }
+      );
+
+      expect(positiveMatch).toBeDefined();
+
+      let chainNow = matched.chainNow;
+      const exactConfig = resolveKeeperConfig({
+        ...matched.config,
+        addQuoteBucketIndex: positiveMatch!.bucketIndex,
+        minExecutableActionQuoteToken: positiveMatch!.amount.toString(),
+        maxQuoteTokenExposure: positiveMatch!.amount.toString(),
+        enableSimulationBackedLendSynthesis: true,
+        simulationSenderAddress: account.address,
+        recheckBeforeSubmit: false
+      });
+      const snapshotSource = new AjnaRpcSnapshotSource(exactConfig, {
+        publicClient,
+        now: () => chainNow
+      });
+      const exactSnapshot = await snapshotSource.getSnapshot();
+      const lendCandidate = exactSnapshot.candidates.find((candidate) => candidate.intent === "LEND");
+
+      expect(lendCandidate).toBeDefined();
+      expect(lendCandidate?.planningLookaheadUpdates).toBe(2);
+      expect(planCycle(exactSnapshot, exactConfig).intent).toBe("LEND");
+
+      const result = await runCycle(exactConfig, {
+        snapshotSource,
+        executor: createAjnaExecutionBackend(exactConfig)
+      });
+
+      expect(result.status).toBe("EXECUTED");
+      expect(result.plan.intent).toBe("LEND");
+      expect(result.plan.requiredSteps.some((step) => step.type === "ADD_QUOTE")).toBe(true);
+      expect(result.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")).toBe(
+        false
+      );
+
+      chainNow = Number((await publicClient.getBlock()).timestamp);
+      const activePath = await advanceAndApplyEligibleUpdates(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        exactConfig,
+        2
+      );
+
+      expect(activePath.currentRateBps).toBeLessThan(passivePath.currentRateBps);
+    },
+    240_000
+  );
+
+  itBaseExperimental(
+    "surfaces and executes a generic exact multi-cycle pre-window lend plan from a manual-positive complex ongoing multi-actor fixture",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const competing = createClientsForPrivateKey(COMPETING_ANVIL_PRIVATE_KEY);
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const matched = await createComplexOngoingPreWindowLendFixture(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        competing,
+        artifact
+      );
+
+      const { passivePath, positiveMatch } = await findManualPreWindowLendMatch(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        matched,
+        {
+          bucketOffsets: EXPERIMENTAL_PREWINDOW_MULTI_CYCLE_BUCKET_OFFSETS,
+          quoteAmounts: EXPERIMENTAL_PREWINDOW_COMPLEX_QUOTE_AMOUNTS,
+          updateCount: 2
+        }
+      );
+
+      expect(positiveMatch).toBeDefined();
+
+      const exactConfig = resolveKeeperConfig({
+        ...matched.config,
+        enableSimulationBackedLendSynthesis: true,
+        simulationSenderAddress: account.address
+      });
+      const exactSnapshot = await new AjnaRpcSnapshotSource(exactConfig, {
+        publicClient,
+        now: () => matched.chainNow
+      }).getSnapshot();
+      const lendCandidate = exactSnapshot.candidates.find((candidate) => candidate.intent === "LEND");
+
+      expect(lendCandidate).toBeDefined();
+      expect(lendCandidate?.planningLookaheadUpdates).toBe(2);
+      expect(planCycle(exactSnapshot, exactConfig).intent).toBe("LEND");
+
+      let chainNow = matched.chainNow;
+      const snapshotSource = new AjnaRpcSnapshotSource(exactConfig, {
+        publicClient,
+        now: () => chainNow
+      });
+      const result = await runCycle(exactConfig, {
+        snapshotSource,
+        executor: createAjnaExecutionBackend(exactConfig)
+      });
+
+      expect(result.status).toBe("EXECUTED");
+      expect(result.plan.intent).toBe("LEND");
+
+      chainNow = Number((await publicClient.getBlock()).timestamp);
+      const activePath = await advanceAndApplyEligibleUpdates(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        exactConfig,
+        2
+      );
+
+      expect(activePath.currentRateBps).toBeLessThan(passivePath.currentRateBps);
     },
     240_000
   );
