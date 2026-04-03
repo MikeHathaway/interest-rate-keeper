@@ -498,6 +498,10 @@ function resolvePreWindowLendBucketIndexes(
     return configured;
   }
 
+  if (configured.length > 0) {
+    return configured;
+  }
+
   const thresholdIndex = readState.meaningfulDepositThresholdFenwickIndex;
   if (thresholdIndex === undefined) {
     return configured;

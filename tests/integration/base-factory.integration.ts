@@ -3403,6 +3403,84 @@ describeIf("Base factory fork integration", () => {
   );
 
   itBaseExperimental(
+    "surfaces and executes a targeted exact multi-cycle pre-window lend plan from the deterministic fixture",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const matched = await createDeterministicPreWindowLendForecastFixture(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        artifact
+      );
+
+      const { passivePath, positiveMatch } = await findManualPreWindowLendMatch(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        matched,
+        {
+          bucketOffsets: EXPERIMENTAL_PREWINDOW_MULTI_CYCLE_BUCKET_OFFSETS,
+          quoteAmounts: EXPERIMENTAL_PREWINDOW_MULTI_CYCLE_QUOTE_AMOUNTS,
+          updateCount: 2
+        }
+      );
+
+      expect(positiveMatch).toBeDefined();
+
+      let chainNow = matched.chainNow;
+      const exactConfig = resolveKeeperConfig({
+        ...matched.config,
+        addQuoteBucketIndex: positiveMatch!.bucketIndex,
+        minExecutableActionQuoteToken: positiveMatch!.amount.toString(),
+        maxQuoteTokenExposure: positiveMatch!.amount.toString(),
+        enableSimulationBackedLendSynthesis: true,
+        simulationSenderAddress: account.address,
+        recheckBeforeSubmit: false
+      });
+      const snapshotSource = new AjnaRpcSnapshotSource(exactConfig, {
+        publicClient,
+        now: () => chainNow
+      });
+      const exactSnapshot = await snapshotSource.getSnapshot();
+      const lendCandidate = exactSnapshot.candidates.find((candidate) => candidate.intent === "LEND");
+
+      expect(lendCandidate).toBeDefined();
+      expect(lendCandidate?.planningLookaheadUpdates).toBe(2);
+      expect(planCycle(exactSnapshot, exactConfig).intent).toBe("LEND");
+
+      const result = await runCycle(exactConfig, {
+        snapshotSource,
+        executor: createAjnaExecutionBackend(exactConfig)
+      });
+
+      expect(result.status).toBe("EXECUTED");
+      expect(result.plan.intent).toBe("LEND");
+      expect(result.plan.requiredSteps.some((step) => step.type === "ADD_QUOTE")).toBe(true);
+      expect(result.plan.requiredSteps.some((step) => step.type === "UPDATE_INTEREST")).toBe(
+        false
+      );
+
+      chainNow = Number((await publicClient.getBlock()).timestamp);
+      const activePath = await advanceAndApplyEligibleUpdates(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        exactConfig,
+        2
+      );
+
+      expect(activePath.currentRateBps).toBeLessThan(passivePath.currentRateBps);
+    },
+    240_000
+  );
+
+  itBaseExperimental(
     "does not yet surface an exact pre-window lend plan from the deterministic fixture with threshold-aware buckets",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
