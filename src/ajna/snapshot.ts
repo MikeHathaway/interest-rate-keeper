@@ -73,6 +73,10 @@ const DEFAULT_BORROW_LOOKAHEAD_FALLBACK_UPDATES = 3;
 const MULTI_CYCLE_LEND_SEARCH_EXPANSION_FACTOR = 1_000n;
 const EXACT_MULTI_CYCLE_LEND_MAX_QUOTE_SAMPLES = 12;
 const EXACT_MULTI_CYCLE_LEND_LOW_END_QUOTE_SAMPLES = 8;
+const EXACT_SAME_CYCLE_BORROW_MAX_SAMPLES = 8;
+const EXACT_SAME_CYCLE_BORROW_LOW_END_SAMPLES = 5;
+const EXACT_SAME_CYCLE_BORROW_MAX_LIMIT_INDEXES = 2;
+const EXACT_SAME_CYCLE_BORROW_MAX_COLLATERAL_SAMPLES = 4;
 
 interface SimulationAccountState {
   simulationSenderAddress: HexAddress;
@@ -977,6 +981,28 @@ function buildExposureFractionAnchorAmounts(
 
   return Array.from(values).sort((left, right) =>
     left < right ? -1 : left > right ? 1 : 0
+  );
+}
+
+function buildSameCycleBorrowSearchAmounts(
+  minimumAmount: bigint,
+  maximumAmount: bigint,
+  quoteTokenScale: bigint,
+  anchorAmounts: Array<bigint | undefined>
+): bigint[] {
+  const rawAmounts = Array.from(
+    new Set([
+      ...buildAnchoredSearchAmounts(minimumAmount, maximumAmount, anchorAmounts),
+      ...buildTokenScaleAnchorAmounts(quoteTokenScale, minimumAmount, maximumAmount),
+      ...buildExposureFractionAnchorAmounts(maximumAmount, minimumAmount)
+    ])
+  ).sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+
+  return compressCapitalAwareSearchAmounts(
+    rawAmounts,
+    anchorAmounts,
+    EXACT_SAME_CYCLE_BORROW_MAX_SAMPLES,
+    EXACT_SAME_CYCLE_BORROW_LOW_END_SAMPLES
   );
 }
 
@@ -3360,9 +3386,6 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
   ) {
     return undefined;
   }
-  if (lookaheadUpdates === 1 && !heuristicDrawDebtStep) {
-    return undefined;
-  }
 
   return withLazyTemporaryAnvilFork(
     {
@@ -3419,12 +3442,10 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
           effectiveAccountState.collateralBalance ?? 0n,
           effectiveAccountState.collateralAllowance ?? 0n
         );
-        const candidateCollateralAmounts =
-          lookaheadUpdates === 1 && heuristicDrawDebtStep
-            ? [heuristicDrawDebtStep.collateralAmount ?? 0n].filter(
-                (collateralAmount) => collateralAmount <= maxAvailableCollateral
-              )
-            : resolveSimulationBorrowCollateralAmounts(
+        const candidateCollateralAmounts = Array.from(
+          new Set(
+            [
+              ...resolveSimulationBorrowCollateralAmounts(
                 config,
                 maxAvailableCollateral,
                 {
@@ -3432,8 +3453,31 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
                     (readState.borrowerState?.t0Debt ?? 0n) > 0n ||
                     (readState.borrowerState?.collateral ?? 0n) > 0n
                 }
-              );
-        if (candidateCollateralAmounts.length === 0) {
+              ),
+              ...(heuristicDrawDebtStep?.collateralAmount === undefined
+                ? []
+                : [heuristicDrawDebtStep.collateralAmount])
+            ].filter((collateralAmount) => collateralAmount <= maxAvailableCollateral)
+          )
+        ).sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+        const prioritizedCollateralAmounts =
+          lookaheadUpdates === 1
+            ? Array.from(
+                new Set([
+                  ...(heuristicDrawDebtStep?.collateralAmount === undefined
+                    ? []
+                    : [heuristicDrawDebtStep.collateralAmount]),
+                  ...resolveDrawDebtCollateralAmounts(config).filter(
+                    (collateralAmount) => collateralAmount <= maxAvailableCollateral
+                  ),
+                  ...candidateCollateralAmounts.slice(
+                    0,
+                    EXACT_SAME_CYCLE_BORROW_MAX_COLLATERAL_SAMPLES
+                  )
+                ])
+              ).sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
+            : candidateCollateralAmounts;
+        if (prioritizedCollateralAmounts.length === 0) {
           return undefined;
         }
         const allLimitIndexes = await resolvePoolAwareBorrowLimitIndexes(
@@ -3444,42 +3488,47 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
         );
         const limitIndexes =
           lookaheadUpdates === 1 && heuristicDrawDebtStep
-            ? allLimitIndexes.filter(
-                (limitIndex) => limitIndex === heuristicDrawDebtStep.limitIndex
-              )
-            : allLimitIndexes;
+            ? [
+                heuristicDrawDebtStep.limitIndex,
+                ...allLimitIndexes.filter(
+                  (limitIndex) => limitIndex !== heuristicDrawDebtStep.limitIndex
+                )
+              ]
+            : lookaheadUpdates === 1
+              ? Array.from(
+                  new Set([
+                    ...resolveDrawDebtLimitIndexes(config),
+                    ...allLimitIndexes
+                  ])
+                ).slice(0, EXACT_SAME_CYCLE_BORROW_MAX_LIMIT_INDEXES)
+              : allLimitIndexes;
         if (limitIndexes.length === 0) {
           return undefined;
         }
-        const exactBorrowSearchInputs = candidateCollateralAmounts
-          .map((collateralAmount) => ({
+        const exactBorrowSearchInputs = prioritizedCollateralAmounts.map((collateralAmount) => {
+          const heuristicCollateralAmount = heuristicDrawDebtStep?.collateralAmount ?? 0n;
+          const heuristicThresholdAmount =
+            heuristicDrawDebtStep?.amount !== undefined &&
+            heuristicCollateralAmount === collateralAmount
+              ? heuristicDrawDebtStep.amount
+              : undefined;
+
+          return {
             collateralAmount,
             pureThresholdAmount:
               lookaheadUpdates === 1
-                ? (() => {
-                    const heuristicCollateralAmount =
-                      heuristicDrawDebtStep?.collateralAmount ?? 0n;
-                    const heuristicThresholdAmount =
-                      heuristicDrawDebtStep?.amount !== undefined &&
-                      heuristicCollateralAmount === collateralAmount
-                        ? heuristicDrawDebtStep.amount
-                        : undefined;
-                    return (
-                      findPureBorrowImprovementThresholdForCollateral(
-                        readState.rateState,
-                        targetBand,
-                        baselinePrediction,
-                        minimumAmount,
-                        maxAmount,
-                        collateralAmount
-                      ) ?? heuristicThresholdAmount
-                    );
-                  })()
-                : undefined
-          }))
-          .filter(
-            (entry) => lookaheadUpdates > 1 || entry.pureThresholdAmount !== undefined
-          );
+                ? findPureBorrowImprovementThresholdForCollateral(
+                    readState.rateState,
+                    targetBand,
+                    baselinePrediction,
+                    minimumAmount,
+                    maxAmount,
+                    collateralAmount
+                  )
+                : undefined,
+            heuristicThresholdAmount
+          };
+        });
         if (exactBorrowSearchInputs.length === 0) {
           return undefined;
         }
@@ -3642,7 +3691,8 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
         for (const limitIndex of limitIndexes) {
           for (const {
             collateralAmount,
-            pureThresholdAmount
+            pureThresholdAmount,
+            heuristicThresholdAmount
           } of exactBorrowSearchInputs) {
             const evaluate = async (
               drawDebtAmount: bigint
@@ -3683,69 +3733,86 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
               }
             };
 
-            const initialUpperBound =
-              pureThresholdAmount !== undefined && pureThresholdAmount >= minimumAmount
-                ? pureThresholdAmount
-                : minimumAmount;
-            let lowerBound =
-              pureThresholdAmount !== undefined && pureThresholdAmount > minimumAmount
-                ? minimumAmount - 1n
-                : minimumAmount - 1n;
-            let upperBound = initialUpperBound;
-            let upperEvaluation = await evaluate(upperBound);
+            const searchAmounts =
+              lookaheadUpdates === 1
+                ? buildSameCycleBorrowSearchAmounts(
+                    minimumAmount,
+                    maxAmount,
+                    readState.quoteTokenScale,
+                    [pureThresholdAmount, heuristicThresholdAmount]
+                  )
+                : buildAnchoredSearchAmounts(
+                    minimumAmount,
+                    maxAmount,
+                    [pureThresholdAmount, heuristicThresholdAmount]
+                  );
 
-            while (!upperEvaluation.improvesConvergence) {
-              lowerBound = upperBound;
-              if (upperBound === maxAmount) {
-                upperEvaluation = undefined as never;
+            let lowerBound = minimumAmount - 1n;
+            let upperBound: bigint | undefined;
+            let upperEvaluation:
+              | {
+                  predictedOutcome: RateMoveOutcome;
+                  predictedRateBpsAfterNextUpdate: number;
+                  terminalRateBps: number;
+                  terminalDistanceToTargetBps: number;
+                  improvesConvergence: boolean;
+                }
+              | undefined;
+
+            for (const drawDebtAmount of searchAmounts) {
+              const evaluation = await evaluate(drawDebtAmount);
+              if (evaluation.improvesConvergence) {
+                upperBound = drawDebtAmount;
+                upperEvaluation = evaluation;
                 break;
               }
 
-              upperBound = upperBound * 2n;
-              if (upperBound > maxAmount) {
-                upperBound = maxAmount;
-              }
-              upperEvaluation = await evaluate(upperBound);
+              lowerBound = drawDebtAmount;
             }
 
-            if (!upperEvaluation?.improvesConvergence) {
+            if (upperBound === undefined || !upperEvaluation?.improvesConvergence) {
               continue;
             }
 
-            while (upperBound - lowerBound > 1n) {
-              const middle = lowerBound + (upperBound - lowerBound) / 2n;
+            let refinedUpperBound = upperBound;
+            let refinedUpperEvaluation = upperEvaluation;
+
+            while (refinedUpperBound - lowerBound > 1n) {
+              const middle = lowerBound + (refinedUpperBound - lowerBound) / 2n;
               const middleEvaluation = await evaluate(middle);
               if (middleEvaluation.improvesConvergence) {
-                upperBound = middle;
-                upperEvaluation = middleEvaluation;
+                refinedUpperBound = middle;
+                refinedUpperEvaluation = middleEvaluation;
               } else {
                 lowerBound = middle;
               }
             }
 
             const candidate: PlanCandidate = {
-              id: `sim-borrow:${limitIndex}:${collateralAmount.toString()}:draw-debt:${upperBound.toString()}`,
+              id: `sim-borrow:${limitIndex}:${collateralAmount.toString()}:draw-debt:${refinedUpperBound.toString()}`,
               intent: "BORROW",
               minimumExecutionSteps: [
                 {
                   type: "DRAW_DEBT",
-                  amount: upperBound,
+                  amount: refinedUpperBound,
                   limitIndex,
                   collateralAmount,
                   note: "simulation-backed draw-debt threshold"
                 }
               ],
-              predictedOutcome: upperEvaluation.predictedOutcome,
-              predictedRateBpsAfterNextUpdate: upperEvaluation.predictedRateBpsAfterNextUpdate,
-              resultingDistanceToTargetBps: upperEvaluation.terminalDistanceToTargetBps,
-              quoteTokenDelta: upperBound,
+              predictedOutcome: refinedUpperEvaluation.predictedOutcome,
+              predictedRateBpsAfterNextUpdate:
+                refinedUpperEvaluation.predictedRateBpsAfterNextUpdate,
+              resultingDistanceToTargetBps:
+                refinedUpperEvaluation.terminalDistanceToTargetBps,
+              quoteTokenDelta: refinedUpperBound,
               explanation:
                 lookaheadUpdates > 1
-                  ? `simulation-backed draw-debt threshold improves the ${lookaheadUpdates}-update path from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.predictedOutcome}`
-                  : `simulation-backed draw-debt threshold changes the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${upperEvaluation.predictedOutcome}`
+                  ? `simulation-backed draw-debt threshold improves the ${lookaheadUpdates}-update path from ${baselinePrediction.predictedOutcome} to ${refinedUpperEvaluation.predictedOutcome}`
+                  : `simulation-backed draw-debt threshold changes the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${refinedUpperEvaluation.predictedOutcome}`
             };
             if (lookaheadUpdates > 1) {
-              candidate.planningRateBps = upperEvaluation.terminalRateBps;
+              candidate.planningRateBps = refinedUpperEvaluation.terminalRateBps;
               candidate.planningLookaheadUpdates = lookaheadUpdates;
             }
             const finalizedCandidate = finalizeCandidate(candidate);
