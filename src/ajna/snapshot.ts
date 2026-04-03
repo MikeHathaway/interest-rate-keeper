@@ -70,6 +70,7 @@ const MAX_SIMULATION_ACCOUNT_STATE_CACHE_ENTRIES = 256;
 const MAX_EXACT_SIMULATION_PATH_CACHE_ENTRIES = 20_000;
 const MAX_SIMULATION_CANDIDATE_CACHE_ENTRIES = 2_048;
 const DEFAULT_BORROW_LOOKAHEAD_FALLBACK_UPDATES = 3;
+const MULTI_CYCLE_LEND_SEARCH_EXPANSION_FACTOR = 1_000n;
 
 interface SimulationAccountState {
   simulationSenderAddress: HexAddress;
@@ -821,6 +822,104 @@ export interface DualSearchPoint {
 
 export interface DualSearchMatch<T> extends DualSearchPoint {
   evaluation: T;
+}
+
+interface ScalarSearchMatch<T> {
+  amount: bigint;
+  evaluation: T;
+}
+
+function buildOneTwoFiveSearchAmounts(
+  minimumAmount: bigint,
+  maximumAmount: bigint
+): bigint[] {
+  if (minimumAmount > maximumAmount) {
+    return [];
+  }
+
+  if (maximumAmount - minimumAmount <= DEFAULT_EXHAUSTIVE_DUAL_AXIS_SPAN) {
+    const values: bigint[] = [];
+    for (let value = minimumAmount; value <= maximumAmount; value += 1n) {
+      values.push(value);
+    }
+    return values;
+  }
+
+  const values = new Set<bigint>([minimumAmount, maximumAmount]);
+  for (let magnitude = 1n; magnitude <= maximumAmount; magnitude *= 10n) {
+    for (const multiplier of [1n, 2n, 5n]) {
+      const amount = magnitude * multiplier;
+      if (amount >= minimumAmount && amount <= maximumAmount) {
+        values.add(amount);
+      }
+    }
+
+    if (magnitude > maximumAmount / 10n) {
+      break;
+    }
+  }
+
+  return Array.from(values).sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0
+  );
+}
+
+function buildMultiCycleLendSearchAmounts(
+  minimumAmount: bigint,
+  maximumAmount: bigint,
+  anchorAmounts: Array<bigint | undefined>
+): bigint[] {
+  const values = new Set<bigint>(buildOneTwoFiveSearchAmounts(minimumAmount, maximumAmount));
+  const topEndDeltaCap =
+    maximumAmount / 100n >= minimumAmount ? maximumAmount / 100n : minimumAmount;
+  for (const deltaAmount of buildOneTwoFiveSearchAmounts(minimumAmount, topEndDeltaCap)) {
+    const mirroredAmount = maximumAmount - (deltaAmount - minimumAmount);
+    if (mirroredAmount >= minimumAmount && mirroredAmount <= maximumAmount) {
+      values.add(mirroredAmount);
+    }
+  }
+
+  for (const anchorAmount of anchorAmounts) {
+    if (anchorAmount === undefined) {
+      continue;
+    }
+
+    const clampedAnchor =
+      anchorAmount < minimumAmount
+        ? minimumAmount
+        : anchorAmount > maximumAmount
+          ? maximumAmount
+          : anchorAmount;
+    const lowerBound =
+      clampedAnchor <= 1n
+        ? minimumAmount
+        : clampedAnchor / 100n < minimumAmount
+          ? minimumAmount
+          : clampedAnchor / 100n;
+    let upperBound = clampedAnchor * MULTI_CYCLE_LEND_SEARCH_EXPANSION_FACTOR;
+    if (upperBound < clampedAnchor) {
+      upperBound = maximumAmount;
+    }
+    if (upperBound > maximumAmount) {
+      upperBound = maximumAmount;
+    }
+
+    for (const amount of buildOneTwoFiveSearchAmounts(lowerBound, upperBound)) {
+      values.add(amount);
+    }
+
+    for (const amount of buildDualBorrowSearchAmounts(
+      minimumAmount,
+      maximumAmount,
+      clampedAnchor
+    )) {
+      values.add(amount);
+    }
+  }
+
+  return Array.from(values).sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0
+  );
 }
 
 function buildAxisSearchAmounts(
@@ -2368,6 +2467,7 @@ async function synthesizeAjnaLendCandidateViaSimulation(
             predictedOutcome: RateMoveOutcome;
             predictedRateWadAfterNextUpdate: bigint;
             predictedRateBpsAfterNextUpdate: number;
+            predictedDistanceToTargetBps: number;
             terminalRateBps: number;
             terminalDistanceToTargetBps: number;
             improvesConvergence: boolean;
@@ -2389,6 +2489,7 @@ async function synthesizeAjnaLendCandidateViaSimulation(
                 predictedOutcome,
                 predictedRateWadAfterNextUpdate,
                 predictedRateBpsAfterNextUpdate,
+                predictedDistanceToTargetBps: predictedDistance,
                 terminalRateBps: candidatePath.terminalRateBps,
                 terminalDistanceToTargetBps: candidatePath.terminalDistanceToTargetBps,
                 improvesConvergence:
@@ -2408,6 +2509,7 @@ async function synthesizeAjnaLendCandidateViaSimulation(
                 predictedOutcome: baselinePath.firstOutcome,
                 predictedRateWadAfterNextUpdate: baselinePath.firstRateWadAfterNextUpdate,
                 predictedRateBpsAfterNextUpdate: baselinePath.firstRateBpsAfterNextUpdate,
+                predictedDistanceToTargetBps: baselineNextDistance,
                 terminalRateBps: baselinePath.terminalRateBps,
                 terminalDistanceToTargetBps: baselineTerminalDistance,
                 improvesConvergence: false
@@ -2415,43 +2517,131 @@ async function synthesizeAjnaLendCandidateViaSimulation(
             }
           };
 
-          let lowerBound = minimumAmount - 1n;
-          let upperBound = heuristicSeedAmounts.get(addQuoteBucketIndex) ?? minimumAmount;
-          if (upperBound < minimumAmount) {
-            upperBound = minimumAmount;
-          }
-          if (upperBound > maxAmount) {
-            upperBound = maxAmount;
-          }
-          let upperEvaluation = await evaluate(upperBound);
+          let selectedQuoteAmount: bigint | undefined;
+          let selectedEvaluation:
+            | {
+                predictedOutcome: RateMoveOutcome;
+                predictedRateWadAfterNextUpdate: bigint;
+                predictedRateBpsAfterNextUpdate: number;
+                predictedDistanceToTargetBps: number;
+                terminalRateBps: number;
+                terminalDistanceToTargetBps: number;
+                improvesConvergence: boolean;
+              }
+            | undefined;
 
-          while (!upperEvaluation.improvesConvergence) {
-            lowerBound = upperBound;
-            if (upperBound === maxAmount) {
-              upperEvaluation = undefined as never;
-              break;
+          if (lookaheadUpdates > 1) {
+            const anchorAmounts = [
+              heuristicSeedAmounts.get(addQuoteBucketIndex),
+              minimumAmount
+            ];
+            const searchAmounts = buildMultiCycleLendSearchAmounts(
+              minimumAmount,
+              maxAmount,
+              anchorAmounts
+            );
+            const improvingMatches: Array<
+              ScalarSearchMatch<{
+                predictedOutcome: RateMoveOutcome;
+                predictedRateWadAfterNextUpdate: bigint;
+                predictedRateBpsAfterNextUpdate: number;
+                predictedDistanceToTargetBps: number;
+                terminalRateBps: number;
+                terminalDistanceToTargetBps: number;
+                improvesConvergence: boolean;
+              }>
+            > = [];
+
+            for (const quoteTokenAmount of searchAmounts) {
+              const evaluation = await evaluate(quoteTokenAmount);
+              if (evaluation.improvesConvergence) {
+                improvingMatches.push({
+                  amount: quoteTokenAmount,
+                  evaluation
+                });
+              }
             }
 
-            upperBound = upperBound * 2n;
+            if (improvingMatches.length === 0) {
+              continue;
+            }
+
+            improvingMatches.sort((left, right) => {
+              if (
+                left.evaluation.terminalDistanceToTargetBps !==
+                right.evaluation.terminalDistanceToTargetBps
+              ) {
+                return (
+                  left.evaluation.terminalDistanceToTargetBps -
+                  right.evaluation.terminalDistanceToTargetBps
+                );
+              }
+
+              if (left.amount !== right.amount) {
+                return left.amount < right.amount ? -1 : 1;
+              }
+
+              if (
+                left.evaluation.predictedDistanceToTargetBps !==
+                right.evaluation.predictedDistanceToTargetBps
+              ) {
+                return (
+                  left.evaluation.predictedDistanceToTargetBps -
+                  right.evaluation.predictedDistanceToTargetBps
+                );
+              }
+
+              return 0;
+            });
+
+            selectedQuoteAmount = improvingMatches[0]!.amount;
+            selectedEvaluation = improvingMatches[0]!.evaluation;
+          } else {
+            let lowerBound = minimumAmount - 1n;
+            let upperBound = heuristicSeedAmounts.get(addQuoteBucketIndex) ?? minimumAmount;
+            if (upperBound < minimumAmount) {
+              upperBound = minimumAmount;
+            }
             if (upperBound > maxAmount) {
               upperBound = maxAmount;
             }
-            upperEvaluation = await evaluate(upperBound);
-          }
+            let upperEvaluation = await evaluate(upperBound);
 
-          if (!upperEvaluation?.improvesConvergence) {
-            continue;
-          }
+            while (!upperEvaluation.improvesConvergence) {
+              lowerBound = upperBound;
+              if (upperBound === maxAmount) {
+                upperEvaluation = undefined as never;
+                break;
+              }
 
-          while (upperBound - lowerBound > 1n) {
-            const middle = lowerBound + (upperBound - lowerBound) / 2n;
-            const middleEvaluation = await evaluate(middle);
-            if (middleEvaluation.improvesConvergence) {
-              upperBound = middle;
-              upperEvaluation = middleEvaluation;
-            } else {
-              lowerBound = middle;
+              upperBound = upperBound * 2n;
+              if (upperBound > maxAmount) {
+                upperBound = maxAmount;
+              }
+              upperEvaluation = await evaluate(upperBound);
             }
+
+            if (!upperEvaluation?.improvesConvergence) {
+              continue;
+            }
+
+            while (upperBound - lowerBound > 1n) {
+              const middle = lowerBound + (upperBound - lowerBound) / 2n;
+              const middleEvaluation = await evaluate(middle);
+              if (middleEvaluation.improvesConvergence) {
+                upperBound = middle;
+                upperEvaluation = middleEvaluation;
+              } else {
+                lowerBound = middle;
+              }
+            }
+
+            selectedQuoteAmount = upperBound;
+            selectedEvaluation = upperEvaluation;
+          }
+
+          if (selectedQuoteAmount === undefined || selectedEvaluation === undefined) {
+            continue;
           }
 
           const expiry =
@@ -2459,34 +2649,37 @@ async function synthesizeAjnaLendCandidateViaSimulation(
             (config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS);
 
           const candidate: PlanCandidate = {
-            id: `sim-lend:${addQuoteBucketIndex}:add-quote:${upperBound.toString()}`,
+            id: `sim-lend:${addQuoteBucketIndex}:add-quote:${selectedQuoteAmount.toString()}`,
             intent: "LEND",
             minimumExecutionSteps: [
               {
                 type: "ADD_QUOTE",
-                amount: upperBound,
+                amount: selectedQuoteAmount,
                 bucketIndex: addQuoteBucketIndex,
                 expiry,
-                note: "simulation-backed add-quote threshold"
+                note:
+                  lookaheadUpdates > 1
+                    ? "simulation-backed add-quote search result"
+                    : "simulation-backed add-quote threshold"
               }
             ],
-            predictedOutcome: upperEvaluation.predictedOutcome,
-            predictedRateBpsAfterNextUpdate: upperEvaluation.predictedRateBpsAfterNextUpdate,
+            predictedOutcome: selectedEvaluation.predictedOutcome,
+            predictedRateBpsAfterNextUpdate: selectedEvaluation.predictedRateBpsAfterNextUpdate,
             resultingDistanceToTargetBps:
               lookaheadUpdates > 1
-                ? upperEvaluation.terminalDistanceToTargetBps
+                ? selectedEvaluation.terminalDistanceToTargetBps
                 : distanceToTargetBand(
-                    upperEvaluation.predictedRateBpsAfterNextUpdate,
+                    selectedEvaluation.predictedRateBpsAfterNextUpdate,
                     targetBand
                   ),
-            quoteTokenDelta: upperBound,
+            quoteTokenDelta: selectedQuoteAmount,
             explanation:
               lookaheadUpdates > 1
-                ? `simulation-backed add-quote threshold improves the ${lookaheadUpdates}-update path from ${baselinePath.firstOutcome} to ${upperEvaluation.predictedOutcome}`
-                : `simulation-backed add-quote threshold changes the next eligible Ajna move from ${baselinePath.firstOutcome} to ${upperEvaluation.predictedOutcome}`
+                ? `simulation-backed add-quote threshold improves the ${lookaheadUpdates}-update path from ${baselinePath.firstOutcome} to ${selectedEvaluation.predictedOutcome}`
+                : `simulation-backed add-quote threshold changes the next eligible Ajna move from ${baselinePath.firstOutcome} to ${selectedEvaluation.predictedOutcome}`
           };
           if (lookaheadUpdates > 1) {
-            candidate.planningRateBps = upperEvaluation.terminalRateBps;
+            candidate.planningRateBps = selectedEvaluation.terminalRateBps;
             candidate.planningLookaheadUpdates = lookaheadUpdates;
           }
           const finalizedCandidate = finalizeCandidate(candidate);

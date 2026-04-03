@@ -3481,6 +3481,68 @@ describeIf("Base factory fork integration", () => {
   );
 
   itBaseExperimental(
+    "surfaces an exact multi-cycle pre-window lend plan from the deterministic fixture when the known-good bucket is pinned",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const matched = await createDeterministicPreWindowLendForecastFixture(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        artifact
+      );
+
+      const { positiveMatch } = await findManualPreWindowLendMatch(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        matched,
+        {
+          bucketOffsets: EXPERIMENTAL_PREWINDOW_MULTI_CYCLE_BUCKET_OFFSETS,
+          quoteAmounts: EXPERIMENTAL_PREWINDOW_MULTI_CYCLE_QUOTE_AMOUNTS,
+          updateCount: 2
+        }
+      );
+
+      expect(positiveMatch).toBeDefined();
+      const thresholdIndex = await readDwatpThresholdFenwickIndex(publicClient, matched.poolAddress);
+      expect(thresholdIndex).toBeDefined();
+      const derivedBucketIndexes = Array.from(
+        new Set(
+          EXPERIMENTAL_PREWINDOW_MULTI_CYCLE_BUCKET_OFFSETS.map((offset) =>
+            Math.max(0, Math.min(7388, (thresholdIndex ?? 0) + offset))
+          )
+        )
+      ).sort((left, right) => left - right);
+      expect(derivedBucketIndexes).toContain(positiveMatch!.bucketIndex);
+
+      const bucketPinnedConfig = resolveKeeperConfig({
+        ...matched.config,
+        addQuoteBucketIndex: positiveMatch!.bucketIndex,
+        enableSimulationBackedLendSynthesis: true,
+        simulationSenderAddress: account.address
+      });
+      const exactSnapshot = await new AjnaRpcSnapshotSource(bucketPinnedConfig, {
+        publicClient,
+        now: () => matched.chainNow
+      }).getSnapshot();
+      const lendCandidate = exactSnapshot.candidates.find((candidate) => candidate.intent === "LEND");
+
+      expect(lendCandidate).toBeDefined();
+      expect(lendCandidate?.planningLookaheadUpdates).toBe(2);
+      expect(lendCandidate?.minimumExecutionSteps[0]).toMatchObject({
+        type: "ADD_QUOTE",
+        bucketIndex: positiveMatch!.bucketIndex
+      });
+    },
+    240_000
+  );
+
+  itBaseExperimental(
     "does not yet surface an exact pre-window lend plan from the deterministic fixture with threshold-aware buckets",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
