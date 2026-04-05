@@ -272,9 +272,13 @@ describe("keeperhub", () => {
     );
 
     const formatted = JSON.parse(formatKeeperHubResponse(result)) as {
+      candidateSource?: string;
+      candidateExecutionMode?: string;
       capital: Record<string, string>;
     };
 
+    expect(formatted.candidateSource).toBeUndefined();
+    expect(formatted.candidateExecutionMode).toBeUndefined();
     expect(formatted.capital).toEqual({
       quoteTokenDelta: "51",
       additionalCollateralRequired: "25",
@@ -282,5 +286,103 @@ describe("keeperhub", () => {
       operatorCapitalRequired: "25",
       operatorCapitalAtRisk: "25"
     });
+  });
+
+  it("allows advisory heuristic planning when an overridden dry-run config opts into it", async () => {
+    const result = await runKeeperHubPayload(
+      {
+        config: {
+          chainId: 8453,
+          poolId: "base:pool",
+          targetRateBps: 1000,
+          toleranceBps: 50,
+          toleranceMode: "absolute",
+          completionPolicy: "next_move_would_overshoot",
+          executionBufferBps: 0,
+          maxQuoteTokenExposure: "1000",
+          maxBorrowExposure: "1000",
+          snapshotAgeMaxSeconds: 90,
+          minTimeBeforeRateWindowSeconds: 120,
+          minExecutableActionQuoteToken: "1",
+          recheckBeforeSubmit: false
+        },
+        snapshot: {
+          snapshotFingerprint: "payload",
+          poolId: "base:pool",
+          chainId: 8453,
+          blockNumber: "10",
+          blockTimestamp: 1000,
+          snapshotAgeSeconds: 5,
+          secondsUntilNextRateUpdate: 600,
+          currentRateBps: 800,
+          predictedNextOutcome: "STEP_DOWN",
+          predictedNextRateBps: 700,
+          candidates: [
+            {
+              id: "heuristic-borrow",
+              intent: "BORROW",
+              candidateSource: "heuristic",
+              executionMode: "advisory",
+              minimumExecutionSteps: [
+                {
+                  type: "DRAW_DEBT",
+                  amount: "50",
+                  limitIndex: 2
+                }
+              ],
+              predictedOutcome: "STEP_UP",
+              predictedRateBpsAfterNextUpdate: 950,
+              resultingDistanceToTargetBps: 0,
+              quoteTokenDelta: "50",
+              explanation: "heuristic borrow"
+            }
+          ]
+        }
+      },
+      {
+        executor: new StepwiseExecutionBackend({
+          DRAW_DEBT: async () => ({ transactionHash: "0xdraw" })
+        })
+      },
+      {
+        config: {
+          ...resolveKeeperHubPayload({
+            config: {
+              chainId: 8453,
+              poolId: "base:pool",
+              targetRateBps: 1000,
+              toleranceBps: 50,
+              toleranceMode: "absolute",
+              completionPolicy: "next_move_would_overshoot",
+              executionBufferBps: 0,
+              maxQuoteTokenExposure: "1000",
+              maxBorrowExposure: "1000",
+              snapshotAgeMaxSeconds: 90,
+              minTimeBeforeRateWindowSeconds: 120,
+              minExecutableActionQuoteToken: "1",
+              recheckBeforeSubmit: false
+            },
+            snapshot: {
+              snapshotFingerprint: "payload",
+              poolId: "base:pool",
+              chainId: 8453,
+              blockNumber: "10",
+              blockTimestamp: 1000,
+              snapshotAgeSeconds: 5,
+              secondsUntilNextRateUpdate: 600,
+              currentRateBps: 800,
+              predictedNextOutcome: "STEP_DOWN",
+              predictedNextRateBps: 700,
+              candidates: []
+            }
+          }).config,
+          allowHeuristicExecution: true
+        }
+      }
+    );
+
+    expect(result.status).toBe("EXECUTED");
+    expect(result.plan.selectedCandidateSource).toBe("heuristic");
+    expect(result.plan.selectedCandidateExecutionMode).toBe("advisory");
   });
 });

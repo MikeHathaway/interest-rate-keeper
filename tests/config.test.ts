@@ -31,6 +31,10 @@ describe("resolveKeeperConfig", () => {
     expect(config.toleranceMode).toBe("relative");
     expect(config.executionBufferBps).toBe(50);
     expect(config.maxQuoteTokenExposure).toBe(1000000n);
+    expect(config.minExecutableQuoteTokenAmount).toBe(1n);
+    expect(config.minExecutableBorrowAmount).toBe(1n);
+    expect(config.minExecutableCollateralAmount).toBe(1n);
+    expect(config.allowHeuristicExecution).toBe(false);
     expect(config.poolAddress).toBe("0x1111111111111111111111111111111111111111");
     expect(config.rpcUrl).toBe("https://base.example.invalid");
     expect(config.addQuoteBucketIndex).toBe(3000);
@@ -49,6 +53,42 @@ describe("resolveKeeperConfig", () => {
     expect(config.borrowSimulationLookaheadUpdates).toBe(2);
     expect(config.enableHeuristicLendSynthesis).toBe(true);
     expect(config.enableHeuristicBorrowSynthesis).toBe(true);
+  });
+
+  it("supports split executable floors and the heuristic execution toggle", () => {
+    const config = resolveKeeperConfig({
+      chainId: 8453,
+      poolId: "base:pool",
+      targetRateBps: 1200,
+      toleranceBps: 1000,
+      maxQuoteTokenExposure: "1000000",
+      maxBorrowExposure: "500000",
+      minExecutableQuoteTokenAmount: "11",
+      minExecutableBorrowAmount: "22",
+      minExecutableCollateralAmount: "33",
+      allowHeuristicExecution: true
+    });
+
+    expect(config.minExecutableQuoteTokenAmount).toBe(11n);
+    expect(config.minExecutableBorrowAmount).toBe(22n);
+    expect(config.minExecutableCollateralAmount).toBe(33n);
+    expect(config.allowHeuristicExecution).toBe(true);
+  });
+
+  it("maps the legacy minExecutableActionQuoteToken field onto all action floors", () => {
+    const config = resolveKeeperConfig({
+      chainId: 8453,
+      poolId: "base:pool",
+      targetRateBps: 1200,
+      toleranceBps: 1000,
+      maxQuoteTokenExposure: "1000000",
+      maxBorrowExposure: "500000",
+      minExecutableActionQuoteToken: "7"
+    });
+
+    expect(config.minExecutableQuoteTokenAmount).toBe(7n);
+    expect(config.minExecutableBorrowAmount).toBe(7n);
+    expect(config.minExecutableCollateralAmount).toBe(7n);
   });
 
   it("parses manual candidates", () => {

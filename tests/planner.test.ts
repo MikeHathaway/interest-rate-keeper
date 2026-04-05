@@ -15,8 +15,11 @@ const baseConfig: KeeperConfig = {
   maxBorrowExposure: 1_000_000n,
   snapshotAgeMaxSeconds: 90,
   minTimeBeforeRateWindowSeconds: 120,
-  minExecutableActionQuoteToken: 1n,
-  recheckBeforeSubmit: true
+  minExecutableQuoteTokenAmount: 1n,
+  minExecutableBorrowAmount: 1n,
+  minExecutableCollateralAmount: 1n,
+  recheckBeforeSubmit: true,
+  allowHeuristicExecution: false
 };
 
 function snapshot(overrides: Partial<PoolSnapshot> = {}): PoolSnapshot {
@@ -49,6 +52,45 @@ describe("planCycle", () => {
     expect(plan.intent).toBe("NO_OP");
     expect(plan.operatorCapitalRequired).toBe(0n);
     expect(plan.operatorCapitalAtRisk).toBe(0n);
+  });
+
+  it("can still act when the current rate is in band but the next eligible update exits the band", () => {
+    const config: KeeperConfig = {
+      ...baseConfig,
+      toleranceMode: "absolute",
+      toleranceBps: 50
+    };
+
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 1000,
+        predictedNextOutcome: "STEP_UP",
+        predictedNextRateBps: 1200,
+        candidates: [
+          {
+            id: "preventive-lend",
+            intent: "LEND",
+            minimumExecutionSteps: [
+              {
+                type: "ADD_QUOTE",
+                amount: 100n,
+                bucketIndex: 3000,
+                expiry: 2_000
+              }
+            ],
+            predictedOutcome: "NO_CHANGE",
+            predictedRateBpsAfterNextUpdate: 1000,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 100n,
+            explanation: "preventive lend keeps the next update in band"
+          }
+        ]
+      }),
+      config
+    );
+
+    expect(plan.intent).toBe("LEND");
+    expect(plan.reason).toMatch(/preventive lend/);
   });
 
   it("no-ops when the natural move already improves convergence", () => {
@@ -157,6 +199,51 @@ describe("planCycle", () => {
     expect(plan.requiredSteps[0]).toMatchObject({
       type: "ADD_QUOTE"
     });
+  });
+
+  it("treats heuristic candidates as advisory unless heuristic execution is explicitly allowed", () => {
+    const heuristicCandidate = {
+      id: "heuristic-borrow",
+      intent: "BORROW" as const,
+      candidateSource: "heuristic" as const,
+      executionMode: "advisory" as const,
+      minimumExecutionSteps: [
+        {
+          type: "DRAW_DEBT" as const,
+          amount: 10n,
+          limitIndex: 3000
+        }
+      ],
+      predictedOutcome: "STEP_UP" as const,
+      predictedRateBpsAfterNextUpdate: 950,
+      resultingDistanceToTargetBps: 0,
+      quoteTokenDelta: 10n,
+      explanation: "heuristic borrower guidance"
+    };
+
+    const blockedPlan = planCycle(
+      snapshot({
+        candidates: [heuristicCandidate]
+      }),
+      baseConfig
+    );
+
+    expect(blockedPlan.intent).toBe("NO_OP");
+    expect(blockedPlan.reason).toMatch(/heuristic execution is disabled/);
+
+    const allowedPlan = planCycle(
+      snapshot({
+        candidates: [heuristicCandidate]
+      }),
+      {
+        ...baseConfig,
+        allowHeuristicExecution: true
+      }
+    );
+
+    expect(allowedPlan.intent).toBe("BORROW");
+    expect(allowedPlan.selectedCandidateSource).toBe("heuristic");
+    expect(allowedPlan.selectedCandidateExecutionMode).toBe("advisory");
   });
 
   it("can choose a candidate using planningRateBps instead of only the next update rate", () => {

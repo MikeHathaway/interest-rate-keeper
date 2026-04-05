@@ -48,25 +48,29 @@ class PayloadThenLiveSnapshotSource implements SnapshotSource {
 
 export async function runKeeperHubPayload(
   input: unknown,
-  dependencies: Omit<RunCycleDependencies, "snapshotSource">
+  dependencies: Omit<RunCycleDependencies, "snapshotSource">,
+  options: {
+    config?: ReturnType<typeof resolveKeeperConfig>;
+  } = {}
 ) {
   const payload = resolveKeeperHubPayload(input);
+  const config = options.config ?? payload.config;
   const canLiveRecheck =
-    payload.config.recheckBeforeSubmit &&
-    payload.config.poolAddress !== undefined &&
-    payload.config.rpcUrl !== undefined;
+    config.recheckBeforeSubmit &&
+    config.poolAddress !== undefined &&
+    config.rpcUrl !== undefined;
 
   const effectiveConfig = canLiveRecheck
-    ? payload.config
+    ? config
     : {
-        ...payload.config,
+        ...config,
         recheckBeforeSubmit: false
       };
 
   const snapshotSource = canLiveRecheck
     ? new PayloadThenLiveSnapshotSource(
         payload.snapshot,
-        new AjnaRpcSnapshotSource(payload.config)
+        new AjnaRpcSnapshotSource(config)
       )
     : new StaticSnapshotSource([payload.snapshot]);
 
@@ -83,6 +87,8 @@ export function formatKeeperHubResponse(result: Awaited<ReturnType<typeof runKee
     poolId: result.poolId,
     chainId: result.chainId,
     intent: result.plan.intent,
+    candidateSource: result.plan.selectedCandidateSource,
+    candidateExecutionMode: result.plan.selectedCandidateExecutionMode,
     capital: {
       quoteTokenDelta: result.plan.quoteTokenDelta,
       additionalCollateralRequired: result.plan.additionalCollateralRequired,

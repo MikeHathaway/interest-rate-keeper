@@ -21,8 +21,11 @@ const baseConfig: KeeperConfig = {
   maxBorrowExposure: 1000n,
   snapshotAgeMaxSeconds: 90,
   minTimeBeforeRateWindowSeconds: 120,
-  minExecutableActionQuoteToken: 1n,
-  recheckBeforeSubmit: true
+  minExecutableQuoteTokenAmount: 1n,
+  minExecutableBorrowAmount: 1n,
+  minExecutableCollateralAmount: 1n,
+  recheckBeforeSubmit: true,
+  allowHeuristicExecution: false
 };
 
 function buildSnapshot(overrides: Partial<PoolSnapshot> = {}): PoolSnapshot {

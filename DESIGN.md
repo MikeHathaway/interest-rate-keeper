@@ -67,16 +67,18 @@ This is the case where `LEND_AND_BORROW` beats single-sided actions.
 
 ### Current Validation Status
 
-The current implementation/testing evidence should be understood per mode:
+The current implementation/testing evidence should be understood through this capability matrix:
 
-- Brand-new pool downward convergence:
-  proven for repeated update-only convergence and representative due-window `LEND` planning
-- Brand-new pool upward convergence:
-  proven only for representative multi-cycle `BORROW`, not exact same-cycle borrower steering
-- Abandoned high-rate reset / recovery:
-  outcome model is implemented, but no separate positive live keeper proof exists beyond shared engine behavior
-- Mixed two-sided correction:
-  representative exact due-window `LEND_AND_BORROW` is proven
+| Pool type | Move rate down toward target | Move rate up toward target |
+| --- | --- | --- |
+| Brand-new pools | proven for repeated update-only convergence and representative due-window `LEND` planning | supported only through representative multi-cycle `BORROW`; exact same-cycle borrower steering remains experimental / unsupported |
+| Abandoned high-rate pools | modeled and partly covered through `RESET_TO_TEN` forecasting plus shared downward engine behavior, but not separately proven end-to-end as its own live strategy | not separately proven; only the shared representative multi-cycle borrower path exists, not an abandoned-pool-specific upward proof |
+| Existing used pools | proven in representative cases; due-window `LEND` is proven and deterministic exact pre-window surfaced-plan coverage now exists, while broader pre-window execution remains experimental | supported in representative multi-cycle `BORROW` cases and representative due-window exact `LEND_AND_BORROW` cases; exact same-cycle borrower steering remains experimental / unsupported |
+
+Practical product conclusion:
+- downward convergence is the strongest supported behavior
+- upward convergence is currently a multi-cycle borrower problem, not a same-cycle borrower-flip problem
+- abandoned-pool reset/recovery is modeled correctly, but still should not be marketed as a separately proven end-to-end mode
 
 ### Current Product Conclusion For Borrower Steering
 
@@ -94,6 +96,10 @@ Why:
 - true existing-borrower fixtures remain negative for exact same-cycle borrower steering
 - deliberately borrower-heavy existing-loan fixtures also remain negative for exact same-cycle borrower steering
 - representative multi-cycle borrower steering is positively proven
+- deterministic not-due quote-only fixtures can now surface and targeted-execute an exact pre-window borrower plan, but that remains experimental rather than routine supported execution
+- representative existing-borrower and complex ongoing multi-actor borrower fixtures still remain negative for generic exact pre-window borrower steering
+- bounded manual multi-cycle pre-window borrower probes across those used-pool fixture families also remain negative so far, the newer boundary-math-ranked existing-borrower pre-window search remains negative as well, and even a representative multi-bucket existing-borrower pre-window borrower probe stays negative after ranking candidates with a protocol-grounded cached-interest-state approximation, which suggests the deterministic quote-only pre-window borrower proof is still a narrow case rather than a generalized used-pool control path
+- protocol source inspection now explains the main split: in normal due-window states Ajna computes the next rate move from previously cached `interestParams` values and only writes the fresh debt/deposit/debtCol/lupt0Debt inputs after that calculation, so default exact borrower search should focus on pre-window and multi-cycle paths instead of due-window same-cycle search
 
 So for v1/v1.1, upward convergence should be implemented as an internal policy ladder:
 

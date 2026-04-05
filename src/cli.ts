@@ -23,14 +23,26 @@ function resolveBackend(config: KeeperConfig, dryRun: boolean): ExecutionBackend
   return dryRun ? new DryRunExecutionBackend() : createAjnaExecutionBackend(config);
 }
 
+function resolveRuntimeConfig(config: KeeperConfig, dryRun: boolean): KeeperConfig {
+  if (!dryRun || config.allowHeuristicExecution) {
+    return config;
+  }
+
+  return {
+    ...config,
+    allowHeuristicExecution: true
+  };
+}
+
 async function main(): Promise<void> {
   try {
     const command = parseCliArgs(process.argv.slice(2));
 
     if (command.mode === "run") {
-      const config = resolveKeeperConfig(
+      const loadedConfig = resolveKeeperConfig(
         JSON.parse(await readFile(command.configPath!, "utf8"))
       );
+      const config = resolveRuntimeConfig(loadedConfig, command.dryRun);
       const backend = resolveBackend(config, command.dryRun);
       const snapshotSource = command.snapshotPath
         ? new FileSnapshotSource(command.snapshotPath)
@@ -49,9 +61,12 @@ async function main(): Promise<void> {
 
     const payload = JSON.parse(await readFile(command.payloadPath!, "utf8"));
     const resolvedPayload = resolveKeeperHubPayload(payload);
-    const backend = resolveBackend(resolvedPayload.config, command.dryRun);
+    const config = resolveRuntimeConfig(resolvedPayload.config, command.dryRun);
+    const backend = resolveBackend(config, command.dryRun);
     const result = await runKeeperHubPayload(payload, {
       executor: backend
+    }, {
+      config
     });
     if (command.summary) {
       process.stderr.write(`${formatCycleCapitalSummary(result)}\n`);

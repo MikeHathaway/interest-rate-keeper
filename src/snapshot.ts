@@ -271,6 +271,26 @@ export function resolvePlanCandidate(input: unknown, label = "plan candidate"): 
     explanation: parseString(record.explanation, `${label}.explanation`)
   };
 
+  if (record.candidateSource !== undefined) {
+    const candidateSource = parseString(record.candidateSource, `${label}.candidateSource`);
+    if (
+      candidateSource !== "simulation" &&
+      candidateSource !== "heuristic" &&
+      candidateSource !== "manual"
+    ) {
+      throw new Error(`${label}.candidateSource is invalid`);
+    }
+    candidate.candidateSource = candidateSource;
+  }
+
+  if (record.executionMode !== undefined) {
+    const executionMode = parseString(record.executionMode, `${label}.executionMode`);
+    if (executionMode !== "supported" && executionMode !== "advisory") {
+      throw new Error(`${label}.executionMode is invalid`);
+    }
+    candidate.executionMode = executionMode;
+  }
+
   if (record.planningRateBps !== undefined) {
     candidate.planningRateBps = parseNumber(record.planningRateBps, `${label}.planningRateBps`);
   }

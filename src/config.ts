@@ -12,8 +12,11 @@ const DEFAULTS = {
   executionBufferBps: 50,
   snapshotAgeMaxSeconds: 90,
   minTimeBeforeRateWindowSeconds: 120,
-  minExecutableActionQuoteToken: 1n,
-  recheckBeforeSubmit: true
+  minExecutableQuoteTokenAmount: 1n,
+  minExecutableBorrowAmount: 1n,
+  minExecutableCollateralAmount: 1n,
+  recheckBeforeSubmit: true,
+  allowHeuristicExecution: false
 };
 
 function parseObject(input: unknown, label: string): Record<string, unknown> {
@@ -166,6 +169,13 @@ export function resolveKeeperConfig(input: unknown): KeeperConfig {
 
   const targetRateBps = parsePositiveNumber(record.targetRateBps, "targetRateBps");
   const toleranceBps = parsePositiveNumber(record.toleranceBps, "toleranceBps");
+  const legacyMinExecutableActionAmount =
+    record.minExecutableActionQuoteToken === undefined
+      ? undefined
+      : parsePositiveBigInt(
+          record.minExecutableActionQuoteToken,
+          "minExecutableActionQuoteToken"
+        );
   const poolAddress =
     record.poolAddress === undefined
       ? undefined
@@ -208,17 +218,35 @@ export function resolveKeeperConfig(input: unknown): KeeperConfig {
             record.minTimeBeforeRateWindowSeconds,
             "minTimeBeforeRateWindowSeconds"
           ),
-    minExecutableActionQuoteToken:
-      record.minExecutableActionQuoteToken === undefined
-        ? DEFAULTS.minExecutableActionQuoteToken
+    minExecutableQuoteTokenAmount:
+      record.minExecutableQuoteTokenAmount === undefined
+        ? legacyMinExecutableActionAmount ?? DEFAULTS.minExecutableQuoteTokenAmount
         : parsePositiveBigInt(
-            record.minExecutableActionQuoteToken,
-            "minExecutableActionQuoteToken"
+            record.minExecutableQuoteTokenAmount,
+            "minExecutableQuoteTokenAmount"
+          ),
+    minExecutableBorrowAmount:
+      record.minExecutableBorrowAmount === undefined
+        ? legacyMinExecutableActionAmount ?? DEFAULTS.minExecutableBorrowAmount
+        : parsePositiveBigInt(
+            record.minExecutableBorrowAmount,
+            "minExecutableBorrowAmount"
+          ),
+    minExecutableCollateralAmount:
+      record.minExecutableCollateralAmount === undefined
+        ? legacyMinExecutableActionAmount ?? DEFAULTS.minExecutableCollateralAmount
+        : parsePositiveBigInt(
+            record.minExecutableCollateralAmount,
+            "minExecutableCollateralAmount"
           ),
     recheckBeforeSubmit:
       record.recheckBeforeSubmit === undefined
         ? DEFAULTS.recheckBeforeSubmit
-        : parseBoolean(record.recheckBeforeSubmit, "recheckBeforeSubmit")
+        : parseBoolean(record.recheckBeforeSubmit, "recheckBeforeSubmit"),
+    allowHeuristicExecution:
+      record.allowHeuristicExecution === undefined
+        ? DEFAULTS.allowHeuristicExecution
+        : parseBoolean(record.allowHeuristicExecution, "allowHeuristicExecution")
   };
 
   if (poolAddress !== undefined) {

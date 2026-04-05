@@ -70,6 +70,7 @@ const MAX_SIMULATION_ACCOUNT_STATE_CACHE_ENTRIES = 256;
 const MAX_EXACT_SIMULATION_PATH_CACHE_ENTRIES = 20_000;
 const MAX_SIMULATION_CANDIDATE_CACHE_ENTRIES = 2_048;
 const DEFAULT_BORROW_LOOKAHEAD_FALLBACK_UPDATES = 3;
+const PREWINDOW_BORROW_INTERMEDIATE_LOOKAHEAD_UPDATES = 2;
 const MULTI_CYCLE_LEND_SEARCH_EXPANSION_FACTOR = 1_000n;
 const EXACT_MULTI_CYCLE_LEND_MAX_QUOTE_SAMPLES = 12;
 const EXACT_MULTI_CYCLE_LEND_LOW_END_QUOTE_SAMPLES = 8;
@@ -77,6 +78,10 @@ const EXACT_SAME_CYCLE_BORROW_MAX_SAMPLES = 8;
 const EXACT_SAME_CYCLE_BORROW_LOW_END_SAMPLES = 5;
 const EXACT_SAME_CYCLE_BORROW_MAX_LIMIT_INDEXES = 2;
 const EXACT_SAME_CYCLE_BORROW_MAX_COLLATERAL_SAMPLES = 4;
+const EXACT_PREWINDOW_BORROW_MAX_SAMPLES = 12;
+const EXACT_PREWINDOW_BORROW_LOW_END_SAMPLES = 7;
+const EXACT_PREWINDOW_BORROW_MAX_LIMIT_INDEXES = 6;
+const EXACT_PREWINDOW_BORROW_MAX_COLLATERAL_SAMPLES = 8;
 
 interface SimulationAccountState {
   simulationSenderAddress: HexAddress;
@@ -160,7 +165,9 @@ function buildSimulationCandidateCacheKey(
     config.enableSimulationBackedBorrowSynthesis ? "sim-borrow" : "no-sim-borrow",
     config.maxQuoteTokenExposure,
     config.maxBorrowExposure,
-    config.minExecutableActionQuoteToken,
+    config.minExecutableQuoteTokenAmount,
+    config.minExecutableBorrowAmount,
+    config.minExecutableCollateralAmount,
     config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS,
     resolveAddQuoteBucketIndexes(config).join(","),
     resolveDrawDebtLimitIndexes(config).join(","),
@@ -175,6 +182,20 @@ function buildSimulationCandidateCacheKey(
     accountState.collateralBalance,
     accountState.collateralAllowance
   ]);
+}
+
+function resolveMinimumQuoteActionAmount(config: KeeperConfig): bigint {
+  return config.minExecutableQuoteTokenAmount > 0n ? config.minExecutableQuoteTokenAmount : 1n;
+}
+
+function resolveMinimumBorrowActionAmount(config: KeeperConfig): bigint {
+  return config.minExecutableBorrowAmount > 0n ? config.minExecutableBorrowAmount : 1n;
+}
+
+function resolveMinimumCollateralActionAmount(config: KeeperConfig): bigint {
+  return config.minExecutableCollateralAmount > 0n
+    ? config.minExecutableCollateralAmount
+    : 1n;
 }
 
 function hasExplicitSynthesisFlags(config: KeeperConfig): boolean {
@@ -294,6 +315,15 @@ export interface AjnaRatePrediction {
   predictedNextRateWad: bigint;
   predictedNextRateBps: number;
   secondsUntilNextRateUpdate: number;
+}
+
+export function hasUninitializedAjnaEmaState(state: AjnaRateState): boolean {
+  return (
+    state.debtEmaWad === 0n &&
+    state.depositEmaWad === 0n &&
+    state.debtColEmaWad === 0n &&
+    state.lupt0DebtEmaWad === 0n
+  );
 }
 
 interface AjnaPoolStateRead {
@@ -539,7 +569,16 @@ function resolveDrawDebtCollateralAmounts(config: KeeperConfig): bigint[] {
     return [0n];
   }
 
-  return Array.from(new Set(configured)).sort((left, right) =>
+  const minimumCollateralAmount = resolveMinimumCollateralActionAmount(config);
+
+  return Array.from(
+    new Set(
+      configured.filter(
+        (collateralAmount) =>
+          collateralAmount === 0n || collateralAmount >= minimumCollateralAmount
+      )
+    )
+  ).sort((left, right) =>
     left < right ? -1 : left > right ? 1 : 0
   );
 }
@@ -1005,6 +1044,30 @@ function buildSameCycleBorrowSearchAmounts(
   );
 }
 
+function buildPreWindowBorrowSearchAmounts(
+  minimumAmount: bigint,
+  maximumAmount: bigint,
+  quoteTokenScale: bigint,
+  anchorAmounts: Array<bigint | undefined>
+): bigint[] {
+  const rawAmounts = Array.from(
+    new Set([
+      ...buildAnchoredSearchAmounts(minimumAmount, maximumAmount, anchorAmounts, {
+        includeBroadSearch: true
+      }),
+      ...buildTokenScaleAnchorAmounts(quoteTokenScale, minimumAmount, maximumAmount),
+      ...buildExposureFractionAnchorAmounts(maximumAmount, minimumAmount)
+    ])
+  ).sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+
+  return compressCapitalAwareSearchAmounts(
+    rawAmounts,
+    anchorAmounts,
+    EXACT_PREWINDOW_BORROW_MAX_SAMPLES,
+    EXACT_PREWINDOW_BORROW_LOW_END_SAMPLES
+  );
+}
+
 function buildAxisSearchAmounts(
   minimumAmount: bigint,
   maximumAmount: bigint,
@@ -1343,6 +1406,21 @@ function finalizeCandidate(candidate: PlanCandidate): PlanCandidate {
   return withPlanCandidateCapitalMetrics(candidate);
 }
 
+function withCandidateExecutionMetadata(
+  candidate: PlanCandidate,
+  fallbackSource?: "simulation" | "heuristic" | "manual"
+): PlanCandidate {
+  const candidateSource = candidate.candidateSource ?? fallbackSource;
+  const executionMode =
+    candidate.executionMode ?? (candidateSource === "heuristic" ? "advisory" : "supported");
+
+  return {
+    ...candidate,
+    ...(candidateSource === undefined ? {} : { candidateSource }),
+    executionMode
+  };
+}
+
 function compareCandidatePreference(left: PlanCandidate, right: PlanCandidate): number {
   const leftCapital = resolveCandidateCapitalMetrics(left);
   const rightCapital = resolveCandidateCapitalMetrics(right);
@@ -1391,6 +1469,32 @@ function resolveBorrowSimulationLookaheadUpdates(config: KeeperConfig): number {
 export function resolveBorrowSimulationLookaheadAttempts(config: KeeperConfig): number[] {
   if (config.borrowSimulationLookaheadUpdates !== undefined) {
     return [config.borrowSimulationLookaheadUpdates];
+  }
+
+  return [1, DEFAULT_BORROW_LOOKAHEAD_FALLBACK_UPDATES];
+}
+
+export function resolveTimedBorrowSimulationLookaheadAttempts(
+  config: KeeperConfig,
+  secondsUntilNextRateUpdate?: number,
+  rateState?: AjnaRateState
+): number[] {
+  if (config.borrowSimulationLookaheadUpdates !== undefined) {
+    return [config.borrowSimulationLookaheadUpdates];
+  }
+
+  if (secondsUntilNextRateUpdate !== undefined && secondsUntilNextRateUpdate > 0) {
+    return [
+      1,
+      PREWINDOW_BORROW_INTERMEDIATE_LOOKAHEAD_UPDATES,
+      DEFAULT_BORROW_LOOKAHEAD_FALLBACK_UPDATES
+    ];
+  }
+
+  // After the first EMA update, Ajna's due-window rate move is driven by previously cached
+  // interest-state values, so a fresh drawDebt is unlikely to change that immediate move.
+  if (rateState && !hasUninitializedAjnaEmaState(rateState)) {
+    return [DEFAULT_BORROW_LOOKAHEAD_FALLBACK_UPDATES];
   }
 
   return [1, DEFAULT_BORROW_LOOKAHEAD_FALLBACK_UPDATES];
@@ -1798,8 +1902,14 @@ function buildPoolSnapshot(
       ? {}
       : { planningLookaheadUpdates: planning.lookaheadUpdates }),
     candidates: [
-      ...autoCandidates.map((candidate) => structuredClone(finalizeCandidate(candidate))),
-      ...manualCandidates.map((candidate) => structuredClone(finalizeCandidate(candidate)))
+      ...autoCandidates.map((candidate) =>
+        structuredClone(
+          finalizeCandidate(withCandidateExecutionMetadata(candidate, autoCandidateSource))
+        )
+      ),
+      ...manualCandidates.map((candidate) =>
+        structuredClone(finalizeCandidate(withCandidateExecutionMetadata(candidate, "manual")))
+      )
     ],
     metadata: {
       poolAddress,
@@ -1948,8 +2058,7 @@ export function synthesizeAjnaLendCandidate(
   if (baselineDistance === 0) {
     return undefined;
   }
-  const minimumAmount =
-    config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
+  const minimumAmount = resolveMinimumQuoteActionAmount(config);
   const maxAmount = config.maxQuoteTokenExposure;
 
   if (minimumAmount > maxAmount) {
@@ -2323,8 +2432,7 @@ async function synthesizeAjnaLendCandidateViaSimulation(
     return undefined;
   }
   const lookaheadUpdates = readState.immediatePrediction.secondsUntilNextRateUpdate > 0 ? 2 : 1;
-  const minimumAmount =
-    config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
+  const minimumAmount = resolveMinimumQuoteActionAmount(config);
   const heuristicSeedCandidate = synthesizeAjnaLendCandidate(readState.rateState, config, {
     quoteTokenScale: readState.quoteTokenScale,
     nowTimestamp: readState.rateState.nowTimestamp,
@@ -2917,8 +3025,7 @@ export function synthesizeAjnaBorrowCandidate(
   if (baselineDistance === 0) {
     return undefined;
   }
-  const minimumAmount =
-    config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
+  const minimumAmount = resolveMinimumBorrowActionAmount(config);
   const maxAmount = config.maxBorrowExposure;
   const collateralAmounts = resolveDrawDebtCollateralAmounts(config);
 
@@ -3102,12 +3209,12 @@ export function synthesizeAjnaLendAndBorrowCandidate(
   if (baselineDistance === 0) {
     return undefined;
   }
-  const minimumAmount =
-    config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
+  const minimumQuoteAmount = resolveMinimumQuoteActionAmount(config);
+  const minimumBorrowAmount = resolveMinimumBorrowActionAmount(config);
   const maxQuoteAmount = config.maxQuoteTokenExposure;
   const maxBorrowAmount = config.maxBorrowExposure;
 
-  if (minimumAmount > maxQuoteAmount || minimumAmount > maxBorrowAmount) {
+  if (minimumQuoteAmount > maxQuoteAmount || minimumBorrowAmount > maxBorrowAmount) {
     return undefined;
   }
 
@@ -3160,7 +3267,9 @@ export function synthesizeAjnaLendAndBorrowCandidate(
   }
 
   let overshootBorrowAmount =
-    anchorDrawDebtStep.amount >= minimumAmount ? anchorDrawDebtStep.amount : minimumAmount;
+    anchorDrawDebtStep.amount >= minimumBorrowAmount
+      ? anchorDrawDebtStep.amount
+      : minimumBorrowAmount;
   let overshootBorrowEvaluation = evaluateBorrowOnly(overshootBorrowAmount);
 
   if (overshootBorrowEvaluation.prediction.predictedNextRateBps <= targetBand.maxRateBps) {
@@ -3213,8 +3322,8 @@ export function synthesizeAjnaLendAndBorrowCandidate(
     );
   }
 
-  let lowerQuoteAmount = minimumAmount - 1n;
-  let upperQuoteAmount = minimumAmount;
+  let lowerQuoteAmount = minimumQuoteAmount - 1n;
+  let upperQuoteAmount = minimumQuoteAmount;
   let upperQuoteEvaluation = evaluateCombined(overshootBorrowAmount, upperQuoteAmount);
 
   while (!dualCandidateCondition(upperQuoteEvaluation)) {
@@ -3352,8 +3461,7 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
 ): Promise<BorrowSimulationSynthesisResult | undefined> {
   const targetBand = buildTargetBand(config);
   const baselinePrediction = options.baselinePrediction ?? readState.prediction;
-  const minimumAmount =
-    config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
+  const minimumAmount = resolveMinimumBorrowActionAmount(config);
   const maxAmount = config.maxBorrowExposure;
   if (minimumAmount > maxAmount) {
     return undefined;
@@ -3365,6 +3473,8 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
     options.accountState?.borrowerAddress ??
     resolveSimulationBorrowerAddress(config, simulationSenderAddress);
   const lookaheadUpdates = resolveBorrowSimulationLookaheadUpdates(config);
+  const isPreWindowBorrowSearch =
+    lookaheadUpdates === 1 && readState.immediatePrediction.secondsUntilNextRateUpdate > 0;
   const heuristicBorrowAnchor =
     lookaheadUpdates === 1
       ? synthesizeAjnaBorrowCandidate(readState.rateState, config, {
@@ -3471,7 +3581,9 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
                   ),
                   ...candidateCollateralAmounts.slice(
                     0,
-                    EXACT_SAME_CYCLE_BORROW_MAX_COLLATERAL_SAMPLES
+                    isPreWindowBorrowSearch
+                      ? EXACT_PREWINDOW_BORROW_MAX_COLLATERAL_SAMPLES
+                      : EXACT_SAME_CYCLE_BORROW_MAX_COLLATERAL_SAMPLES
                   )
                 ])
               ).sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
@@ -3485,22 +3597,22 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
           readState.blockNumber,
           config
         );
+        const prioritizedOneUpdateLimitIndexes = Array.from(
+          new Set([
+            ...(heuristicDrawDebtStep === undefined ? [] : [heuristicDrawDebtStep.limitIndex]),
+            ...resolveDrawDebtLimitIndexes(config),
+            ...allLimitIndexes
+          ])
+        );
         const limitIndexes =
-          lookaheadUpdates === 1 && heuristicDrawDebtStep
-            ? [
-                heuristicDrawDebtStep.limitIndex,
-                ...allLimitIndexes.filter(
-                  (limitIndex) => limitIndex !== heuristicDrawDebtStep.limitIndex
-                )
-              ]
-            : lookaheadUpdates === 1
-              ? Array.from(
-                  new Set([
-                    ...resolveDrawDebtLimitIndexes(config),
-                    ...allLimitIndexes
-                  ])
-                ).slice(0, EXACT_SAME_CYCLE_BORROW_MAX_LIMIT_INDEXES)
-              : allLimitIndexes;
+          lookaheadUpdates === 1
+            ? prioritizedOneUpdateLimitIndexes.slice(
+                0,
+                isPreWindowBorrowSearch
+                  ? EXACT_PREWINDOW_BORROW_MAX_LIMIT_INDEXES
+                  : EXACT_SAME_CYCLE_BORROW_MAX_LIMIT_INDEXES
+              )
+            : allLimitIndexes;
         if (limitIndexes.length === 0) {
           return undefined;
         }
@@ -3734,12 +3846,19 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
 
             const searchAmounts =
               lookaheadUpdates === 1
-                ? buildSameCycleBorrowSearchAmounts(
-                    minimumAmount,
-                    maxAmount,
-                    readState.quoteTokenScale,
-                    [pureThresholdAmount, heuristicThresholdAmount]
-                  )
+                ? isPreWindowBorrowSearch
+                  ? buildPreWindowBorrowSearchAmounts(
+                      minimumAmount,
+                      maxAmount,
+                      readState.quoteTokenScale,
+                      [pureThresholdAmount, heuristicThresholdAmount]
+                    )
+                  : buildSameCycleBorrowSearchAmounts(
+                      minimumAmount,
+                      maxAmount,
+                      readState.quoteTokenScale,
+                      [pureThresholdAmount, heuristicThresholdAmount]
+                    )
                 : buildAnchoredSearchAmounts(
                     minimumAmount,
                     maxAmount,
@@ -3796,7 +3915,9 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
                   amount: refinedUpperBound,
                   limitIndex,
                   collateralAmount,
-                  note: "simulation-backed draw-debt threshold"
+                  note: isPreWindowBorrowSearch
+                    ? "simulation-backed pre-window draw-debt threshold"
+                    : "simulation-backed draw-debt threshold"
                 }
               ],
               predictedOutcome: refinedUpperEvaluation.predictedOutcome,
@@ -3808,7 +3929,9 @@ async function synthesizeAjnaBorrowCandidateViaSimulation(
               explanation:
                 lookaheadUpdates > 1
                   ? `simulation-backed draw-debt threshold improves the ${lookaheadUpdates}-update path from ${baselinePrediction.predictedOutcome} to ${refinedUpperEvaluation.predictedOutcome}`
-                  : `simulation-backed draw-debt threshold changes the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${refinedUpperEvaluation.predictedOutcome}`
+                  : isPreWindowBorrowSearch
+                    ? `simulation-backed pre-window draw-debt threshold improves the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${refinedUpperEvaluation.predictedOutcome}`
+                    : `simulation-backed draw-debt threshold changes the next eligible Ajna move from ${baselinePrediction.predictedOutcome} to ${refinedUpperEvaluation.predictedOutcome}`
             };
             if (lookaheadUpdates > 1) {
               candidate.planningRateBps = refinedUpperEvaluation.terminalRateBps;
@@ -3908,12 +4031,12 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
   const lookaheadUpdates =
     heuristicAnchorBorrowCandidate?.planningLookaheadUpdates ??
     resolveBorrowSimulationLookaheadUpdates(config);
-  const minimumAmount =
-    config.minExecutableActionQuoteToken > 0n ? config.minExecutableActionQuoteToken : 1n;
+  const minimumQuoteAmount = resolveMinimumQuoteActionAmount(config);
+  const minimumBorrowAmount = resolveMinimumBorrowActionAmount(config);
   const maxBorrowAmount = config.maxBorrowExposure;
   const initialLastInterestRateUpdateTimestamp =
     readState.rateState.lastInterestRateUpdateTimestamp;
-  if (minimumAmount > maxBorrowAmount) {
+  if (minimumBorrowAmount > maxBorrowAmount) {
     return undefined;
   }
 
@@ -3983,9 +4106,9 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
           effectiveAccountState.quoteTokenBalance ?? 0n,
           effectiveAccountState.quoteTokenAllowance ?? 0n
         );
-        if (minimumAmount > maxAvailableQuote) {
-          return undefined;
-        }
+          if (minimumQuoteAmount > maxAvailableQuote) {
+            return undefined;
+          }
         const maxAvailableCollateral = smallestBigInt(
           effectiveAccountState.collateralBalance ?? 0n,
           effectiveAccountState.collateralAllowance ?? 0n
@@ -4190,9 +4313,9 @@ async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
           for (const limitIndex of resolveDrawDebtLimitIndexes(config)) {
             for (const collateralAmount of candidateCollateralAmounts) {
               const dualSearchMatch = await searchCoarseToFineDualSpace<DualSimulationEvaluation>({
-                minimumQuoteAmount: minimumAmount,
+                minimumQuoteAmount,
                 maximumQuoteAmount: maxAvailableQuote,
-                minimumBorrowAmount: minimumAmount,
+                minimumBorrowAmount,
                 maximumBorrowAmount: maxBorrowAmount,
                 quoteAnchorAmounts: [
                   anchorDualAddQuoteStep?.bucketIndex === addQuoteBucketIndex
@@ -4518,8 +4641,10 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
 
         if (synthesisPolicy.simulationBorrow) {
           let borrowResult: BorrowSimulationSynthesisResult | undefined;
-          for (const lookaheadUpdates of resolveBorrowSimulationLookaheadAttempts(
-            synthesisConfig
+          for (const lookaheadUpdates of resolveTimedBorrowSimulationLookaheadAttempts(
+            synthesisConfig,
+            readState.immediatePrediction.secondsUntilNextRateUpdate,
+            readState.rateState
           )) {
             const borrowConfig =
               synthesisConfig.borrowSimulationLookaheadUpdates === lookaheadUpdates

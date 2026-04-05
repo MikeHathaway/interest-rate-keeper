@@ -15,8 +15,11 @@ const config: KeeperConfig = {
   maxBorrowExposure: 1000n,
   snapshotAgeMaxSeconds: 90,
   minTimeBeforeRateWindowSeconds: 120,
-  minExecutableActionQuoteToken: 2n,
-  recheckBeforeSubmit: true
+  minExecutableQuoteTokenAmount: 2n,
+  minExecutableBorrowAmount: 2n,
+  minExecutableCollateralAmount: 2n,
+  recheckBeforeSubmit: true,
+  allowHeuristicExecution: false
 };
 
 const snapshot: PoolSnapshot = {
@@ -107,6 +110,27 @@ describe("policy", () => {
     expect(failure?.code).toBe("MIN_EXECUTION_AMOUNT");
   });
 
+  it("rejects too-small draw-debt collateral amounts", () => {
+    const failure = validatePlan(
+      {
+        ...plan,
+        intent: "BORROW",
+        requiredSteps: [
+          {
+            type: "DRAW_DEBT",
+            amount: 10n,
+            limitIndex: 1,
+            collateralAmount: 1n
+          }
+        ]
+      },
+      snapshot,
+      config
+    );
+
+    expect(failure?.code).toBe("MIN_EXECUTION_AMOUNT");
+  });
+
   it("allows a new block when the semantic pool state is unchanged", () => {
     const failure = preSubmitRecheck(
       plan,
@@ -156,6 +180,34 @@ describe("policy", () => {
 
     const failure = preSubmitRecheck(plan, snapshot, freshSnapshot, config);
     expect(failure?.code).toBe("CANDIDATE_INVALIDATED");
+  });
+
+  it("allows preventive action when the current rate is in band but the next eligible update leaves the band", () => {
+    const inBandSnapshot: PoolSnapshot = {
+      ...snapshot,
+      currentRateBps: 950,
+      predictedNextRateBps: 800,
+      predictedNextOutcome: "STEP_DOWN"
+    };
+    const preventivePlan: CyclePlan = {
+      ...plan,
+      predictedRateBpsAfterNextUpdate: 950
+    };
+
+    const failure = preSubmitRecheck(
+      preventivePlan,
+      inBandSnapshot,
+      {
+        ...inBandSnapshot,
+        snapshotFingerprint: "different",
+        blockNumber: 11n,
+        blockTimestamp: 1_012,
+        snapshotAgeSeconds: 8
+      },
+      config
+    );
+
+    expect(failure).toBeUndefined();
   });
 
   it("allows immediate UPDATE_INTEREST plans inside the unsafe window", () => {

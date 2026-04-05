@@ -90,6 +90,17 @@ function naturallyImprovesConvergence(snapshot: PoolSnapshot, band: TargetBand):
   return projectedDistance < currentDistance || isRateInBand(projectedRateBps, band);
 }
 
+function currentAndProjectedRatesAreInBand(snapshot: PoolSnapshot, band: TargetBand): boolean {
+  return (
+    isRateInBand(snapshot.currentRateBps, band) &&
+    isRateInBand(snapshot.planningRateBps ?? snapshot.predictedNextRateBps, band)
+  );
+}
+
+function candidateExecutionAllowed(candidate: PlanCandidate, config: KeeperConfig): boolean {
+  return candidate.executionMode !== "advisory" || config.allowHeuristicExecution;
+}
+
 function defaultBufferPolicy(step: ExecutionStep): "apply" | "none" {
   switch (step.type) {
     case "ADD_QUOTE":
@@ -235,10 +246,10 @@ function chooseBestCandidate(
 export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePlan {
   const targetBand = buildTargetBand(config);
 
-  if (isRateInBand(snapshot.currentRateBps, targetBand)) {
+  if (currentAndProjectedRatesAreInBand(snapshot, targetBand)) {
     return {
       intent: "NO_OP",
-      reason: "current rate is already inside the target band",
+      reason: "current rate and projected next eligible update are already inside the target band",
       targetBand,
       requiredSteps: [],
       predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
@@ -250,7 +261,10 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
   const viableCandidates = snapshot.candidates.filter((candidate) =>
     candidateImprovesConvergence(candidate, snapshot, targetBand)
   );
-  const selected = chooseBestCandidate(viableCandidates, targetBand);
+  const executableCandidates = viableCandidates.filter((candidate) =>
+    candidateExecutionAllowed(candidate, config)
+  );
+  const selected = chooseBestCandidate(executableCandidates, targetBand);
   if (selected) {
     const requiredSteps = maybeAppendUpdateInterest(
       selected.minimumExecutionSteps.map((step) => withExecutionBuffer(step, config)),
@@ -263,10 +277,32 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
       reason: selected.explanation,
       targetBand,
       selectedCandidateId: selected.id,
+      ...(selected.candidateSource === undefined
+        ? {}
+        : { selectedCandidateSource: selected.candidateSource }),
+      ...(selected.executionMode === undefined
+        ? {}
+        : { selectedCandidateExecutionMode: selected.executionMode }),
       requiredSteps,
       predictedOutcomeAfterPlan: selected.predictedOutcome,
       predictedRateBpsAfterNextUpdate: selected.predictedRateBpsAfterNextUpdate,
       ...capital
+    };
+  }
+
+  if (
+    viableCandidates.length > 0 &&
+    viableCandidates.some((candidate) => candidate.executionMode === "advisory") &&
+    !config.allowHeuristicExecution
+  ) {
+    return {
+      intent: "NO_OP",
+      reason: "only advisory heuristic candidates improved convergence, and heuristic execution is disabled",
+      targetBand,
+      requiredSteps: [],
+      predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
+      predictedRateBpsAfterNextUpdate: snapshot.predictedNextRateBps,
+      ...ZERO_PLAN_CAPITAL
     };
   }
 

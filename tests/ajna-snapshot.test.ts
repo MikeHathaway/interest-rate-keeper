@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   classifyAjnaNextRate,
   forecastAjnaNextEligibleRate,
+  hasUninitializedAjnaEmaState,
   resolveAjnaSynthesisPolicy,
   resolveSimulationBorrowCollateralAmounts,
   resolveBorrowSimulationLookaheadAttempts,
+  resolveTimedBorrowSimulationLookaheadAttempts,
   resolveSimulationBorrowLimitIndexes,
   searchCoarseToFineDualSpace,
   synthesizeAjnaBorrowCandidate,
@@ -29,8 +31,11 @@ const baseConfig: KeeperConfig = {
   maxBorrowExposure: 10n * WAD,
   snapshotAgeMaxSeconds: 90,
   minTimeBeforeRateWindowSeconds: 120,
-  minExecutableActionQuoteToken: 1n,
+  minExecutableQuoteTokenAmount: 1n,
+  minExecutableBorrowAmount: 1n,
+  minExecutableCollateralAmount: 1n,
   recheckBeforeSubmit: true,
+  allowHeuristicExecution: false,
   addQuoteBucketIndex: 3000,
   addQuoteExpirySeconds: 3600
 };
@@ -102,6 +107,38 @@ describe("classifyAjnaNextRate", () => {
 
     expect(prediction.predictedOutcome).toBe("STEP_UP");
     expect(prediction.predictedNextRateBps).toBe(1100);
+  });
+});
+
+describe("hasUninitializedAjnaEmaState", () => {
+  it("detects pools before their first EMA update", () => {
+    expect(
+      hasUninitializedAjnaEmaState({
+        currentRateWad: 100_000_000_000_000_000n,
+        currentDebtWad: 1_000n,
+        debtEmaWad: 0n,
+        depositEmaWad: 0n,
+        debtColEmaWad: 0n,
+        lupt0DebtEmaWad: 0n,
+        lastInterestRateUpdateTimestamp: 10_000,
+        nowTimestamp: 10_100
+      })
+    ).toBe(true);
+  });
+
+  it("treats nonzero EMA values as an initialized ongoing state", () => {
+    expect(
+      hasUninitializedAjnaEmaState({
+        currentRateWad: 100_000_000_000_000_000n,
+        currentDebtWad: 1_000n,
+        debtEmaWad: 500n,
+        depositEmaWad: 1_000n,
+        debtColEmaWad: 100n,
+        lupt0DebtEmaWad: 100n,
+        lastInterestRateUpdateTimestamp: 10_000,
+        nowTimestamp: 10_100
+      })
+    ).toBe(false);
   });
 });
 
@@ -676,6 +713,48 @@ describe("resolveBorrowSimulationLookaheadAttempts", () => {
         borrowSimulationLookaheadUpdates: 4
       })
     ).toEqual([4]);
+  });
+
+  it("tries 1, 2, then 3 updates for not-due borrower states when no explicit lookahead is configured", () => {
+    expect(resolveTimedBorrowSimulationLookaheadAttempts(baseConfig, 3600)).toEqual([1, 2, 3]);
+  });
+
+  it("skips the one-update path by default for due-window states after EMA initialization", () => {
+    expect(
+      resolveTimedBorrowSimulationLookaheadAttempts(
+        baseConfig,
+        0,
+        {
+          currentRateWad: 100_000_000_000_000_000n,
+          currentDebtWad: 1_000n,
+          debtEmaWad: 500n,
+          depositEmaWad: 1_000n,
+          debtColEmaWad: 100n,
+          lupt0DebtEmaWad: 100n,
+          lastInterestRateUpdateTimestamp: 10_000,
+          nowTimestamp: 50_000
+        }
+      )
+    ).toEqual([3]);
+  });
+
+  it("retains 1 then 3 updates for due-window states before the first EMA update", () => {
+    expect(
+      resolveTimedBorrowSimulationLookaheadAttempts(
+        baseConfig,
+        0,
+        {
+          currentRateWad: 100_000_000_000_000_000n,
+          currentDebtWad: 1_000n,
+          debtEmaWad: 0n,
+          depositEmaWad: 0n,
+          debtColEmaWad: 0n,
+          lupt0DebtEmaWad: 0n,
+          lastInterestRateUpdateTimestamp: 10_000,
+          nowTimestamp: 50_000
+        }
+      )
+    ).toEqual([1, 3]);
   });
 });
 

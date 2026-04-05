@@ -32,6 +32,22 @@ function stepAmount(step: ExecutionStep): bigint {
   }
 }
 
+function minimumExecutableAmountForStep(step: ExecutionStep, config: KeeperConfig): bigint {
+  switch (step.type) {
+    case "ADD_QUOTE":
+    case "REMOVE_QUOTE":
+    case "REPAY_DEBT":
+      return config.minExecutableQuoteTokenAmount;
+    case "DRAW_DEBT":
+      return config.minExecutableBorrowAmount;
+    case "ADD_COLLATERAL":
+    case "REMOVE_COLLATERAL":
+      return config.minExecutableCollateralAmount;
+    case "UPDATE_INTEREST":
+      return 0n;
+  }
+}
+
 function quoteExposureForStep(step: ExecutionStep): bigint {
   switch (step.type) {
     case "ADD_QUOTE":
@@ -84,6 +100,20 @@ function coarseSnapshotSignature(snapshot: PoolSnapshot): string {
       ? "-"
       : String(snapshot.planningLookaheadUpdates)
   ].join(":");
+}
+
+function projectedRateBps(snapshot: PoolSnapshot): number {
+  return snapshot.planningRateBps ?? snapshot.predictedNextRateBps;
+}
+
+function currentAndProjectedRatesAreInBand(
+  snapshot: PoolSnapshot,
+  plan: CyclePlan
+): boolean {
+  return (
+    distanceToTargetBand(snapshot.currentRateBps, plan.targetBand) === 0 &&
+    distanceToTargetBand(projectedRateBps(snapshot), plan.targetBand) === 0
+  );
 }
 
 function sameSemanticPoolState(previousSnapshot: PoolSnapshot, freshSnapshot: PoolSnapshot): boolean {
@@ -147,10 +177,22 @@ export function validatePlan(
 
   for (const step of plan.requiredSteps) {
     const amount = stepAmount(step);
-    if (amount > 0n && amount < config.minExecutableActionQuoteToken) {
+    const minimumStepAmount = minimumExecutableAmountForStep(step, config);
+    if (amount > 0n && amount < minimumStepAmount) {
       return {
         code: "MIN_EXECUTION_AMOUNT",
         reason: `step ${step.type} is below the minimum executable amount`
+      };
+    }
+
+    if (
+      step.type === "DRAW_DEBT" &&
+      (step.collateralAmount ?? 0n) > 0n &&
+      (step.collateralAmount ?? 0n) < config.minExecutableCollateralAmount
+    ) {
+      return {
+        code: "MIN_EXECUTION_AMOUNT",
+        reason: "draw-debt collateral amount is below the minimum executable collateral amount"
       };
     }
 
@@ -219,13 +261,10 @@ export function preSubmitRecheck(
     }
   }
 
-  if (
-    distanceToTargetBand(freshSnapshot.currentRateBps, plan.targetBand) === 0 &&
-    plan.intent !== "NO_OP"
-  ) {
+  if (plan.intent !== "NO_OP" && currentAndProjectedRatesAreInBand(freshSnapshot, plan)) {
     return {
       code: "POOL_STATE_CHANGED",
-      reason: "pool moved into the target band before execution"
+      reason: "pool is already safely inside the target band before execution"
     };
   }
 

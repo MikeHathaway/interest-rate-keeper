@@ -15,6 +15,8 @@ export type RateMoveOutcome =
 export type CompletionPolicy = "in_band" | "next_move_would_overshoot";
 export type ToleranceMode = "absolute" | "relative";
 export type ExecutionBufferPolicy = "apply" | "none";
+export type CandidateSource = "simulation" | "heuristic" | "manual";
+export type CandidateExecutionMode = "supported" | "advisory";
 
 export interface TargetBand {
   minRateBps: number;
@@ -83,6 +85,8 @@ export type ExecutionStep =
 export interface PlanCandidate {
   id: string;
   intent: Exclude<KeeperIntent, "NO_OP">;
+  candidateSource?: CandidateSource;
+  executionMode?: CandidateExecutionMode;
   minimumExecutionSteps: ExecutionStep[];
   predictedOutcome: RateMoveOutcome;
   predictedRateBpsAfterNextUpdate: number;
@@ -131,9 +135,12 @@ export interface KeeperConfig {
   maxBorrowExposure: bigint;
   snapshotAgeMaxSeconds: number;
   minTimeBeforeRateWindowSeconds: number;
-  minExecutableActionQuoteToken: bigint;
+  minExecutableQuoteTokenAmount: bigint;
+  minExecutableBorrowAmount: bigint;
+  minExecutableCollateralAmount: bigint;
   maxGasCostWei?: bigint;
   recheckBeforeSubmit: boolean;
+  allowHeuristicExecution: boolean;
   addQuoteBucketIndex?: number;
   addQuoteBucketIndexes?: number[];
   addQuoteExpirySeconds?: number;
@@ -156,6 +163,8 @@ export interface CyclePlan {
   reason: string;
   targetBand: TargetBand;
   selectedCandidateId?: string;
+  selectedCandidateSource?: CandidateSource;
+  selectedCandidateExecutionMode?: CandidateExecutionMode;
   requiredSteps: ExecutionStep[];
   predictedOutcomeAfterPlan: RateMoveOutcome;
   predictedRateBpsAfterNextUpdate: number;
