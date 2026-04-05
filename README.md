@@ -11,6 +11,15 @@ This repo currently contains:
 
 The detailed product and engineering decisions are in [DESIGN.md](./DESIGN.md). Deferred work is tracked in [TODOS.md](./TODOS.md).
 
+An architecture diagram for the keeper runtime and module layout lives in [DESIGN.md#architecture](./DESIGN.md#architecture).
+
+![Keeper architecture](./docs/diagrams/keeper-architecture.png)
+
+Rendered assets:
+- [Architecture SVG](./docs/diagrams/keeper-architecture.svg)
+- [Sequence SVG](./docs/diagrams/keeper-run-cycle-sequence.svg)
+- [Sequence PNG](./docs/diagrams/keeper-run-cycle-sequence.png)
+
 ## Status
 
 This is still an early implementation. The core keeper loop exists and the live Ajna path is wired, but fully automatic steering is still incomplete:

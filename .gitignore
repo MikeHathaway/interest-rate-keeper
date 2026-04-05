@@ -8,6 +8,7 @@ logs/
 
 .env
 !.env.example
+.codex
 
 *.log
 *.pid

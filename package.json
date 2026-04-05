@@ -26,7 +26,8 @@
   "files": [
     "dist/src",
     "README.md",
-    "DESIGN.md"
+    "DESIGN.md",
+    "docs/diagrams"
   ],
   "publishConfig": {
     "access": "public"
@@ -35,6 +36,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint .",
+    "render:diagrams": "node ./scripts/render-diagrams.mjs",
     "verify": "npm run lint && npm run typecheck && npm test && npm run build",
     "test": "vitest run",
     "test:watch": "vitest",

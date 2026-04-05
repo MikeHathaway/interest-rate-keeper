@@ -269,71 +269,169 @@ Suggested config:
 
 ### High-Level Flow
 
-```text
-operator config + onchain state
-              |
-              v
-    +----------------------+
-    | snapshot builder     |
-    | block-pinned reads   |
-    | outcome classification|
-    +----------------------+
-              |
-              v
-    +----------------------+
-    | planner (pure)       |
-    | target band logic    |
-    | threshold calc       |
-    | closed action plan   |
-    +----------------------+
-              |
-              v
-    +----------------------+
-    | policy / guards      |
-    | caps                 |
-    | stale checks         |
-    | unsafe window checks |
-    +----------------------+
-              |
-              v
-    +----------------------+
-    | executor             |
-    | direct tx execution  |
-    | partial success log  |
-    +----------------------+
-              |
-              v
-    +----------------------+
-    | structured run log   |
-    | summary result       |
-    +----------------------+
+```mermaid
+flowchart TD
+  Operator["Operator input\nconfig + env + optional payload/snapshot"]
+
+  subgraph Entry["Entry points"]
+    CLI["cli.ts\nrun / run-payload"]
+    KeeperHub["keeperhub.ts\npayload adapter"]
+  end
+
+  subgraph Snapshot["Snapshot layer"]
+    FileSource["FileSnapshotSource /\nStaticSnapshotSource /\nPayloadThenLiveSnapshotSource"]
+    AjnaSource["AjnaRpcSnapshotSource"]
+    AjnaRead["Ajna RPC reads\nblock-pinned pool + account state"]
+    Synthesis["Exact + heuristic synthesis\nlend / borrow / dual candidates"]
+    PoolSnapshot["PoolSnapshot\ncurrent rate + passive path + candidates"]
+  end
+
+  subgraph Decision["Decision layer"]
+    Planner["planner.ts\nplanCycle()"]
+    Policy["policy.ts\nvalidatePlan()"]
+    Recheck["policy.ts\npreSubmitRecheck()"]
+  end
+
+  subgraph Execution["Execution layer"]
+    RunCycle["run-cycle.ts\norchestrate plan / recheck / execute"]
+    StepExec["execute.ts\nstepwise backend"]
+    AjnaExec["ajna/executor.ts\nlive Ajna tx handlers"]
+    AjnaPool["Ajna pool + ERC20 contracts\nvia viem"]
+  end
+
+  subgraph Outputs["Outputs"]
+    Result["CycleResult\nstatus + plan + capital + tx hashes"]
+    Log["log.ts\nJSONL append"]
+    Human["CLI JSON / KeeperHub response /\nhuman summary"]
+  end
+
+  Operator --> CLI
+  Operator --> KeeperHub
+  CLI --> RunCycle
+  KeeperHub --> RunCycle
+  CLI --> FileSource
+  KeeperHub --> FileSource
+  RunCycle --> FileSource
+  RunCycle --> AjnaSource
+  AjnaSource --> AjnaRead --> Synthesis --> PoolSnapshot
+  FileSource --> PoolSnapshot
+  PoolSnapshot --> Planner --> Policy --> RunCycle
+  RunCycle --> Recheck
+  Recheck --> AjnaSource
+  RunCycle --> StepExec --> AjnaExec --> AjnaPool
+  AjnaPool --> Result
+  RunCycle --> Result
+  Result --> Log
+  Result --> Human
+  StepExec -. multi-step plans fetch a fresh snapshot and re-plan between steps .-> AjnaSource
 ```
+
+Operationally, the architecture is split into four layers:
+- entrypoints: CLI and KeeperHub normalize config and runtime mode
+- snapshot: build a block-pinned `PoolSnapshot` and synthesize candidate actions
+- decision: pick one closed-form plan and apply guard checks
+- execution: submit steps, re-read/re-plan between sequential actions, then emit structured results
 
 ### Proposed Module Layout
 
 Keep v1 flat and functional, not class-heavy:
 
-```text
-src/
-  types.ts
-  config.ts
-  snapshot.ts
-  planner.ts
-  policy.ts
-  execute.ts
-  log.ts
-  run-cycle.ts
-  cli.ts
-  keeperhub.ts
+```mermaid
+flowchart LR
+  Types["types.ts\nshared schemas"]
+  Config["config.ts\nparse + validate"]
+  GenericSnapshot["snapshot.ts\nfile/manual snapshot parsing"]
+  AjnaSnapshot["ajna/snapshot.ts\nlive reads + candidate synthesis"]
+  Metrics["candidate-metrics.ts\ncapital derivation"]
+  Planner["planner.ts\npure plan selection"]
+  Policy["policy.ts\nguards + recheck"]
+  Execute["execute.ts\nbackend abstraction"]
+  AjnaExec["ajna/executor.ts\nAjna tx execution"]
+  RunCycle["run-cycle.ts\none-cycle orchestration"]
+  Log["log.ts\nJSONL logging"]
+  Summary["human-summary.ts\nstderr summary line"]
+  CLI["cli.ts"]
+  KeeperHub["keeperhub.ts"]
+
+  Types --> Config
+  Types --> GenericSnapshot
+  Types --> AjnaSnapshot
+  Types --> Metrics
+  Types --> Planner
+  Types --> Policy
+  Types --> Execute
+  Types --> RunCycle
+  Config --> CLI
+  Config --> KeeperHub
+  GenericSnapshot --> CLI
+  GenericSnapshot --> KeeperHub
+  AjnaSnapshot --> CLI
+  AjnaSnapshot --> KeeperHub
+  Metrics --> Planner
+  Planner --> RunCycle
+  Policy --> RunCycle
+  Execute --> RunCycle
+  AjnaExec --> Execute
+  Log --> RunCycle
+  Summary --> CLI
+  RunCycle --> CLI
+  RunCycle --> KeeperHub
+```
+
+### `runCycle()` Sequence
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor O as Operator
+  participant E as CLI / KeeperHub
+  participant S as SnapshotSource
+  participant P as Planner
+  participant G as Policy / Guards
+  participant X as Execution backend
+  participant A as Ajna pool / ERC20
+
+  O->>E: run config or payload
+  E->>S: getSnapshot() for planning
+  S-->>E: PoolSnapshot
+  E->>P: planCycle(snapshot, config)
+  P-->>E: CyclePlan
+  E->>G: validatePlan(plan, snapshot, config)
+  G-->>E: valid or abort
+
+  alt recheckBeforeSubmit
+    E->>S: getSnapshot() for recheck
+    S-->>E: fresh PoolSnapshot
+    E->>G: preSubmitRecheck(plan, previous, fresh, config)
+    G-->>E: valid or abort
+  end
+
+  E->>X: execute(plan)
+  X->>A: submit tx step(s)
+  A-->>X: receipts / state changes
+
+  opt sequential multi-step plan
+    X-->>E: first step executed
+    E->>S: getSnapshot() again
+    S-->>E: fresh PoolSnapshot
+    E->>P: replan remaining step(s)
+    P-->>E: continue or abort
+    E->>X: execute remaining step
+  end
+
+  X-->>E: ExecutionOutcome
+  E-->>O: CycleResult / JSON / summary
 ```
 
 Module responsibilities:
 - `types.ts`: shared typed schemas
 - `config.ts`: parse/validate config
-- `snapshot.ts`: block-pinned RPC reads and next-rate classification
-- `planner.ts`: pure decision logic
+- `snapshot.ts`: generic file/manual snapshot parsing plus `SnapshotSource` helpers
+- `ajna/snapshot.ts`: block-pinned Ajna RPC reads, passive-path classification, exact/heuristic synthesis
+- `planner.ts`: pure decision logic and plan-capital derivation
 - `policy.ts`: caps, stale guards, unsafe-window guards, pre-submit recheck
-- `execute.ts`: transaction submission and result handling
+- `execute.ts`: transaction submission abstraction and stepwise execution backend
+- `ajna/executor.ts`: live Ajna transaction handlers
 - `log.ts`: append-only structured run logs
 - `run-cycle.ts`: orchestration of one cycle
 - `cli.ts`: one-shot local entrypoint

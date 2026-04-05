@@ -1,0 +1,65 @@
+digraph KeeperRunCycleSequence {
+  graph [
+    rankdir=TB
+    splines=ortho
+    pad="0.2"
+    nodesep="0.45"
+    ranksep="0.7"
+    fontname="Helvetica"
+    bgcolor="white"
+  ];
+
+  node [
+    shape=box
+    style="rounded,filled"
+    fontname="Helvetica"
+    fontsize=11
+    color="#334155"
+    fillcolor="#f8fafc"
+    margin="0.18,0.10"
+  ];
+
+  edge [
+    fontname="Helvetica"
+    fontsize=10
+    color="#475569"
+    arrowsize=0.7
+  ];
+
+  operator [label="Operator", shape=oval, color="#c2410c", fillcolor="#fff7ed"];
+  entry [label="CLI / KeeperHub"];
+  snapshot [label="SnapshotSource"];
+  planner [label="Planner"];
+  policy [label="Policy"];
+  executor [label="Execution backend"];
+  pool [label="Ajna pool / ERC20"];
+
+  {
+    rank=same;
+    operator;
+    entry;
+    snapshot;
+    planner;
+    policy;
+    executor;
+    pool;
+  }
+
+  operator -> entry [label="1. run command or payload"];
+  entry -> snapshot [label="2. getSnapshot() for planning"];
+  snapshot -> pool [label="3. read pool + borrower state"];
+  pool -> snapshot [label="4. passive path + candidates"];
+  snapshot -> planner [label="5. PoolSnapshot"];
+  planner -> policy [label="6. CyclePlan"];
+  policy -> entry [label="7. validate or abort"];
+  entry -> snapshot [label="8. fresh getSnapshot() for recheck", style=dashed];
+  snapshot -> policy [label="9. preSubmitRecheck()", style=dashed];
+  policy -> executor [label="10. execute requiredSteps"];
+  executor -> pool [label="11. submit tx(s)"];
+  pool -> executor [label="12. receipt(s)"];
+  executor -> snapshot [label="13. if multi-step: fetch fresh snapshot", style=dashed];
+  snapshot -> planner [label="14. replan remaining step(s)", style=dashed];
+  planner -> executor [label="15. continue or abort", style=dashed];
+  executor -> entry [label="16. CycleResult"];
+  entry -> operator [label="17. JSON / KeeperHub / summary"];
+}

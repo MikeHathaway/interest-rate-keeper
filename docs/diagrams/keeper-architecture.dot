@@ -1,0 +1,107 @@
+digraph KeeperArchitecture {
+  graph [
+    rankdir=LR
+    splines=ortho
+    pad="0.2"
+    nodesep="0.5"
+    ranksep="0.8"
+    fontname="Helvetica"
+    bgcolor="white"
+  ];
+
+  node [
+    shape=box
+    style="rounded,filled"
+    fontname="Helvetica"
+    fontsize=11
+    color="#334155"
+    fillcolor="#f8fafc"
+    margin="0.18,0.10"
+  ];
+
+  edge [
+    fontname="Helvetica"
+    fontsize=10
+    color="#475569"
+    arrowsize=0.7
+  ];
+
+  operator [
+    shape=oval
+    label="Operator\nconfig + env + optional payload/snapshot"
+    color="#c2410c"
+    fillcolor="#fff7ed"
+  ];
+
+  subgraph cluster_entry {
+    label="Entry points";
+    color="#cbd5e1";
+    style="rounded";
+
+    cli [label="cli.ts\nrun / run-payload"];
+    keeperhub [label="keeperhub.ts\npayload adapter"];
+  }
+
+  subgraph cluster_snapshot {
+    label="Snapshot layer";
+    color="#cbd5e1";
+    style="rounded";
+
+    file_source [label="snapshot.ts\nFileSnapshotSource / StaticSnapshotSource /\nPayloadThenLiveSnapshotSource"];
+    ajna_source [label="ajna/snapshot.ts\nAjnaRpcSnapshotSource"];
+    ajna_reads [label="Ajna RPC reads\nblock-pinned pool + account state"];
+    synthesis [label="exact + heuristic synthesis\nlend / borrow / dual candidates"];
+    pool_snapshot [label="PoolSnapshot\ncurrent rate + passive path + candidates"];
+  }
+
+  subgraph cluster_decision {
+    label="Decision layer";
+    color="#cbd5e1";
+    style="rounded";
+
+    planner [label="planner.ts\nplanCycle()"];
+    policy [label="policy.ts\nvalidatePlan()"];
+    recheck [label="policy.ts\npreSubmitRecheck()"];
+  }
+
+  subgraph cluster_execution {
+    label="Execution layer";
+    color="#cbd5e1";
+    style="rounded";
+
+    run_cycle [label="run-cycle.ts\norchestrate plan / recheck / execute"];
+    backend [label="execute.ts\nstepwise backend"];
+    ajna_executor [label="ajna/executor.ts\nlive Ajna tx handlers"];
+    contracts [label="Ajna pool + ERC20 contracts\nvia viem"];
+  }
+
+  subgraph cluster_outputs {
+    label="Outputs";
+    color="#cbd5e1";
+    style="rounded";
+
+    result [label="CycleResult\nstatus + plan + capital + tx hashes"];
+    log_jsonl [label="log.ts\nJSONL append"];
+    responses [label="CLI JSON / KeeperHub response /\nhuman summary"];
+  }
+
+  operator -> cli;
+  operator -> keeperhub;
+  cli -> run_cycle [label="invoke cycle"];
+  keeperhub -> run_cycle [label="invoke cycle"];
+  cli -> file_source [label="optional file snapshot"];
+  keeperhub -> file_source [label="payload snapshot"];
+  run_cycle -> file_source [label="planning snapshot", style=dashed];
+  run_cycle -> ajna_source [label="live snapshot / recheck"];
+  ajna_source -> ajna_reads -> synthesis -> pool_snapshot;
+  file_source -> pool_snapshot;
+  pool_snapshot -> planner -> policy -> run_cycle;
+  run_cycle -> recheck;
+  recheck -> ajna_source [label="fresh snapshot"];
+  run_cycle -> backend -> ajna_executor -> contracts;
+  contracts -> result [label="receipts / final state"];
+  run_cycle -> result [label="plan + execution outcome"];
+  result -> log_jsonl;
+  result -> responses;
+  backend -> ajna_source [style=dashed, label="multi-step\nre-read + re-plan"];
+}
