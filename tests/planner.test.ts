@@ -246,6 +246,41 @@ describe("planCycle", () => {
     expect(allowedPlan.selectedCandidateExecutionMode).toBe("advisory");
   });
 
+  it("refuses unsupported exact candidates and explains the runtime mismatch", () => {
+    const plan = planCycle(
+      snapshot({
+        metadata: {
+          simulationExecutionCompatibilityReason:
+            "simulation-backed synthesis used a different sender than the live execution signer"
+        },
+        candidates: [
+          {
+            id: "sim-borrow",
+            intent: "BORROW",
+            candidateSource: "simulation",
+            executionMode: "unsupported",
+            minimumExecutionSteps: [
+              {
+                type: "DRAW_DEBT",
+                amount: 10n,
+                limitIndex: 3000
+              }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 950,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 10n,
+            explanation: "simulation-backed borrower path"
+          }
+        ]
+      }),
+      baseConfig
+    );
+
+    expect(plan.intent).toBe("NO_OP");
+    expect(plan.reason).toMatch(/different sender than the live execution signer/i);
+  });
+
   it("can choose a candidate using planningRateBps instead of only the next update rate", () => {
     const plan = planCycle(
       snapshot({
@@ -278,6 +313,8 @@ describe("planCycle", () => {
 
     expect(plan.intent).toBe("BORROW");
     expect(plan.reason).toMatch(/two-update borrow path/);
+    expect(plan.planningRateBps).toBe(950);
+    expect(plan.planningLookaheadUpdates).toBe(2);
   });
 
   it("prefers a multi-cycle borrower plan over a passive one-step improvement", () => {

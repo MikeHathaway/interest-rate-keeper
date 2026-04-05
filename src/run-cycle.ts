@@ -113,7 +113,11 @@ async function executePlan(
   execution: ExecutionOutcome;
   finalSnapshot: PoolSnapshot;
 }> {
-  if (!config.recheckBeforeSubmit || plan.requiredSteps.length <= 1) {
+  if (
+    dependencies.executor.dryRun === true ||
+    !config.recheckBeforeSubmit ||
+    plan.requiredSteps.length <= 1
+  ) {
     return {
       execution: await dependencies.executor.execute(plan, {
         config,
@@ -218,6 +222,7 @@ async function executePlan(
 }
 
 function buildResultBase(
+  dryRun: boolean,
   status: CycleResult["status"],
   reason: string,
   plan: CycleResult["plan"],
@@ -226,6 +231,7 @@ function buildResultBase(
   snapshotFingerprint: string
 ): CycleResult {
   return {
+    dryRun,
     status,
     reason,
     poolId,
@@ -263,6 +269,7 @@ export async function runCycle(
   config: KeeperConfig,
   dependencies: RunCycleDependencies
 ): Promise<CycleResult> {
+  const dryRun = dependencies.executor.dryRun === true;
   const planningSnapshot = await dependencies.snapshotSource.getSnapshot();
   const plan = planCycle(planningSnapshot, config);
 
@@ -270,6 +277,7 @@ export async function runCycle(
     return writeLogIfNeeded(
       config,
       buildResultBase(
+        dryRun,
         "NO_OP",
         plan.reason,
         plan,
@@ -285,6 +293,7 @@ export async function runCycle(
     return writeLogIfNeeded(
       config,
       buildResultBase(
+        dryRun,
         "ABORTED",
         validationFailure.reason,
         plan,
@@ -310,6 +319,7 @@ export async function runCycle(
       return writeLogIfNeeded(
         config,
         buildResultBase(
+          dryRun,
           "ABORTED",
           recheckFailure.reason,
           plan,
@@ -329,9 +339,12 @@ export async function runCycle(
   );
 
   const base = buildResultBase(
+    dryRun,
     execution.status,
     execution.status === "EXECUTED"
-      ? "cycle executed successfully"
+      ? dryRun
+        ? "cycle dry-run completed successfully"
+        : "cycle executed successfully"
       : execution.status === "PARTIAL_FAILURE"
         ? "cycle partially executed before a step failed"
         : execution.error,

@@ -15,10 +15,13 @@ export interface ExecutionContext {
 }
 
 export interface ExecutionBackend {
+  readonly dryRun?: boolean;
   execute(plan: CyclePlan, context: ExecutionContext): Promise<ExecutionOutcome>;
 }
 
 export class DryRunExecutionBackend implements ExecutionBackend {
+  readonly dryRun = true;
+
   async execute(plan: CyclePlan): Promise<ExecutionOutcome> {
     return {
       status: "EXECUTED",

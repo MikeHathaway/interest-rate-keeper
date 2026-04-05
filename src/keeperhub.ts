@@ -82,6 +82,7 @@ export async function runKeeperHubPayload(
 
 export function formatKeeperHubResponse(result: Awaited<ReturnType<typeof runKeeperHubPayload>>): string {
   return safeJsonStringify({
+    dryRun: result.dryRun,
     status: result.status,
     reason: result.reason,
     poolId: result.poolId,
@@ -89,6 +90,10 @@ export function formatKeeperHubResponse(result: Awaited<ReturnType<typeof runKee
     intent: result.plan.intent,
     candidateSource: result.plan.selectedCandidateSource,
     candidateExecutionMode: result.plan.selectedCandidateExecutionMode,
+    predictedOutcomeAfterPlan: result.plan.predictedOutcomeAfterPlan,
+    predictedRateBpsAfterNextUpdate: result.plan.predictedRateBpsAfterNextUpdate,
+    planningRateBps: result.plan.planningRateBps,
+    planningLookaheadUpdates: result.plan.planningLookaheadUpdates,
     capital: {
       quoteTokenDelta: result.plan.quoteTokenDelta,
       additionalCollateralRequired: result.plan.additionalCollateralRequired,

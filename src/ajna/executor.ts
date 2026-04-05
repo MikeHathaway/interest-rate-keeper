@@ -3,11 +3,13 @@ import {
   createWalletClient,
   http,
   type Hex,
+  type EstimateFeesPerGasReturnType,
   type PublicClient
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import { ajnaPoolAbi, erc20Abi } from "./abi.js";
+import { requireAjnaPrivateKey } from "./runtime.js";
 import { DryRunExecutionBackend, StepwiseExecutionBackend } from "../execute.js";
 import {
     type AddCollateralStep,
@@ -27,19 +29,18 @@ interface LiveAjnaRuntime {
   recipientAddress?: HexAddress;
 }
 
-function resolvePrivateKey(): Hex {
-  const candidate = process.env.AJNA_KEEPER_PRIVATE_KEY ?? process.env.PRIVATE_KEY;
-  if (!candidate) {
-    throw new Error(
-      "live Ajna execution requires AJNA_KEEPER_PRIVATE_KEY or PRIVATE_KEY in the environment"
-    );
-  }
-
-  if (!/^0x[a-fA-F0-9]{64}$/.test(candidate)) {
-    throw new Error("private key must be a 32-byte hex string");
-  }
-
-  return candidate as Hex;
+interface ContractWriteSpec {
+  address: HexAddress;
+  abi: typeof ajnaPoolAbi;
+  functionName:
+    | "addQuoteToken"
+    | "removeQuoteToken"
+    | "drawDebt"
+    | "repayDebt"
+    | "addCollateral"
+    | "removeCollateral"
+    | "updateInterest";
+  args: readonly unknown[];
 }
 
 function assertLiveAjnaConfig(config: KeeperConfig): LiveAjnaRuntime {
@@ -102,9 +103,46 @@ async function requireAllowance(
   }
 }
 
+function resolveFeeCapWei(fees: EstimateFeesPerGasReturnType): bigint | undefined {
+  if ("maxFeePerGas" in fees && fees.maxFeePerGas !== undefined) {
+    return fees.maxFeePerGas;
+  }
+
+  if ("gasPrice" in fees && fees.gasPrice !== undefined) {
+    return fees.gasPrice;
+  }
+
+  return undefined;
+}
+
+export function estimateGasCostWei(
+  estimatedGas: bigint,
+  feeCapWei: bigint
+): bigint {
+  return estimatedGas * feeCapWei;
+}
+
+export function assertGasCostWithinCap(
+  estimatedGas: bigint,
+  feeCapWei: bigint,
+  maxGasCostWei: bigint | undefined,
+  functionName: ContractWriteSpec["functionName"]
+): void {
+  if (maxGasCostWei === undefined) {
+    return;
+  }
+
+  const estimatedCostWei = estimateGasCostWei(estimatedGas, feeCapWei);
+  if (estimatedCostWei > maxGasCostWei) {
+    throw new Error(
+      `${functionName} estimated gas cost ${estimatedCostWei.toString()} exceeds maxGasCostWei ${maxGasCostWei.toString()}`
+    );
+  }
+}
+
 export function createAjnaExecutionBackend(config: KeeperConfig) {
   const runtime = assertLiveAjnaConfig(config);
-  const account = privateKeyToAccount(resolvePrivateKey());
+  const account = privateKeyToAccount(requireAjnaPrivateKey());
   const publicClient = createPublicClient({
     transport: http(runtime.rpcUrl)
   });
@@ -142,6 +180,42 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
   const borrowerAddress = runtime.borrowerAddress ?? account.address;
   const defaultRecipientAddress = runtime.recipientAddress ?? account.address;
 
+  async function submitContractCall(spec: ContractWriteSpec): Promise<{ transactionHash: Hex }> {
+    const estimatedGas = await publicClient.estimateContractGas({
+      account,
+      address: spec.address,
+      abi: spec.abi,
+      functionName: spec.functionName as never,
+      args: spec.args as never
+    });
+    const fees = await publicClient.estimateFeesPerGas({
+      chain: undefined
+    }).catch(async () => ({
+      gasPrice: await publicClient.getGasPrice()
+    }));
+    const feeCapWei =
+      resolveFeeCapWei(fees) ?? (await publicClient.getGasPrice());
+    assertGasCostWithinCap(
+      estimatedGas,
+      feeCapWei,
+      config.maxGasCostWei,
+      spec.functionName
+    );
+
+    const hash = await walletClient.writeContract({
+      account,
+      chain: undefined,
+      address: spec.address,
+      abi: spec.abi,
+      functionName: spec.functionName as never,
+      args: spec.args as never
+    });
+
+    return {
+      transactionHash: await waitForSuccess(publicClient, hash)
+    };
+  }
+
   return new StepwiseExecutionBackend({
     ADD_QUOTE: async (step) => {
       const addQuoteStep = step as AddQuoteStep;
@@ -154,10 +228,7 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
         addQuoteStep.amount,
         "quote token"
       );
-
-      const hash = await walletClient.writeContract({
-        account,
-        chain: undefined,
+      return submitContractCall({
         address: runtime.poolAddress,
         abi: ajnaPoolAbi,
         functionName: "addQuoteToken",
@@ -167,25 +238,15 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
           BigInt(addQuoteStep.expiry)
         ]
       });
-
-      return {
-        transactionHash: await waitForSuccess(publicClient, hash)
-      };
     },
     REMOVE_QUOTE: async (step) => {
       const removeQuoteStep = step as RemoveQuoteStep;
-      const hash = await walletClient.writeContract({
-        account,
-        chain: undefined,
+      return submitContractCall({
         address: runtime.poolAddress,
         abi: ajnaPoolAbi,
         functionName: "removeQuoteToken",
         args: [removeQuoteStep.amount, BigInt(removeQuoteStep.bucketIndex)]
       });
-
-      return {
-        transactionHash: await waitForSuccess(publicClient, hash)
-      };
     },
     DRAW_DEBT: async (step) => {
       const drawDebtStep = step as DrawDebtStep;
@@ -201,10 +262,7 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
           "collateral token"
         );
       }
-
-      const hash = await walletClient.writeContract({
-        account,
-        chain: undefined,
+      return submitContractCall({
         address: runtime.poolAddress,
         abi: ajnaPoolAbi,
         functionName: "drawDebt",
@@ -215,10 +273,6 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
           collateralAmount
         ]
       });
-
-      return {
-        transactionHash: await waitForSuccess(publicClient, hash)
-      };
     },
     REPAY_DEBT: async (step) => {
       const repayDebtStep = step as RepayDebtStep;
@@ -231,10 +285,7 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
         repayDebtStep.amount,
         "quote token"
       );
-
-      const hash = await walletClient.writeContract({
-        account,
-        chain: undefined,
+      return submitContractCall({
         address: runtime.poolAddress,
         abi: ajnaPoolAbi,
         functionName: "repayDebt",
@@ -246,10 +297,6 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
           BigInt(repayDebtStep.limitIndex ?? 0)
         ]
       });
-
-      return {
-        transactionHash: await waitForSuccess(publicClient, hash)
-      };
     },
     ADD_COLLATERAL: async (step) => {
       const addCollateralStep = step as AddCollateralStep;
@@ -266,10 +313,7 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
         addCollateralStep.amount,
         "collateral token"
       );
-
-      const hash = await walletClient.writeContract({
-        account,
-        chain: undefined,
+      return submitContractCall({
         address: runtime.poolAddress,
         abi: ajnaPoolAbi,
         functionName: "addCollateral",
@@ -279,20 +323,13 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
           BigInt(addCollateralStep.expiry)
         ]
       });
-
-      return {
-        transactionHash: await waitForSuccess(publicClient, hash)
-      };
     },
     REMOVE_COLLATERAL: async (step) => {
       const removeCollateralStep = step as RemoveCollateralStep;
       if (removeCollateralStep.bucketIndex === undefined) {
         throw new Error("Ajna REMOVE_COLLATERAL execution requires bucketIndex");
       }
-
-      const hash = await walletClient.writeContract({
-        account,
-        chain: undefined,
+      return submitContractCall({
         address: runtime.poolAddress,
         abi: ajnaPoolAbi,
         functionName: "removeCollateral",
@@ -301,25 +338,14 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
           BigInt(removeCollateralStep.bucketIndex)
         ]
       });
-
-      return {
-        transactionHash: await waitForSuccess(publicClient, hash)
-      };
     },
-    UPDATE_INTEREST: async () => {
-      const hash = await walletClient.writeContract({
-        account,
-        chain: undefined,
+    UPDATE_INTEREST: async () =>
+      submitContractCall({
         address: runtime.poolAddress,
         abi: ajnaPoolAbi,
         functionName: "updateInterest",
         args: []
-      });
-
-      return {
-        transactionHash: await waitForSuccess(publicClient, hash)
-      };
-    }
+      })
   });
 }
 

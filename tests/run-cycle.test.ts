@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { StepwiseExecutionBackend } from "../src/execute.js";
+import { DryRunExecutionBackend, StepwiseExecutionBackend } from "../src/execute.js";
 import { runCycle } from "../src/run-cycle.js";
 import { StaticSnapshotSource } from "../src/snapshot.js";
 import type { KeeperConfig, PoolSnapshot } from "../src/types.js";
@@ -98,6 +98,17 @@ function buildPostAddQuoteSnapshot(overrides: Partial<PoolSnapshot> = {}): PoolS
 }
 
 describe("runCycle", () => {
+  it("marks dry-run cycles explicitly", async () => {
+    const result = await runCycle(baseConfig, {
+      snapshotSource: new StaticSnapshotSource([buildSnapshot()]),
+      executor: new DryRunExecutionBackend()
+    });
+
+    expect(result.status).toBe("EXECUTED");
+    expect(result.dryRun).toBe(true);
+    expect(result.reason).toMatch(/dry-run completed successfully/i);
+  });
+
   it("returns a no-op when the natural move already converges", async () => {
     const result = await runCycle(baseConfig, {
       snapshotSource: new StaticSnapshotSource([
@@ -111,6 +122,7 @@ describe("runCycle", () => {
     });
 
     expect(result.status).toBe("NO_OP");
+    expect(result.dryRun).toBe(false);
   });
 
   it("executes an update-only plan even when the top-level intent is NO_OP", async () => {

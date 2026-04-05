@@ -10,5 +10,6 @@ export * from "./run-cycle.js";
 export * from "./keeperhub.js";
 export * from "./ajna/abi.js";
 export * from "./ajna/deployments.js";
+export * from "./ajna/runtime.js";
 export * from "./ajna/snapshot.js";
 export * from "./ajna/executor.js";

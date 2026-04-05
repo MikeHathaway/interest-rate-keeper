@@ -285,7 +285,11 @@ export function resolvePlanCandidate(input: unknown, label = "plan candidate"): 
 
   if (record.executionMode !== undefined) {
     const executionMode = parseString(record.executionMode, `${label}.executionMode`);
-    if (executionMode !== "supported" && executionMode !== "advisory") {
+    if (
+      executionMode !== "supported" &&
+      executionMode !== "advisory" &&
+      executionMode !== "unsupported"
+    ) {
       throw new Error(`${label}.executionMode is invalid`);
     }
     candidate.executionMode = executionMode;

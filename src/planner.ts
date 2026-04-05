@@ -97,7 +97,16 @@ function currentAndProjectedRatesAreInBand(snapshot: PoolSnapshot, band: TargetB
   );
 }
 
+function snapshotMetadataBoolean(snapshot: PoolSnapshot, key: string): boolean | undefined {
+  const value = snapshot.metadata?.[key];
+  return typeof value === "boolean" ? value : undefined;
+}
+
 function candidateExecutionAllowed(candidate: PlanCandidate, config: KeeperConfig): boolean {
+  if (candidate.executionMode === "unsupported") {
+    return false;
+  }
+
   return candidate.executionMode !== "advisory" || config.allowHeuristicExecution;
 }
 
@@ -185,6 +194,36 @@ function naturalConvergenceReason(snapshot: PoolSnapshot): string {
     : "next protocol move already converges toward the target band";
 }
 
+function advisoryOnlyReason(snapshot: PoolSnapshot): string {
+  const simulationEnabled = snapshotMetadataBoolean(
+    snapshot,
+    "simulationBackedSynthesisEnabled"
+  );
+  const simulationPrerequisitesAvailable = snapshotMetadataBoolean(
+    snapshot,
+    "simulationPrerequisitesAvailable"
+  );
+
+  if (simulationEnabled === false && simulationPrerequisitesAvailable === false) {
+    return "only advisory heuristic candidates improved convergence, and exact simulation-backed synthesis is unavailable without a resolvable simulation sender/private key";
+  }
+
+  if (simulationEnabled === false) {
+    return "only advisory heuristic candidates improved convergence, and exact simulation-backed synthesis is disabled in the current config";
+  }
+
+  return "only advisory heuristic candidates improved convergence, and heuristic execution is disabled";
+}
+
+function unsupportedCandidateReason(snapshot: PoolSnapshot): string {
+  const compatibilityReason = snapshot.metadata?.simulationExecutionCompatibilityReason;
+  if (typeof compatibilityReason === "string" && compatibilityReason.length > 0) {
+    return `only unsupported exact candidates improved convergence, because ${compatibilityReason}`;
+  }
+
+  return "only unsupported candidates improved convergence, and none can be executed safely in the current runtime";
+}
+
 function chooseBestCandidate(
   candidates: PlanCandidate[],
   band: TargetBand
@@ -254,6 +293,12 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
       requiredSteps: [],
       predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
       predictedRateBpsAfterNextUpdate: snapshot.predictedNextRateBps,
+      ...(snapshot.planningRateBps === undefined
+        ? {}
+        : { planningRateBps: snapshot.planningRateBps }),
+      ...(snapshot.planningLookaheadUpdates === undefined
+        ? {}
+        : { planningLookaheadUpdates: snapshot.planningLookaheadUpdates }),
       ...ZERO_PLAN_CAPITAL
     };
   }
@@ -286,7 +331,31 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
       requiredSteps,
       predictedOutcomeAfterPlan: selected.predictedOutcome,
       predictedRateBpsAfterNextUpdate: selected.predictedRateBpsAfterNextUpdate,
+      ...(selected.planningRateBps === undefined
+        ? {}
+        : { planningRateBps: selected.planningRateBps }),
+      ...(selected.planningLookaheadUpdates === undefined
+        ? {}
+        : { planningLookaheadUpdates: selected.planningLookaheadUpdates }),
       ...capital
+    };
+  }
+
+  if (viableCandidates.some((candidate) => candidate.executionMode === "unsupported")) {
+    return {
+      intent: "NO_OP",
+      reason: unsupportedCandidateReason(snapshot),
+      targetBand,
+      requiredSteps: [],
+      predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
+      predictedRateBpsAfterNextUpdate: snapshot.predictedNextRateBps,
+      ...(snapshot.planningRateBps === undefined
+        ? {}
+        : { planningRateBps: snapshot.planningRateBps }),
+      ...(snapshot.planningLookaheadUpdates === undefined
+        ? {}
+        : { planningLookaheadUpdates: snapshot.planningLookaheadUpdates }),
+      ...ZERO_PLAN_CAPITAL
     };
   }
 
@@ -297,11 +366,17 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
   ) {
     return {
       intent: "NO_OP",
-      reason: "only advisory heuristic candidates improved convergence, and heuristic execution is disabled",
+      reason: advisoryOnlyReason(snapshot),
       targetBand,
       requiredSteps: [],
       predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
       predictedRateBpsAfterNextUpdate: snapshot.predictedNextRateBps,
+      ...(snapshot.planningRateBps === undefined
+        ? {}
+        : { planningRateBps: snapshot.planningRateBps }),
+      ...(snapshot.planningLookaheadUpdates === undefined
+        ? {}
+        : { planningLookaheadUpdates: snapshot.planningLookaheadUpdates }),
       ...ZERO_PLAN_CAPITAL
     };
   }
@@ -318,6 +393,12 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
       requiredSteps: [],
       predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
       predictedRateBpsAfterNextUpdate: snapshot.predictedNextRateBps,
+      ...(snapshot.planningRateBps === undefined
+        ? {}
+        : { planningRateBps: snapshot.planningRateBps }),
+      ...(snapshot.planningLookaheadUpdates === undefined
+        ? {}
+        : { planningLookaheadUpdates: snapshot.planningLookaheadUpdates }),
       ...ZERO_PLAN_CAPITAL
     };
   }
@@ -330,6 +411,12 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
       requiredSteps: maybeAppendUpdateInterest([], snapshot),
       predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
       predictedRateBpsAfterNextUpdate: snapshot.predictedNextRateBps,
+      ...(snapshot.planningRateBps === undefined
+        ? {}
+        : { planningRateBps: snapshot.planningRateBps }),
+      ...(snapshot.planningLookaheadUpdates === undefined
+        ? {}
+        : { planningLookaheadUpdates: snapshot.planningLookaheadUpdates }),
       ...ZERO_PLAN_CAPITAL
     };
   }
@@ -341,6 +428,12 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
     requiredSteps: [],
     predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,
     predictedRateBpsAfterNextUpdate: snapshot.predictedNextRateBps,
+    ...(snapshot.planningRateBps === undefined
+      ? {}
+      : { planningRateBps: snapshot.planningRateBps }),
+    ...(snapshot.planningLookaheadUpdates === undefined
+      ? {}
+      : { planningLookaheadUpdates: snapshot.planningLookaheadUpdates }),
     ...ZERO_PLAN_CAPITAL
   };
 }

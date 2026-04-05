@@ -40,12 +40,14 @@ Today, the snapshot builder reads real pool state and predicts the next Ajna rat
 - simulation-backed `ADD_QUOTE` synthesis is an exact opt-in path that forks the current chain state and tests candidate quote deposits against real Ajna contract behavior
 - simulation-backed `DRAW_DEBT` synthesis is an exact opt-in path that forks the current chain state and tests candidate borrow amounts against real Ajna contract behavior
 - simulation-backed `LEND_AND_BORROW` synthesis is an exact opt-in path that searches direct `ADD_QUOTE -> DRAW_DEBT` combinations on a fork and validates the full `ADD_QUOTE -> DRAW_DEBT -> updateInterest` path before emitting them
+- simulation-backed exact candidates are now downgraded to `unsupported` when they were derived from a `simulationSenderAddress` that does not match the live execution signer
 - heuristic `ADD_QUOTE` synthesis remains useful for exploratory planning and dry-run validation
 - heuristic `DRAW_DEBT` synthesis now provides exploratory upward-steering candidates when exact same-cycle borrow remains too conservative
 - heuristic `LEND_AND_BORROW` synthesis is deliberately narrow: it looks for `ADD_QUOTE -> DRAW_DEBT` plans that soften a borrow overshoot rather than trying to solve a full two-dimensional optimizer
 - when `borrowSimulationLookaheadUpdates` is unset, the live exact borrower path now treats not-due and due states differently: it uses `[1, 2, 3]` in not-due states, but once the rate window is already open it skips the one-update path by default after Ajna EMAs are initialized and goes straight to the default 3-update exact borrow path
 - when synthesis flags are unset, the live snapshot source now follows an internal ladder: attempt exact pre-window borrower steering in not-due states, skip futile same-cycle exact borrower search in normal due-window states after EMA initialization, fall back to exact multi-cycle borrower steering, then surface heuristic borrower guidance if exact search still cannot produce a candidate
 - heuristic candidates are now recommendation-only by default. They still surface in snapshots and dry runs, but the live planner will not execute them unless `allowHeuristicExecution` is explicitly enabled
+- dry-run results are now explicit: CLI JSON and KeeperHub responses carry `dryRun`, and summaries also surface the selected candidate mode plus any multi-cycle planning horizon
 - snapshot `predictedNextOutcome` / `predictedNextRateBps` now describe the next eligible Ajna rate update, even when that update is not due yet
 - candidate usefulness is now judged against the do-nothing next update path, not just against the current rate, so the planner can prefer neutralizing a bad upcoming move over letting the pool drift farther away
 
@@ -269,6 +271,7 @@ CLI flags:
 
 If `--snapshot` is omitted in `run` mode, the CLI uses the live Ajna RPC snapshot source.
 If `--summary` is passed, the CLI writes a short human-readable capital summary to `stderr` while keeping the structured JSON output on `stdout` unchanged.
+`--dry-run` results now include `dryRun: true`, and if a heuristic candidate was selected for recommendation the output also carries `selectedCandidateExecutionMode: "advisory"` so it is not confused with a live-safe plan.
 
 ## Minimal Config Shape
 
@@ -321,7 +324,9 @@ The live executor currently:
 - requires `AJNA_KEEPER_PRIVATE_KEY` or `PRIVATE_KEY` in the environment
 - requires `poolAddress` and `rpcUrl` in config
 - checks ERC20 allowance before quote-token or collateral-token moves
+- estimates gas cost before each live step and aborts when the estimate exceeds `maxGasCostWei`, if that cap is configured
 - does not auto-submit approval transactions for you
+- treats exact simulation-backed candidates as live-executable only when the simulation sender and the live signer are the same account
 
 Supported low-level execution steps:
 - `ADD_QUOTE`
@@ -387,6 +392,7 @@ npm run test:integration:base
 - Pre-window lend is still experimental as a generic live feature. The exact path now has a deterministic surfaced-plan proof over a two-update horizon in routine `slow` coverage, plus representative complex ongoing multi-actor proofs in `experimental` where the generic exact path surfaces a pre-window `LEND` and a manually positive ongoing state executes cleanly without pinning bucket or amount. The heuristic path is still intentionally suppressed to avoid overclaiming what the next update can do.
 - Exact simulation-backed borrow synthesis is opt-in and now supports multi-cycle planning through `borrowSimulationLookaheadUpdates`, with representative Base-fork coverage for a live-executed 3-update borrower path. When `borrowSimulationLookaheadUpdates` is unset, the live snapshot source tries `[1, 2, 3]` exact borrow planning in not-due states, but once the rate window is already open it defaults to `[3]` after EMA initialization because Ajna computes the immediate due-window rate move from previously cached interest-state values. The old `[1, 3]` ladder is kept only for explicitly pinned one-update experiments or pre-EMA-initialization states.
 - Heuristic borrow synthesis is opt-in and now covers exploratory upward-steering candidates through the same heuristic search path used by the pure planner tests, but those candidates are advisory by default and are not live-executed unless `allowHeuristicExecution` is enabled.
+- Exact simulation-backed paths depend on runtime account context. If live exact synthesis cannot run because there is no resolvable simulation sender/private key, the planner now says so more explicitly instead of quietly looking like a pure heuristic miss.
 - Brand-new pool upward-convergence and abandoned-pool recovery should not be treated as the same keeper mode; they share engine pieces, but the proven execution paths are different.
 - Exact simulation-backed `LEND_AND_BORROW` synthesis is now wired into the live snapshot path when both exact lend and borrow synthesis are enabled, and it benchmarks candidate dual paths against the best exact single-action paths before emitting them.
 - Adding multi-bucket quote search made that stricter benchmark productive again in the representative Base fixture: the keeper now surfaces and naturally selects a real exact `LEND_AND_BORROW` candidate there.

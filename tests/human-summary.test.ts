@@ -6,6 +6,7 @@ import { type CycleResult } from "../src/types.js";
 describe("formatCycleCapitalSummary", () => {
   it("formats a short human-readable capital summary", () => {
     const result: CycleResult = {
+      dryRun: true,
       status: "EXECUTED",
       reason: "executed",
       poolId: "base:pool",
@@ -21,9 +22,12 @@ describe("formatCycleCapitalSummary", () => {
           maxRateBps: 1100
         },
         selectedCandidateId: "dual",
+        selectedCandidateExecutionMode: "supported",
         requiredSteps: [],
         predictedOutcomeAfterPlan: "STEP_UP",
         predictedRateBpsAfterNextUpdate: 950,
+        planningRateBps: 1005,
+        planningLookaheadUpdates: 3,
         quoteTokenDelta: 150n,
         additionalCollateralRequired: 25n,
         netQuoteBorrowed: -50n,
@@ -33,7 +37,7 @@ describe("formatCycleCapitalSummary", () => {
     };
 
     expect(formatCycleCapitalSummary(result)).toBe(
-      "summary status=EXECUTED intent=LEND_AND_BORROW required=125 at_risk=125 net_quote=-50 addl_collateral=25"
+      "summary dry_run=true status=EXECUTED intent=LEND_AND_BORROW candidate_mode=supported lookahead=3 planning_rate=1005 required=125 at_risk=125 net_quote=-50 addl_collateral=25"
     );
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { StepwiseExecutionBackend } from "../src/execute.js";
+import { DryRunExecutionBackend, StepwiseExecutionBackend } from "../src/execute.js";
 import {
   formatKeeperHubResponse,
   resolveKeeperHubPayload,
@@ -272,13 +272,23 @@ describe("keeperhub", () => {
     );
 
     const formatted = JSON.parse(formatKeeperHubResponse(result)) as {
+      dryRun: boolean;
       candidateSource?: string;
       candidateExecutionMode?: string;
+      predictedOutcomeAfterPlan: string;
+      predictedRateBpsAfterNextUpdate: number;
+      planningRateBps?: number;
+      planningLookaheadUpdates?: number;
       capital: Record<string, string>;
     };
 
+    expect(formatted.dryRun).toBe(false);
     expect(formatted.candidateSource).toBeUndefined();
     expect(formatted.candidateExecutionMode).toBeUndefined();
+    expect(formatted.predictedOutcomeAfterPlan).toBe("STEP_UP");
+    expect(formatted.predictedRateBpsAfterNextUpdate).toBe(950);
+    expect(formatted.planningRateBps).toBeUndefined();
+    expect(formatted.planningLookaheadUpdates).toBeUndefined();
     expect(formatted.capital).toEqual({
       quoteTokenDelta: "51",
       additionalCollateralRequired: "25",
@@ -384,5 +394,80 @@ describe("keeperhub", () => {
     expect(result.status).toBe("EXECUTED");
     expect(result.plan.selectedCandidateSource).toBe("heuristic");
     expect(result.plan.selectedCandidateExecutionMode).toBe("advisory");
+  });
+
+  it("marks dry-run responses explicitly and carries planning metadata", async () => {
+    const result = await runKeeperHubPayload(
+      {
+        config: {
+          chainId: 8453,
+          poolId: "base:pool",
+          targetRateBps: 1000,
+          toleranceBps: 50,
+          toleranceMode: "absolute",
+          completionPolicy: "next_move_would_overshoot",
+          executionBufferBps: 0,
+          maxQuoteTokenExposure: "1000",
+          maxBorrowExposure: "1000",
+          snapshotAgeMaxSeconds: 90,
+          minTimeBeforeRateWindowSeconds: 120,
+          minExecutableActionQuoteToken: "1",
+          recheckBeforeSubmit: false,
+          allowHeuristicExecution: true
+        },
+        snapshot: {
+          snapshotFingerprint: "payload",
+          poolId: "base:pool",
+          chainId: 8453,
+          blockNumber: "10",
+          blockTimestamp: 1000,
+          snapshotAgeSeconds: 5,
+          secondsUntilNextRateUpdate: 600,
+          currentRateBps: 800,
+          predictedNextOutcome: "STEP_DOWN",
+          predictedNextRateBps: 700,
+          candidates: [
+            {
+              id: "heuristic-borrow",
+              intent: "BORROW",
+              candidateSource: "heuristic",
+              executionMode: "advisory",
+              minimumExecutionSteps: [
+                {
+                  type: "DRAW_DEBT",
+                  amount: "50",
+                  limitIndex: 2
+                }
+              ],
+              predictedOutcome: "STEP_UP",
+              predictedRateBpsAfterNextUpdate: 950,
+              resultingDistanceToTargetBps: 0,
+              quoteTokenDelta: "50",
+              explanation: "heuristic borrow",
+              planningRateBps: 990,
+              planningLookaheadUpdates: 2
+            }
+          ]
+        }
+      },
+      {
+        executor: new DryRunExecutionBackend()
+      }
+    );
+
+    const formatted = JSON.parse(formatKeeperHubResponse(result)) as {
+      dryRun: boolean;
+      candidateExecutionMode?: string;
+      planningRateBps?: number;
+      planningLookaheadUpdates?: number;
+    };
+
+    expect(result.dryRun).toBe(true);
+    expect(result.plan.planningRateBps).toBe(990);
+    expect(result.plan.planningLookaheadUpdates).toBe(2);
+    expect(formatted.dryRun).toBe(true);
+    expect(formatted.candidateExecutionMode).toBe("advisory");
+    expect(formatted.planningRateBps).toBe(990);
+    expect(formatted.planningLookaheadUpdates).toBe(2);
   });
 });

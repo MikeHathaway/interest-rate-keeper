@@ -16,7 +16,7 @@ export type CompletionPolicy = "in_band" | "next_move_would_overshoot";
 export type ToleranceMode = "absolute" | "relative";
 export type ExecutionBufferPolicy = "apply" | "none";
 export type CandidateSource = "simulation" | "heuristic" | "manual";
-export type CandidateExecutionMode = "supported" | "advisory";
+export type CandidateExecutionMode = "supported" | "advisory" | "unsupported";
 
 export interface TargetBand {
   minRateBps: number;
@@ -168,6 +168,8 @@ export interface CyclePlan {
   requiredSteps: ExecutionStep[];
   predictedOutcomeAfterPlan: RateMoveOutcome;
   predictedRateBpsAfterNextUpdate: number;
+  planningRateBps?: number;
+  planningLookaheadUpdates?: number;
   quoteTokenDelta: bigint;
   additionalCollateralRequired: bigint;
   netQuoteBorrowed: bigint;
@@ -227,6 +229,7 @@ export type CycleStatus =
   | "FAILED";
 
 export interface CycleResult {
+  dryRun: boolean;
   status: CycleStatus;
   reason: string;
   poolId: string;
