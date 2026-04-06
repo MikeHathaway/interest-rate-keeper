@@ -41,6 +41,8 @@ const EXACT_SAME_CYCLE_BORROW_MAX_SAMPLES = 8;
 const EXACT_SAME_CYCLE_BORROW_LOW_END_SAMPLES = 5;
 const EXACT_PREWINDOW_BORROW_MAX_SAMPLES = 12;
 const EXACT_PREWINDOW_BORROW_LOW_END_SAMPLES = 7;
+const EXACT_MULTI_CYCLE_BORROW_MAX_SAMPLES = 16;
+const EXACT_MULTI_CYCLE_BORROW_LOW_END_SAMPLES = 8;
 const DEFAULT_MAX_PROMISING_DUAL_BASINS = 6;
 const DEFAULT_EXHAUSTIVE_DUAL_AXIS_SPAN = 64n;
 
@@ -633,6 +635,30 @@ export function buildPreWindowBorrowSearchAmounts(
     anchorAmounts,
     EXACT_PREWINDOW_BORROW_MAX_SAMPLES,
     EXACT_PREWINDOW_BORROW_LOW_END_SAMPLES
+  );
+}
+
+export function buildMultiCycleBorrowSearchAmounts(
+  minimumAmount: bigint,
+  maximumAmount: bigint,
+  quoteTokenScale: bigint,
+  anchorAmounts: Array<bigint | undefined>
+): bigint[] {
+  const rawAmounts = Array.from(
+    new Set([
+      ...buildAnchoredSearchAmounts(minimumAmount, maximumAmount, anchorAmounts, {
+        includeBroadSearch: true
+      }),
+      ...buildTokenScaleAnchorAmounts(quoteTokenScale, minimumAmount, maximumAmount),
+      ...buildExposureFractionAnchorAmounts(maximumAmount, minimumAmount)
+    ])
+  ).sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+
+  return compressCapitalAwareSearchAmounts(
+    rawAmounts,
+    anchorAmounts,
+    EXACT_MULTI_CYCLE_BORROW_MAX_SAMPLES,
+    EXACT_MULTI_CYCLE_BORROW_LOW_END_SAMPLES
   );
 }
 

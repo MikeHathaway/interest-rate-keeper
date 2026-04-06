@@ -22,7 +22,7 @@ import {
 } from "./snapshot-sim-helpers.js";
 import { type AjnaRatePrediction } from "./rate-state.js";
 import {
-  buildAnchoredSearchAmounts,
+  buildMultiCycleBorrowSearchAmounts,
   buildPreWindowBorrowSearchAmounts,
   buildSameCycleBorrowSearchAmounts,
   compareCandidatePreference,
@@ -44,6 +44,8 @@ const EXACT_SAME_CYCLE_BORROW_MAX_LIMIT_INDEXES = 2;
 const EXACT_SAME_CYCLE_BORROW_MAX_COLLATERAL_SAMPLES = 4;
 const EXACT_PREWINDOW_BORROW_MAX_LIMIT_INDEXES = 6;
 const EXACT_PREWINDOW_BORROW_MAX_COLLATERAL_SAMPLES = 8;
+const EXACT_MULTI_CYCLE_BORROW_MAX_LIMIT_INDEXES = 8;
+const EXACT_MULTI_CYCLE_BORROW_MAX_COLLATERAL_SAMPLES = 8;
 
 const borrowSimulationPathCache = new Map<string, BorrowSimulationPathResult | null>();
 
@@ -149,7 +151,19 @@ export async function synthesizeAjnaBorrowCandidateViaSimulation(
                 )
               ])
             ).sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
-          : candidateCollateralAmounts;
+          : Array.from(
+              new Set([
+                ...(heuristicDrawDebtStep?.collateralAmount === undefined
+                  ? []
+                  : [heuristicDrawDebtStep.collateralAmount]),
+                ...resolveDrawDebtCollateralAmounts(config).filter(
+                  (collateralAmount) => collateralAmount <= maxAvailableCollateral
+                ),
+                ...candidateCollateralAmounts
+              ])
+            )
+              .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
+              .slice(0, EXACT_MULTI_CYCLE_BORROW_MAX_COLLATERAL_SAMPLES);
       if (prioritizedCollateralAmounts.length === 0) {
         return undefined;
       }
@@ -174,7 +188,13 @@ export async function synthesizeAjnaBorrowCandidateViaSimulation(
                 ? EXACT_PREWINDOW_BORROW_MAX_LIMIT_INDEXES
                 : EXACT_SAME_CYCLE_BORROW_MAX_LIMIT_INDEXES
             )
-          : allLimitIndexes;
+          : Array.from(
+              new Set([
+                ...(heuristicDrawDebtStep === undefined ? [] : [heuristicDrawDebtStep.limitIndex]),
+                ...resolveDrawDebtLimitIndexes(config),
+                ...allLimitIndexes
+              ])
+            ).slice(0, EXACT_MULTI_CYCLE_BORROW_MAX_LIMIT_INDEXES);
       if (limitIndexes.length === 0) {
         return undefined;
       }
@@ -365,10 +385,12 @@ export async function synthesizeAjnaBorrowCandidateViaSimulation(
                     readState.quoteTokenScale,
                     [pureThresholdAmount, heuristicThresholdAmount]
                   )
-              : buildAnchoredSearchAmounts(minimumAmount, maxAmount, [
-                  pureThresholdAmount,
-                  heuristicThresholdAmount
-                ]);
+              : buildMultiCycleBorrowSearchAmounts(
+                  minimumAmount,
+                  maxAmount,
+                  readState.quoteTokenScale,
+                  [pureThresholdAmount, heuristicThresholdAmount]
+                );
 
           let lowerBound = minimumAmount - 1n;
           let upperBound: bigint | undefined;
@@ -442,6 +464,18 @@ export async function synthesizeAjnaBorrowCandidateViaSimulation(
             candidate.planningLookaheadUpdates = lookaheadUpdates;
           }
           const finalizedCandidate = finalizeCandidate(candidate);
+
+          if (lookaheadUpdates > 1) {
+            // Multi-cycle borrow is a rolling-control path: once we find the
+            // smallest improving candidate in the capital-aware search order,
+            // we prefer returning it rather than exhaustively chasing a larger
+            // terminal improvement that will be replanned on the next cycle.
+            return {
+              candidate: finalizedCandidate,
+              baselinePlanningRateBps: baselinePath.terminalRateBps,
+              planningLookaheadUpdates: lookaheadUpdates
+            };
+          }
 
           if (!bestCandidate || compareCandidatePreference(finalizedCandidate, bestCandidate) < 0) {
             bestCandidate = finalizedCandidate;
