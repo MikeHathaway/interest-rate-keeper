@@ -70,6 +70,7 @@ import {
   EXPERIMENTAL_COMPLEX_PREWINDOW_BORROW_TARGET_OFFSETS_BPS,
   EXPERIMENTAL_COMPLEX_PREWINDOW_LEND_SCENARIOS,
   EXPERIMENTAL_COMPLEX_PREWINDOW_TARGETS,
+  EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE,
   EXPERIMENTAL_MANUAL_BRAND_NEW_SAME_CYCLE_CONFIG_CANDIDATES,
   EXPERIMENTAL_MANUAL_PREWINDOW_EXISTING_BORROW_AMOUNTS_WAD,
   EXPERIMENTAL_MANUAL_PREWINDOW_EXISTING_BORROW_COLLATERAL_AMOUNTS,
@@ -116,6 +117,15 @@ const COMPETING_ANVIL_PRIVATE_KEY =
   "0x59c6995e998f97a5a0044966f0945382dbf7f2e1a0d7f6c3b5b0c2cf4f1f7f94";
 const INITIAL_RATE_WAD = 100_000_000_000_000_000n;
 const DECREASED_RATE_BPS = 900;
+const LARGE_USED_POOL_MULTI_WEEK_KEEPER_CADENCE_SECONDS = TWELVE_HOURS_SECONDS * 16;
+const LARGE_USED_POOL_MULTI_WEEK_PRE_ACTION_SECONDS = TWELVE_HOURS_SECONDS / 2;
+
+type LargeUsedPoolActor =
+  (typeof EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE.initialDeposits)[number]["actor"] |
+  (typeof EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE.initialBorrows)[number]["actor"];
+
+type LargeUsedPoolCycleAction =
+  (typeof EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE.cycleActionPatterns)[number][number];
 
 function currentBaseForkProfile():
   | "smoke"
@@ -313,6 +323,79 @@ function createClientsForPrivateKey(privateKey: `0x${string}`) {
   };
 }
 
+function createRpcWalletClient() {
+  return createWalletClient({
+    chain: base,
+    transport: http(LOCAL_RPC_URL)
+  }) as any;
+}
+
+async function listUnlockedRpcAccounts(publicClient: any): Promise<`0x${string}`[]> {
+  return publicClient.request({
+    method: "eth_accounts",
+    params: []
+  }) as Promise<`0x${string}`[]>;
+}
+
+async function waitForContractWrite(
+  publicClient: any,
+  transactionHash: Hex
+): Promise<void> {
+  await publicClient.waitForTransactionReceipt({ hash: transactionHash });
+}
+
+async function writePoolContractFromAddress(
+  walletClient: any,
+  publicClient: any,
+  accountAddress: `0x${string}`,
+  poolAddress: `0x${string}`,
+  request:
+    | {
+        functionName: "addQuoteToken";
+        args: [bigint, bigint, bigint];
+      }
+    | {
+        functionName: "drawDebt";
+        args: [`0x${string}`, bigint, bigint, bigint];
+      }
+    | {
+        functionName: "updateInterest";
+        args?: [];
+      }
+): Promise<void> {
+  const hash = await walletClient.writeContract({
+    account: accountAddress,
+    chain: undefined,
+    address: poolAddress,
+    abi: ajnaPoolAbi,
+    functionName: request.functionName,
+    args: request.args ?? []
+  });
+  await waitForContractWrite(publicClient, hash);
+}
+
+async function writeTokenContractFromAddress(
+  walletClient: any,
+  publicClient: any,
+  accountAddress: `0x${string}`,
+  tokenAddress: `0x${string}`,
+  request:
+    | {
+        functionName: "approve";
+        args: [`0x${string}`, bigint];
+      }
+): Promise<void> {
+  const hash = await walletClient.writeContract({
+    account: accountAddress,
+    chain: undefined,
+    address: tokenAddress,
+    abi: (await ensureMockArtifact()).abi,
+    functionName: request.functionName,
+    args: request.args
+  });
+  await waitForContractWrite(publicClient, hash);
+}
+
 function buildRepresentativeBorrowLookaheadConfig(
   poolAddress: `0x${string}`,
   borrowerAddress: `0x${string}`,
@@ -497,6 +580,70 @@ async function readCurrentRateInfo(
     currentRateBps: Number((updatedRate * 10_000n) / 1_000_000_000_000_000_000n),
     lastInterestRateUpdateTimestamp: Number(rawTimestamp)
   };
+}
+
+async function readBorrowerDebtState(
+  publicClient: any,
+  poolAddress: `0x${string}`,
+  borrowerAddress: `0x${string}`
+): Promise<{
+  t0Debt: bigint;
+  collateral: bigint;
+  currentDebtWad: bigint;
+}> {
+  const [borrowerInfo, inflatorInfo] = await Promise.all([
+    publicClient.readContract({
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "borrowerInfo",
+      args: [borrowerAddress]
+    }),
+    publicClient.readContract({
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "inflatorInfo"
+    })
+  ]);
+  const t0Debt = BigInt(String(borrowerInfo[0]));
+  const collateral = BigInt(String(borrowerInfo[1]));
+  const inflator = BigInt(String(inflatorInfo[0]));
+
+  return {
+    t0Debt,
+    collateral,
+    currentDebtWad: wmul(t0Debt, inflator)
+  };
+}
+
+async function sumGasCostWei(
+  publicClient: any,
+  transactionHashes: readonly Hex[]
+): Promise<bigint> {
+  let total = 0n;
+
+  for (const hash of transactionHashes) {
+    const receipt = await publicClient.getTransactionReceipt({ hash });
+    const effectiveGasPrice = BigInt(String(receipt.effectiveGasPrice ?? 0n));
+    total += receipt.gasUsed * effectiveGasPrice;
+  }
+
+  return total;
+}
+
+function formatTokenAmount(amountWad: bigint): string {
+  const sign = amountWad < 0n ? "-" : "";
+  const absolute = amountWad < 0n ? -amountWad : amountWad;
+  const whole = absolute / 10n ** 18n;
+  const fractional = absolute % 10n ** 18n;
+  const trimmedFractional = fractional.toString().padStart(18, "0").slice(0, 4).replace(/0+$/, "");
+
+  return trimmedFractional.length > 0
+    ? `${sign}${whole.toString()}.${trimmedFractional}`
+    : `${sign}${whole.toString()}`;
+}
+
+function formatWeiAsEth(amountWei: bigint): string {
+  return formatTokenAmount(amountWei);
 }
 
 function ceilWdiv(left: bigint, right: bigint): bigint {
@@ -1176,6 +1323,391 @@ async function createExistingBorrowerMultiBucketFixture(
   await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
 
   return poolAddress;
+}
+
+async function createLargeUsedPoolMultiWeekBorrowFixture(
+  account: { address: `0x${string}` },
+  publicClient: any,
+  walletClient: any,
+  testClient: any,
+  artifact: { abi: unknown[]; bytecode: `0x${string}` }
+): Promise<{
+  poolAddress: `0x${string}`;
+  chainNow: number;
+  config: KeeperConfig;
+  actorAddresses: Record<LargeUsedPoolActor, `0x${string}`>;
+  initialOperatorDebtWad: bigint;
+  initialOperatorCollateralWad: bigint;
+}> {
+  const rpcWalletClient = createRpcWalletClient();
+  const unlockedAddresses = await listUnlockedRpcAccounts(publicClient);
+  const externalAddresses = unlockedAddresses
+    .filter((address) => address.toLowerCase() !== account.address.toLowerCase())
+    .slice(0, 5);
+  if (externalAddresses.length < 5) {
+    throw new Error("expected at least five unlocked external RPC accounts on local anvil");
+  }
+
+  const actorAddresses: Record<LargeUsedPoolActor, `0x${string}`> = {
+    operator: account.address,
+    lenderA: externalAddresses[0]!,
+    lenderB: externalAddresses[1]!,
+    lenderC: externalAddresses[2]!,
+    borrowerA: externalAddresses[3]!,
+    borrowerB: externalAddresses[4]!
+  };
+
+  for (const address of externalAddresses) {
+    await testClient.setBalance({
+      address,
+      value: 10n ** 24n
+    });
+  }
+
+  const collateralToken = await deployMockToken(
+    walletClient,
+    publicClient,
+    artifact,
+    "Large Used Pool Collateral",
+    "LUPC"
+  );
+  const quoteToken = await deployMockToken(
+    walletClient,
+    publicClient,
+    artifact,
+    "Large Used Pool Quote",
+    "LUPQ"
+  );
+
+  for (const actorAddress of Object.values(actorAddresses)) {
+    await mintToken(
+      walletClient,
+      publicClient,
+      artifact,
+      collateralToken,
+      actorAddress,
+      1_000_000n * 10n ** 18n
+    );
+    await mintToken(
+      walletClient,
+      publicClient,
+      artifact,
+      quoteToken,
+      actorAddress,
+      1_000_000n * 10n ** 18n
+    );
+  }
+
+  const poolAddress = await deployPoolThroughFactory(
+    walletClient,
+    publicClient,
+    collateralToken,
+    quoteToken
+  );
+
+  await approveToken(
+    walletClient,
+    publicClient,
+    quoteToken,
+    poolAddress,
+    1_000_000n * 10n ** 18n,
+    artifact.abi
+  );
+  await approveToken(
+    walletClient,
+    publicClient,
+    collateralToken,
+    poolAddress,
+    1_000_000n * 10n ** 18n,
+    artifact.abi
+  );
+  for (const actorAddress of externalAddresses) {
+    await writeTokenContractFromAddress(rpcWalletClient, publicClient, actorAddress, quoteToken, {
+      functionName: "approve",
+      args: [poolAddress, 1_000_000n * 10n ** 18n]
+    });
+    await writeTokenContractFromAddress(
+      rpcWalletClient,
+      publicClient,
+      actorAddress,
+      collateralToken,
+      {
+        functionName: "approve",
+        args: [poolAddress, 1_000_000n * 10n ** 18n]
+      }
+    );
+  }
+
+  for (const deposit of EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE.initialDeposits) {
+    const actorAddress = actorAddresses[deposit.actor];
+    const latestBlock = await publicClient.getBlock();
+    const writeFrom =
+      actorAddress.toLowerCase() === account.address.toLowerCase() ? walletClient : rpcWalletClient;
+    await writePoolContractFromAddress(writeFrom, publicClient, actorAddress, poolAddress, {
+      functionName: "addQuoteToken",
+      args: [
+        deposit.amount * 10n ** 18n,
+        BigInt(deposit.bucketIndex),
+        latestBlock.timestamp + 3600n
+      ]
+    });
+  }
+
+  for (const borrow of EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE.initialBorrows) {
+    const actorAddress = actorAddresses[borrow.actor];
+    const writeFrom =
+      actorAddress.toLowerCase() === account.address.toLowerCase() ? walletClient : rpcWalletClient;
+    await writePoolContractFromAddress(writeFrom, publicClient, actorAddress, poolAddress, {
+      functionName: "drawDebt",
+      args: [
+        actorAddress,
+        borrow.amount * 10n ** 18n,
+        BigInt(borrow.limitIndex),
+        borrow.collateralAmount * 10n ** 18n
+      ]
+    });
+  }
+
+  const chainNow = await moveToFirstBorrowLookaheadState(
+    account,
+    publicClient,
+    walletClient,
+    testClient,
+    poolAddress
+  );
+  const config = buildRepresentativeBorrowLookaheadConfig(poolAddress, account.address, {
+    targetRateBps: EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE.targetRateBps,
+    toleranceBps: EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE.toleranceBps,
+    drawDebtLimitIndexes: [3000],
+    drawDebtCollateralAmounts: [10n * 10n ** 18n],
+    borrowSimulationLookaheadUpdates: 3
+  });
+
+  const operatorDebtState = await readBorrowerDebtState(publicClient, poolAddress, account.address);
+  return {
+    poolAddress,
+    chainNow,
+    config,
+    actorAddresses,
+    initialOperatorDebtWad: operatorDebtState.currentDebtWad,
+    initialOperatorCollateralWad: operatorDebtState.collateral
+  };
+}
+
+async function applyLargeUsedPoolCycleActions(
+  cycleIndex: number,
+  account: { address: `0x${string}` },
+  publicClient: any,
+  walletClient: any,
+  actorAddresses: Record<LargeUsedPoolActor, `0x${string}`>,
+  poolAddress: `0x${string}`
+): Promise<void> {
+  const rpcWalletClient = createRpcWalletClient();
+  const cyclePattern =
+    EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE.cycleActionPatterns[
+      cycleIndex % EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE.cycleActionPatterns.length
+    ]!;
+
+  for (const action of cyclePattern) {
+    const actorAddress = actorAddresses[action.actor];
+    const writeFrom =
+      actorAddress.toLowerCase() === account.address.toLowerCase() ? walletClient : rpcWalletClient;
+
+    if (action.type === "ADD_QUOTE") {
+      const latestBlock = await publicClient.getBlock();
+      await writePoolContractFromAddress(writeFrom, publicClient, actorAddress, poolAddress, {
+        functionName: "addQuoteToken",
+        args: [
+          action.amount * 10n ** 18n,
+          BigInt(action.bucketIndex),
+          latestBlock.timestamp + 3600n
+        ]
+      });
+      continue;
+    }
+
+    await writePoolContractFromAddress(writeFrom, publicClient, actorAddress, poolAddress, {
+      functionName: "drawDebt",
+      args: [
+        actorAddress,
+        action.amount * 10n ** 18n,
+        BigInt(action.limitIndex),
+        action.collateralAmount * 10n ** 18n
+      ]
+    });
+  }
+}
+
+async function runLargeUsedPoolMultiWeekBorrowBranch(
+  mode: "active" | "passive",
+  params: {
+    account: { address: `0x${string}` };
+    publicClient: any;
+    walletClient: any;
+    testClient: any;
+    poolAddress: `0x${string}`;
+    config: KeeperConfig;
+    actorAddresses: Record<LargeUsedPoolActor, `0x${string}`>;
+    cycleCount: number;
+    initialOperatorDebtWad: bigint;
+  }
+): Promise<{
+  finalRateBps: number;
+  reachedTargetCycle?: number;
+  executedBorrowCycles: number;
+  cumulativeNetQuoteBorrowedWad: bigint;
+  cumulativeAdditionalCollateralWad: bigint;
+  cumulativeOperatorCapitalRequiredWad: bigint;
+  cumulativeGasCostWei: bigint;
+  finalOperatorDebtWad: bigint;
+  observations: string[];
+}> {
+  const passiveConfig = resolveKeeperConfig({
+    ...params.config,
+    enableSimulationBackedBorrowSynthesis: false,
+    enableHeuristicBorrowSynthesis: false
+  });
+  const observations: string[] = [];
+  let reachedTargetCycle: number | undefined;
+  let executedBorrowCycles = 0;
+  let cumulativeNetQuoteBorrowedWad = 0n;
+  let cumulativeAdditionalCollateralWad = 0n;
+  let cumulativeOperatorCapitalRequiredWad = 0n;
+  let cumulativeGasCostWei = 0n;
+
+  for (let cycleIndex = 0; cycleIndex < params.cycleCount; cycleIndex += 1) {
+    let chainNow = Number((await params.publicClient.getBlock()).timestamp);
+    const cycleStartSnapshot = await new AjnaRpcSnapshotSource(passiveConfig, {
+      publicClient: params.publicClient,
+      now: () => chainNow
+    }).getSnapshot();
+    const preActionSeconds = Math.max(
+      1,
+      Math.min(
+        LARGE_USED_POOL_MULTI_WEEK_PRE_ACTION_SECONDS,
+        Math.max(1, cycleStartSnapshot.secondsUntilNextRateUpdate)
+      )
+    );
+
+    if (cycleStartSnapshot.secondsUntilNextRateUpdate > 0) {
+      await params.testClient.increaseTime({
+        seconds: preActionSeconds
+      });
+      await params.testClient.mine({
+        blocks: 1
+      });
+    }
+
+    await applyLargeUsedPoolCycleActions(
+      cycleIndex,
+      params.account,
+      params.publicClient,
+      params.walletClient,
+      params.actorAddresses,
+      params.poolAddress
+    );
+
+    chainNow = Number((await params.publicClient.getBlock()).timestamp);
+    const preDueSnapshot = await new AjnaRpcSnapshotSource(passiveConfig, {
+      publicClient: params.publicClient,
+      now: () => chainNow
+    }).getSnapshot();
+    const keeperDelaySeconds =
+      preDueSnapshot.secondsUntilNextRateUpdate +
+      (LARGE_USED_POOL_MULTI_WEEK_KEEPER_CADENCE_SECONDS - TWELVE_HOURS_SECONDS);
+    if (keeperDelaySeconds > 0) {
+      await params.testClient.increaseTime({
+        seconds: keeperDelaySeconds
+      });
+      await params.testClient.mine({
+        blocks: 1
+      });
+    }
+
+    chainNow = Number((await params.publicClient.getBlock()).timestamp);
+    if (mode === "active") {
+      const result = await runCycle(params.config, {
+        snapshotSource: new AjnaRpcSnapshotSource(params.config, {
+          publicClient: params.publicClient,
+          now: () => chainNow
+        }),
+        executor: createAjnaExecutionBackend(params.config)
+      });
+
+      if (result.status === "EXECUTED") {
+        cumulativeGasCostWei += await sumGasCostWei(
+          params.publicClient,
+          result.transactionHashes as Hex[]
+        );
+        cumulativeNetQuoteBorrowedWad += result.plan.netQuoteBorrowed;
+        cumulativeAdditionalCollateralWad += result.plan.additionalCollateralRequired;
+        cumulativeOperatorCapitalRequiredWad += result.plan.operatorCapitalRequired;
+        if (result.plan.intent === "BORROW") {
+          executedBorrowCycles += 1;
+        }
+      } else if (result.status !== "NO_OP") {
+        throw new Error(
+          `large used-pool active branch failed at cycle ${cycleIndex}: status=${result.status} reason=${result.reason} error=${result.error ?? ""}`
+        );
+      }
+
+      if (result.status === "NO_OP") {
+        await writePoolContractFromAddress(
+          params.walletClient,
+          params.publicClient,
+          params.account.address,
+          params.poolAddress,
+          {
+            functionName: "updateInterest"
+          }
+        );
+      }
+    } else {
+      await writePoolContractFromAddress(
+        params.walletClient,
+        params.publicClient,
+        params.account.address,
+        params.poolAddress,
+        {
+          functionName: "updateInterest"
+        }
+      );
+    }
+
+    const cycleEndRateBps = await readCurrentRateBps(params.publicClient, params.poolAddress);
+    if (
+      reachedTargetCycle === undefined &&
+      cycleEndRateBps >= params.config.targetRateBps - params.config.toleranceBps &&
+      cycleEndRateBps <= params.config.targetRateBps + params.config.toleranceBps
+    ) {
+      reachedTargetCycle = cycleIndex + 1;
+    }
+
+    observations.push(
+      `${mode}:cycle=${cycleIndex + 1} rate=${cycleEndRateBps} executedBorrowCycles=${executedBorrowCycles} cumulativeBorrowed=${formatTokenAmount(cumulativeNetQuoteBorrowedWad)}`
+    );
+  }
+
+  const finalRateBps = await readCurrentRateBps(params.publicClient, params.poolAddress);
+  const finalOperatorDebtWad = (
+    await readBorrowerDebtState(params.publicClient, params.poolAddress, params.account.address)
+  ).currentDebtWad;
+
+  observations.push(
+    `${mode}:finalRate=${finalRateBps} reachedTargetCycle=${reachedTargetCycle ?? "-"} finalDebtDelta=${formatTokenAmount(finalOperatorDebtWad - params.initialOperatorDebtWad)} gasEth=${formatWeiAsEth(cumulativeGasCostWei)}`
+  );
+
+  return {
+    finalRateBps,
+    executedBorrowCycles,
+    cumulativeNetQuoteBorrowedWad,
+    cumulativeAdditionalCollateralWad,
+    cumulativeOperatorCapitalRequiredWad,
+    cumulativeGasCostWei,
+    finalOperatorDebtWad,
+    observations,
+    ...(reachedTargetCycle === undefined ? {} : { reachedTargetCycle })
+  };
 }
 
 async function createBorrowedStepUpFixture(
@@ -2347,6 +2879,11 @@ async function findManualExistingBorrowerPreWindowBorrowImprovement(
       borrowAmount: bigint;
       collateralAmount: bigint;
     }[];
+    targetOffsetsBps?: readonly number[];
+    lookaheadUpdates?: readonly number[];
+    limitIndexes?: readonly number[];
+    collateralAmounts?: readonly string[];
+    amounts?: readonly bigint[];
   } = {}
 ): Promise<{
   observations: string[];
@@ -2436,7 +2973,8 @@ async function findManualExistingBorrowerPreWindowBorrowImprovement(
       continue;
     }
 
-    for (const targetOffsetBps of EXPERIMENTAL_MANUAL_PREWINDOW_EXISTING_BORROW_TARGET_OFFSETS_BPS) {
+    for (const targetOffsetBps of options.targetOffsetsBps ??
+      EXPERIMENTAL_MANUAL_PREWINDOW_EXISTING_BORROW_TARGET_OFFSETS_BPS) {
       const targetRateBps = currentRateInfo.currentRateBps + targetOffsetBps;
       const config = resolveKeeperConfig({
         chainId: 8453,
@@ -2474,7 +3012,7 @@ async function findManualExistingBorrowerPreWindowBorrowImprovement(
         continue;
       }
 
-      for (const lookaheadUpdates of [2] as const) {
+      for (const lookaheadUpdates of options.lookaheadUpdates ?? ([2] as const)) {
         const passiveBranchId = await testClient.snapshot();
         const passivePath = await advanceAndApplyEligibleUpdates(
           account,
@@ -2486,11 +3024,14 @@ async function findManualExistingBorrowerPreWindowBorrowImprovement(
         );
         await testClient.revert({ id: passiveBranchId });
 
-        for (const limitIndex of EXPERIMENTAL_MANUAL_PREWINDOW_EXISTING_BORROW_LIMIT_INDEXES) {
-          for (const rawCollateralAmount of EXPERIMENTAL_MANUAL_PREWINDOW_EXISTING_BORROW_COLLATERAL_AMOUNTS) {
+        for (const limitIndex of options.limitIndexes ??
+          EXPERIMENTAL_MANUAL_PREWINDOW_EXISTING_BORROW_LIMIT_INDEXES) {
+          for (const rawCollateralAmount of options.collateralAmounts ??
+            EXPERIMENTAL_MANUAL_PREWINDOW_EXISTING_BORROW_COLLATERAL_AMOUNTS) {
             const collateralAmount = BigInt(rawCollateralAmount);
 
-            for (const amount of EXPERIMENTAL_MANUAL_PREWINDOW_EXISTING_BORROW_AMOUNTS_WAD) {
+            for (const amount of options.amounts ??
+              EXPERIMENTAL_MANUAL_PREWINDOW_EXISTING_BORROW_AMOUNTS_WAD) {
               const branchId = await testClient.snapshot();
 
               try {
@@ -2563,7 +3104,10 @@ async function findBoundaryDerivedExistingBorrowerPreWindowBorrowImprovement(
   publicClient: any,
   walletClient: any,
   testClient: any,
-  artifact: { abi: unknown[]; bytecode: `0x${string}` }
+  artifact: { abi: unknown[]; bytecode: `0x${string}` },
+  options: {
+    targetRateBps?: number;
+  } = {}
 ): Promise<{
   observations: string[];
   positiveMatch:
@@ -2653,7 +3197,7 @@ async function findBoundaryDerivedExistingBorrowerPreWindowBorrowImprovement(
       poolAddress,
       poolId: `8453:${poolAddress.toLowerCase()}`,
       rpcUrl: LOCAL_RPC_URL,
-      targetRateBps: 1_000,
+      targetRateBps: options.targetRateBps ?? 1_000,
       toleranceBps: 50,
       toleranceMode: "absolute",
       completionPolicy: "next_move_would_overshoot",
@@ -2675,7 +3219,7 @@ async function findBoundaryDerivedExistingBorrowerPreWindowBorrowImprovement(
     }).getSnapshot();
     if (
       snapshot.secondsUntilNextRateUpdate <= 0 ||
-      snapshot.currentRateBps >= 1_000 ||
+      snapshot.currentRateBps >= (options.targetRateBps ?? 1_000) ||
       snapshot.predictedNextOutcome === "STEP_UP"
     ) {
       observations.push(
@@ -2687,7 +3231,9 @@ async function findBoundaryDerivedExistingBorrowerPreWindowBorrowImprovement(
     const rateState = extractAjnaRateState(snapshot, chainNow);
     const baselineMargin = computeStepUpMargin(rateState);
     const baselinePrediction = forecastAjnaNextEligibleRate(rateState);
-    const baselineNextDistance = Math.abs(baselinePrediction.predictedNextRateBps - config.targetRateBps);
+    const baselineNextDistance = Math.abs(
+      baselinePrediction.predictedNextRateBps - config.targetRateBps
+    );
     const pureCandidates: BoundaryDerivedPureCandidate[] = [];
 
     for (const rawCollateralAmount of EXPERIMENTAL_BOUNDARY_DERIVED_PREWINDOW_BORROW_COLLATERAL_AMOUNTS) {
@@ -2789,76 +3335,80 @@ async function findBoundaryDerivedExistingBorrowerPreWindowBorrowImprovement(
   });
 
   for (const rankedState of rankedStates.slice(0, 1)) {
-    const passiveBranchId = await testClient.snapshot();
-    const passivePath = await advanceAndApplyEligibleUpdates(
-      account,
-      publicClient,
-      walletClient,
-      testClient,
-      rankedState.config,
-      2
-    );
-    await testClient.revert({ id: passiveBranchId });
+    for (const lookaheadUpdates of [2] as const) {
+      const passiveBranchId = await testClient.snapshot();
+      const passivePath = await advanceAndApplyEligibleUpdates(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        rankedState.config,
+        lookaheadUpdates
+      );
+      await testClient.revert({ id: passiveBranchId });
 
-    observations.push(
-      `validating scenario ${rankedState.scenario.initialQuoteAmount.toString()}/${rankedState.scenario.borrowAmount.toString()}: passive=${passivePath.currentRateBps} baselineNext=${rankedState.baselinePrediction.predictedNextRateBps}`
-    );
+      observations.push(
+        `validating scenario ${rankedState.scenario.initialQuoteAmount.toString()}/${rankedState.scenario.borrowAmount.toString()} updates=${lookaheadUpdates}: passive=${passivePath.currentRateBps} baselineNext=${rankedState.baselinePrediction.predictedNextRateBps}`
+      );
 
-    for (const pureCandidate of rankedState.pureCandidates.slice(0, 2)) {
-      for (const limitIndex of [3000] as const) {
-        const collateralAmount = pureCandidate.collateralAmount;
-        const amount = pureCandidate.amount;
-        const branchId = await testClient.snapshot();
+      for (const pureCandidate of rankedState.pureCandidates.slice(0, 2)) {
+        for (
+          const limitIndex of EXPERIMENTAL_BOUNDARY_DERIVED_PREWINDOW_BORROW_LIMIT_INDEXES
+        ) {
+          const collateralAmount = pureCandidate.collateralAmount;
+          const amount = pureCandidate.amount;
+          const branchId = await testClient.snapshot();
 
-        try {
-          const drawDebtHash = await walletClient.writeContract({
-            account,
-            chain: undefined,
-            address: rankedState.poolAddress,
-            abi: ajnaPoolAbi,
-            functionName: "drawDebt",
-            args: [account.address, amount, BigInt(limitIndex), collateralAmount]
-          });
-          await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
+          try {
+            const drawDebtHash = await walletClient.writeContract({
+              account,
+              chain: undefined,
+              address: rankedState.poolAddress,
+              abi: ajnaPoolAbi,
+              functionName: "drawDebt",
+              args: [account.address, amount, BigInt(limitIndex), collateralAmount]
+            });
+            await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
 
-          const activePath = await advanceAndApplyEligibleUpdates(
-            account,
-            publicClient,
-            walletClient,
-            testClient,
-            rankedState.config,
-            2
-          );
-          observations.push(
-            `scenario=${rankedState.scenario.initialQuoteAmount.toString()}/${rankedState.scenario.borrowAmount.toString()} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()} passive=${passivePath.currentRateBps} active=${activePath.currentRateBps}`
-          );
+            const activePath = await advanceAndApplyEligibleUpdates(
+              account,
+              publicClient,
+              walletClient,
+              testClient,
+              rankedState.config,
+              lookaheadUpdates
+            );
+            observations.push(
+              `scenario=${rankedState.scenario.initialQuoteAmount.toString()}/${rankedState.scenario.borrowAmount.toString()} updates=${lookaheadUpdates} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()} passive=${passivePath.currentRateBps} active=${activePath.currentRateBps}`
+            );
 
-          if (
-            activePath.currentRateBps > passivePath.currentRateBps &&
-            Math.abs(activePath.currentRateBps - rankedState.config.targetRateBps) <
-              Math.abs(passivePath.currentRateBps - rankedState.config.targetRateBps)
-          ) {
-            return {
-              observations,
-              positiveMatch: {
-                poolAddress: rankedState.poolAddress,
-                chainNow: rankedState.chainNow,
-                scenario: rankedState.scenario,
-                config: rankedState.config,
-                amount,
-                limitIndex,
-                collateralAmount,
-                passiveRateBps: passivePath.currentRateBps,
-                activeRateBps: activePath.currentRateBps
-              }
-            };
+            if (
+              activePath.currentRateBps > passivePath.currentRateBps &&
+              Math.abs(activePath.currentRateBps - rankedState.config.targetRateBps) <
+                Math.abs(passivePath.currentRateBps - rankedState.config.targetRateBps)
+            ) {
+              return {
+                observations,
+                positiveMatch: {
+                  poolAddress: rankedState.poolAddress,
+                  chainNow: rankedState.chainNow,
+                  scenario: rankedState.scenario,
+                  config: rankedState.config,
+                  amount,
+                  limitIndex,
+                  collateralAmount,
+                  passiveRateBps: passivePath.currentRateBps,
+                  activeRateBps: activePath.currentRateBps
+                }
+              };
+            }
+          } catch (error) {
+            observations.push(
+              `scenario=${rankedState.scenario.initialQuoteAmount.toString()}/${rankedState.scenario.borrowAmount.toString()} updates=${lookaheadUpdates} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()} pureNext=${pureCandidate.predictedRateBps}/${pureCandidate.predictedOutcome} error=${error instanceof Error ? error.message : String(error)}`
+            );
+          } finally {
+            await testClient.revert({ id: branchId });
           }
-        } catch (error) {
-          observations.push(
-            `scenario=${rankedState.scenario.initialQuoteAmount.toString()}/${rankedState.scenario.borrowAmount.toString()} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()} pureNext=${pureCandidate.predictedRateBps}/${pureCandidate.predictedOutcome} error=${error instanceof Error ? error.message : String(error)}`
-          );
-        } finally {
-          await testClient.revert({ id: branchId });
         }
       }
     }
@@ -5727,6 +6277,121 @@ describeIf("Base factory fork integration", () => {
       expect(
         Math.abs(activePath.currentRateBps - matched.config.targetRateBps)
       ).toBeLessThan(Math.abs(passivePath.currentRateBps - matched.config.targetRateBps));
+    },
+    420_000
+  );
+
+  itBaseExperimental(
+    "surfaces a real multi-cycle borrow in a significantly used pool over multiple weeks and shows that it does not yet beat the passive upward path",
+    async () => {
+      const { account, publicClient, walletClient, testClient } = createClients();
+      const artifact = await ensureMockArtifact();
+      process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+      const fixture = await createLargeUsedPoolMultiWeekBorrowFixture(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        artifact
+      );
+      const initialSnapshot = await new AjnaRpcSnapshotSource(fixture.config, {
+        publicClient,
+        now: () => fixture.chainNow
+      }).getSnapshot();
+      const loansInfo = await publicClient.readContract({
+        address: fixture.poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "loansInfo",
+        args: []
+      });
+      const noOfLoans = Number(loansInfo[2]);
+
+      expect(noOfLoans).toBeGreaterThanOrEqual(3);
+      expect(initialSnapshot.currentRateBps).toBeLessThan(fixture.config.targetRateBps);
+      expect(initialSnapshot.currentRateBps).toBeGreaterThan(0);
+
+      const branchId = await testClient.snapshot();
+      const activeBranch = await runLargeUsedPoolMultiWeekBorrowBranch("active", {
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        poolAddress: fixture.poolAddress,
+        config: fixture.config,
+        actorAddresses: fixture.actorAddresses,
+        cycleCount: EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE.cycleCount,
+        initialOperatorDebtWad: fixture.initialOperatorDebtWad
+      });
+      await testClient.revert({ id: branchId });
+
+      const passiveBranch = await runLargeUsedPoolMultiWeekBorrowBranch("passive", {
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        poolAddress: fixture.poolAddress,
+        config: fixture.config,
+        actorAddresses: fixture.actorAddresses,
+        cycleCount: EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE.cycleCount,
+        initialOperatorDebtWad: fixture.initialOperatorDebtWad
+      });
+
+      const activeDistanceToTarget = Math.abs(
+        activeBranch.finalRateBps - fixture.config.targetRateBps
+      );
+      const passiveDistanceToTarget = Math.abs(
+        passiveBranch.finalRateBps - fixture.config.targetRateBps
+      );
+      const activeDebtDeltaWad = activeBranch.finalOperatorDebtWad - fixture.initialOperatorDebtWad;
+      const passiveDebtDeltaWad =
+        passiveBranch.finalOperatorDebtWad - fixture.initialOperatorDebtWad;
+      const summary = [
+        `initialRate=${initialSnapshot.currentRateBps}`,
+        `target=${fixture.config.targetRateBps}`,
+        `activeFinal=${activeBranch.finalRateBps}`,
+        `passiveFinal=${passiveBranch.finalRateBps}`,
+        `borrowCycles=${activeBranch.executedBorrowCycles}`,
+        `cumulativeBorrowed=${formatTokenAmount(activeBranch.cumulativeNetQuoteBorrowedWad)}`,
+        `additionalCollateral=${formatTokenAmount(activeBranch.cumulativeAdditionalCollateralWad)}`,
+        `operatorCapitalRequired=${formatTokenAmount(activeBranch.cumulativeOperatorCapitalRequiredWad)}`,
+        `activeDebtDelta=${formatTokenAmount(activeDebtDeltaWad)}`,
+        `passiveDebtDelta=${formatTokenAmount(passiveDebtDeltaWad)}`,
+        `activeGasEth=${formatWeiAsEth(activeBranch.cumulativeGasCostWei)}`,
+        `passiveGasEth=${formatWeiAsEth(passiveBranch.cumulativeGasCostWei)}`,
+        `activeObs=${activeBranch.observations.join(",")}`,
+        `passiveObs=${passiveBranch.observations.join(",")}`
+      ].join(" ");
+
+      console.info(
+        [
+          "large-used-pool-upward-summary",
+          `initial_rate=${initialSnapshot.currentRateBps}`,
+          `target=${fixture.config.targetRateBps}`,
+          `active_final=${activeBranch.finalRateBps}`,
+          `passive_final=${passiveBranch.finalRateBps}`,
+          `active_reached_cycle=${activeBranch.reachedTargetCycle ?? "-"}`,
+          `borrow_cycles=${activeBranch.executedBorrowCycles}`,
+          `initial_operator_collateral=${formatTokenAmount(fixture.initialOperatorCollateralWad)}`,
+          `incremental_collateral=${formatTokenAmount(activeBranch.cumulativeAdditionalCollateralWad)}`,
+          `cumulative_borrowed=${formatTokenAmount(activeBranch.cumulativeNetQuoteBorrowedWad)}`,
+          `operator_capital_required=${formatTokenAmount(activeBranch.cumulativeOperatorCapitalRequiredWad)}`,
+          `active_debt_delta=${formatTokenAmount(activeDebtDeltaWad)}`,
+          `passive_debt_delta=${formatTokenAmount(passiveDebtDeltaWad)}`,
+          `gas_eth=${formatWeiAsEth(activeBranch.cumulativeGasCostWei)}`,
+          `active_observations=${activeBranch.observations.join(",")}`,
+          `passive_observations=${passiveBranch.observations.join(",")}`
+        ].join(" ")
+      );
+
+      expect(activeBranch.executedBorrowCycles, summary).toBeGreaterThan(0);
+      expect(activeBranch.cumulativeNetQuoteBorrowedWad, summary).toBeGreaterThan(0n);
+      expect(activeDebtDeltaWad, summary).toBeGreaterThan(passiveDebtDeltaWad);
+      expect(activeBranch.cumulativeGasCostWei, summary).toBeGreaterThan(
+        passiveBranch.cumulativeGasCostWei
+      );
+      expect(activeBranch.finalRateBps, summary).toBeLessThanOrEqual(passiveBranch.finalRateBps);
+      expect(activeDistanceToTarget, summary).toBeGreaterThanOrEqual(passiveDistanceToTarget);
     },
     420_000
   );

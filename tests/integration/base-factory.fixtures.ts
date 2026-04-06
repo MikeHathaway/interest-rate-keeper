@@ -391,6 +391,42 @@ export const REPRESENTATIVE_MULTI_CYCLE_BORROW_CONFIG = {
   lookaheadUpdates: 3
 } as const;
 
+export const EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE = {
+  targetRateBps: 1300,
+  toleranceBps: 50,
+  cycleCount: 2,
+  initialDeposits: [
+    { actor: "operator", amount: 1_000n, bucketIndex: 3000 },
+    { actor: "lenderA", amount: 250n, bucketIndex: 3000 },
+    { actor: "lenderA", amount: 250n, bucketIndex: 3250 },
+    { actor: "lenderB", amount: 250n, bucketIndex: 3500 },
+    { actor: "lenderC", amount: 250n, bucketIndex: 2750 }
+  ] as const,
+  initialBorrows: [
+    { actor: "operator", amount: 10n, limitIndex: 3000, collateralAmount: 300n },
+    { actor: "borrowerA", amount: 10n, limitIndex: 3000, collateralAmount: 300n },
+    { actor: "borrowerB", amount: 10n, limitIndex: 3000, collateralAmount: 300n }
+  ] as const,
+  cycleActionPatterns: [
+    [
+      { actor: "lenderA", type: "ADD_QUOTE", bucketIndex: 3250, amount: 25n },
+      { actor: "borrowerA", type: "DRAW_DEBT", limitIndex: 3000, amount: 5n, collateralAmount: 0n }
+    ],
+    [
+      { actor: "lenderB", type: "ADD_QUOTE", bucketIndex: 3500, amount: 20n },
+      { actor: "borrowerB", type: "DRAW_DEBT", limitIndex: 3000, amount: 5n, collateralAmount: 0n }
+    ],
+    [
+      { actor: "lenderC", type: "ADD_QUOTE", bucketIndex: 2750, amount: 20n },
+      { actor: "borrowerA", type: "DRAW_DEBT", limitIndex: 3000, amount: 5n, collateralAmount: 0n }
+    ],
+    [
+      { actor: "lenderA", type: "ADD_QUOTE", bucketIndex: 3000, amount: 20n },
+      { actor: "borrowerB", type: "DRAW_DEBT", limitIndex: 3000, amount: 5n, collateralAmount: 0n }
+    ]
+  ] as const
+} as const;
+
 export const MAX_EXACT_DUAL_VALIDATIONS_WITH_PURE_MATCH = 1;
 export const MAX_EXACT_DUAL_VALIDATIONS_WITHOUT_PURE_MATCH = 1;
 
