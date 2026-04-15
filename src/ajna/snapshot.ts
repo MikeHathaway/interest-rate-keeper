@@ -21,13 +21,14 @@ import { synthesizeAjnaHeuristicCandidates } from "./snapshot-dual.js";
 import { synthesizeAjnaLendCandidateViaSimulation } from "./snapshot-lend-sim.js";
 import { synthesizeAjnaBorrowCandidateViaSimulation } from "./snapshot-borrow-sim.js";
 import { synthesizeAjnaLendAndBorrowCandidateViaSimulation } from "./snapshot-dual-sim.js";
-import { toRateBps } from "./rate-state.js";
+import { hasUninitializedAjnaEmaState, toRateBps } from "./rate-state.js";
 import { resolveAjnaSignerAddress } from "./runtime.js";
 import {
   resolveAddQuoteBucketIndexes,
   resolveDrawDebtCollateralAmounts,
   resolveDrawDebtLimitIndexes,
   resolvePreWindowLendBucketIndexes,
+  resolveProtocolShapedPreWindowDualBucketIndexes,
   resolveTimedBorrowSimulationLookaheadAttempts
 } from "./search-space.js";
 import { buildSimulationCacheKey, setBoundedCacheEntry } from "./snapshot-cache.js";
@@ -57,9 +58,12 @@ export {
   resolveSimulationBorrowCollateralAmounts,
   resolveSimulationBorrowLimitIndexes,
   resolveBorrowSimulationLookaheadAttempts,
+  resolveProtocolApproximationBucketIndexes,
   resolveTimedBorrowSimulationLookaheadAttempts,
+  resolveProtocolShapedPreWindowDualBucketIndexes,
   searchCoarseToFineDualSpace
 } from "./search-space.js";
+export { rankProtocolShapedDualBranches } from "./snapshot-dual-prefilter.js";
 
 const MAX_SIMULATION_CANDIDATE_CACHE_ENTRIES = 2_048;
 
@@ -115,7 +119,8 @@ function buildSimulationCandidateCacheKey(
     accountState.quoteTokenBalance,
     accountState.quoteTokenAllowance,
     accountState.collateralBalance,
-    accountState.collateralAllowance
+    accountState.collateralAllowance,
+    accountState.lenderBucketStateSignature ?? "-"
   ]);
 }
 
@@ -540,7 +545,15 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
         synthesisConfig,
         {
           needsQuoteState: synthesisPolicy.simulationLend,
-          needsCollateralState: synthesisPolicy.simulationBorrow
+          needsCollateralState: synthesisPolicy.simulationBorrow,
+          ...(synthesisPolicy.simulationLend
+            ? {
+                lenderQuoteBucketIndexes: resolveProtocolShapedPreWindowDualBucketIndexes(
+                  readState,
+                  synthesisConfig
+                )
+              }
+            : {})
         }
       );
       const simulationCacheKey = buildSimulationCandidateCacheKey(
@@ -577,11 +590,12 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
 
         if (synthesisPolicy.simulationBorrow) {
           let borrowResult: BorrowSimulationSynthesisResult | undefined;
-          for (const lookaheadUpdates of resolveTimedBorrowSimulationLookaheadAttempts(
+          const borrowLookaheadAttempts = resolveTimedBorrowSimulationLookaheadAttempts(
             synthesisConfig,
             readState.immediatePrediction.secondsUntilNextRateUpdate,
             readState.rateState
-          )) {
+          );
+          for (const lookaheadUpdates of borrowLookaheadAttempts) {
             const borrowConfig =
               synthesisConfig.borrowSimulationLookaheadUpdates === lookaheadUpdates
                 ? synthesisConfig
@@ -613,25 +627,45 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
             planningLookaheadUpdates = borrowResult.planningLookaheadUpdates;
           }
 
+          const allowMultiCycleDualSearch =
+            (readState.loansState?.noOfLoans ?? 0n) > 1n &&
+            !hasUninitializedAjnaEmaState(readState.rateState);
+
           if (
             synthesisPolicy.simulationLend &&
-            (borrowResult?.planningLookaheadUpdates === undefined ||
-              borrowResult.planningLookaheadUpdates <= 1)
+            ((borrowResult?.planningLookaheadUpdates === undefined ||
+              borrowResult.planningLookaheadUpdates <= 1) ||
+              allowMultiCycleDualSearch)
           ) {
+            const dualLookaheadUpdates =
+              borrowResult?.planningLookaheadUpdates ??
+              borrowLookaheadAttempts[borrowLookaheadAttempts.length - 1];
+            const dualConfig =
+              dualLookaheadUpdates === undefined ||
+              synthesisConfig.borrowSimulationLookaheadUpdates === dualLookaheadUpdates
+                ? synthesisConfig
+                : {
+                    ...synthesisConfig,
+                    borrowSimulationLookaheadUpdates: dualLookaheadUpdates
+                  };
+            const horizonAlignedSingleActionCandidates = [lendCandidate, borrowCandidate].filter(
+              (candidate): candidate is PlanCandidate =>
+                candidate !== undefined &&
+                (candidate.planningLookaheadUpdates ?? 1) === (dualLookaheadUpdates ?? 1)
+            );
             const dualCandidate = await synthesizeAjnaLendAndBorrowCandidateViaSimulation(
               readState,
-              synthesisConfig,
+              dualConfig,
               {
                 poolAddress: this.poolAddress,
                 rpcUrl,
                 baselinePrediction: readState.prediction,
                 accountState: simulationAccountState,
-                ...(borrowCandidate === undefined
+                ...(borrowCandidate === undefined ||
+                (borrowCandidate.planningLookaheadUpdates ?? 1) !== (dualLookaheadUpdates ?? 1)
                   ? {}
                   : { anchorBorrowCandidate: borrowCandidate }),
-                singleActionCandidates: [lendCandidate, borrowCandidate].filter(
-                  (candidate): candidate is PlanCandidate => candidate !== undefined
-                )
+                singleActionCandidates: horizonAlignedSingleActionCandidates
               }
             );
             if (dualCandidate) {

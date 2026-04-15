@@ -4,7 +4,10 @@ import {
   classifyAjnaNextRate,
   forecastAjnaNextEligibleRate,
   hasUninitializedAjnaEmaState,
+  rankProtocolShapedDualBranches,
+  resolveProtocolApproximationBucketIndexes,
   resolveAjnaSynthesisPolicy,
+  resolveProtocolShapedPreWindowDualBucketIndexes,
   resolveSimulationBorrowCollateralAmounts,
   resolveBorrowSimulationLookaheadAttempts,
   resolveTimedBorrowSimulationLookaheadAttempts,
@@ -698,6 +701,172 @@ describe("resolveSimulationBorrowCollateralAmounts", () => {
         }
       )
     ).toEqual([0n, 1n, 2n, 5n, 10n, 20n, 50n, 100n].map((amount) => amount * WAD));
+  });
+});
+
+describe("resolveProtocolShapedPreWindowDualBucketIndexes", () => {
+  it("unions configured buckets with threshold-derived buckets for not-due dual-side search", () => {
+    expect(
+      resolveProtocolShapedPreWindowDualBucketIndexes(
+        {
+          immediatePrediction: {
+            secondsUntilNextRateUpdate: 3600
+          },
+          meaningfulDepositThresholdFenwickIndex: 3000
+        },
+        {
+          ...baseConfig,
+          addQuoteBucketIndexes: [3500]
+        }
+      )
+    ).toEqual([2000, 2500, 2750, 2900, 2950, 2980, 2990, 2995, 3000, 3500]);
+  });
+
+  it("preserves configured buckets once the due window is open", () => {
+    expect(
+      resolveProtocolShapedPreWindowDualBucketIndexes(
+        {
+          immediatePrediction: {
+            secondsUntilNextRateUpdate: 0
+          },
+          meaningfulDepositThresholdFenwickIndex: 3000
+        },
+        {
+          ...baseConfig,
+          addQuoteBucketIndexes: [3250, 3500]
+        }
+      )
+    ).toEqual([3000, 3250, 3500]);
+  });
+});
+
+describe("resolveProtocolApproximationBucketIndexes", () => {
+  it("includes threshold-derived and borrow-adjacent buckets for richer used-pool dual ranking", () => {
+    expect(
+      resolveProtocolApproximationBucketIndexes(
+        {
+          immediatePrediction: {
+            secondsUntilNextRateUpdate: 3600
+          },
+          meaningfulDepositThresholdFenwickIndex: 3000
+        },
+        {
+          ...baseConfig,
+          addQuoteBucketIndexes: [3500],
+          drawDebtLimitIndexes: [3000]
+        }
+      )
+    ).toEqual([
+      2000, 2500, 2750, 2900, 2950, 2980, 2990, 2995, 3000, 3050, 3100, 3250, 3500
+    ]);
+  });
+});
+
+describe("rankProtocolShapedDualBranches", () => {
+  it("prioritizes threshold-adjacent, counted-quote branches in initialized used-pool states", () => {
+    const orderedBranches = rankProtocolShapedDualBranches(
+      {
+        blockNumber: 1n,
+        blockTimestamp: 50_000,
+        rateState: {
+          currentRateWad: 110_000_000_000_000_000n,
+          currentDebtWad: 1_000n,
+          debtEmaWad: 900_000_000_000_000_000n,
+          depositEmaWad: 1_000_000_000_000_000_000n,
+          debtColEmaWad: 150_000_000_000_000_000n,
+          lupt0DebtEmaWad: WAD,
+          lastInterestRateUpdateTimestamp: 10_000,
+          nowTimestamp: 20_000
+        },
+        prediction: {
+          predictedOutcome: "STEP_DOWN",
+          predictedNextRateWad: 99_000_000_000_000_000n,
+          predictedNextRateBps: 990,
+          secondsUntilNextRateUpdate: 3600
+        },
+        immediatePrediction: {
+          predictedOutcome: "NO_CHANGE",
+          predictedNextRateWad: 110_000_000_000_000_000n,
+          predictedNextRateBps: 1100,
+          secondsUntilNextRateUpdate: 3600
+        },
+        inflatorWad: WAD,
+        totalT0Debt: 1_000n,
+        totalT0DebtInAuction: 0n,
+        t0Debt2ToCollateralWad: 100n,
+        meaningfulDepositThresholdFenwickIndex: 3000,
+        quoteTokenAddress: "0x0000000000000000000000000000000000000001",
+        collateralAddress: "0x0000000000000000000000000000000000000002",
+        quoteTokenScale: 1n,
+        poolType: 1,
+        borrowerState: {
+          borrowerAddress: "0x0000000000000000000000000000000000000003",
+          t0Debt: 100n,
+          collateral: 100n,
+          npTpRatio: 0n
+        },
+        loansState: {
+          maxBorrower: "0x0000000000000000000000000000000000000003",
+          maxT0DebtToCollateral: 100n,
+          noOfLoans: 3n
+        }
+      },
+      {
+        ...baseConfig,
+        targetRateBps: 1300
+      },
+      {
+        branches: [
+          {
+            addQuoteBucketIndex: 3500,
+            limitIndex: 3250,
+            collateralAmount: 0n
+          },
+          {
+            addQuoteBucketIndex: 3000,
+            limitIndex: 3000,
+            collateralAmount: 0n
+          },
+          {
+            addQuoteBucketIndex: 2995,
+            limitIndex: 3000,
+            collateralAmount: 0n
+          }
+        ],
+        minimumQuoteAmount: 1n,
+        maximumQuoteAmount: 1_000n,
+        minimumBorrowAmount: 1n,
+        maximumBorrowAmount: 1_000n,
+        quoteAnchorSteps: [
+          {
+            bucketIndex: 2995,
+            amount: 10n
+          }
+        ],
+        borrowAnchorSteps: [
+          {
+            limitIndex: 3000,
+            collateralAmount: 0n,
+            amount: 10n
+          }
+        ],
+        anchorBorrowLimitIndex: 3000,
+        anchorCollateralAmount: 0n
+      }
+    );
+
+    expect(orderedBranches.slice(0, 2)).toEqual([
+      {
+        addQuoteBucketIndex: 3000,
+        limitIndex: 3000,
+        collateralAmount: 0n
+      },
+      {
+        addQuoteBucketIndex: 2995,
+        limitIndex: 3000,
+        collateralAmount: 0n
+      }
+    ]);
   });
 });
 

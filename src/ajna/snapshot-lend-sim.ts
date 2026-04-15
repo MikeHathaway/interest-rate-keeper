@@ -19,7 +19,7 @@ import {
   replayAjnaSimulationPath,
   withPreparedLazySimulationFork
 } from "./snapshot-sim-helpers.js";
-import { type AjnaRatePrediction } from "./rate-state.js";
+import { hasUninitializedAjnaEmaState, type AjnaRatePrediction } from "./rate-state.js";
 import {
   type ScalarSearchMatch,
   buildExposureFractionAnchorAmounts,
@@ -42,6 +42,18 @@ const EXACT_MULTI_CYCLE_LEND_MAX_QUOTE_SAMPLES = 12;
 const EXACT_MULTI_CYCLE_LEND_LOW_END_QUOTE_SAMPLES = 8;
 
 const lendSimulationPathCache = new Map<string, LendSimulationPathResult | null>();
+
+type SimulatedLendAction =
+  | {
+      type: "ADD_QUOTE";
+      amount: bigint;
+      bucketIndex: number;
+    }
+  | {
+      type: "REMOVE_QUOTE";
+      amount: bigint;
+      bucketIndex: number;
+    };
 
 export async function synthesizeAjnaLendCandidateViaSimulation(
   readState: AjnaPoolStateRead,
@@ -103,18 +115,16 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
           config,
           {
             needsQuoteState: true,
-            needsCollateralState: false
+            needsCollateralState: false,
+            lenderQuoteBucketIndexes: addQuoteBucketIndexes
           }
         ));
 
-      const maxAmount = smallestBigInt(
+      const maxAddQuoteAmount = smallestBigInt(
         config.maxQuoteTokenExposure,
         effectiveAccountState.quoteTokenBalance ?? 0n,
         effectiveAccountState.quoteTokenAllowance ?? 0n
       );
-      if (minimumAmount > maxAmount) {
-        return undefined;
-      }
 
       const expiryOffset = BigInt(
         config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS
@@ -128,20 +138,16 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
       let bestCandidate: PlanCandidate | undefined;
 
       async function simulateLendPath(
-        addQuote:
-          | {
-              amount: bigint;
-              bucketIndex: number;
-            }
-          | null
+        action: SimulatedLendAction | null
       ): Promise<LendSimulationPathResult> {
         const cacheKey = buildSimulationCacheKey([
           "lend",
           snapshotFingerprint,
           lookaheadUpdates,
           simulationSenderAddress,
-          addQuote?.bucketIndex,
-          addQuote?.amount ?? 0n
+          action?.type ?? "baseline",
+          action?.bucketIndex,
+          action?.amount ?? 0n
         ]);
         const cachedPath = lendSimulationPathCache.get(cacheKey);
         if (cachedPath !== undefined) {
@@ -170,26 +176,38 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
                 readPoolState,
                 observeState
               }) => {
-                if (!addQuote) {
+                if (!action) {
                   return;
                 }
 
-                const simulationBlock = await publicClient.getBlock({ blockTag: "latest" });
-                const hash = await walletClient.writeContract({
-                  account: simulationSenderAddress,
-                  chain: undefined,
-                  address: options.poolAddress,
-                  abi: ajnaPoolAbi,
-                  functionName: "addQuoteToken",
-                  args: [
-                    addQuote.amount,
-                    BigInt(addQuote.bucketIndex),
-                    simulationBlock.timestamp + expiryOffset
-                  ]
-                });
+                const hash =
+                  action.type === "ADD_QUOTE"
+                    ? await (async () => {
+                        const simulationBlock = await publicClient.getBlock({ blockTag: "latest" });
+                        return walletClient.writeContract({
+                          account: simulationSenderAddress,
+                          chain: undefined,
+                          address: options.poolAddress,
+                          abi: ajnaPoolAbi,
+                          functionName: "addQuoteToken",
+                          args: [
+                            action.amount,
+                            BigInt(action.bucketIndex),
+                            simulationBlock.timestamp + expiryOffset
+                          ]
+                        });
+                      })()
+                    : await walletClient.writeContract({
+                        account: simulationSenderAddress,
+                        chain: undefined,
+                        address: options.poolAddress,
+                        abi: ajnaPoolAbi,
+                        functionName: "removeQuoteToken",
+                        args: [action.amount, BigInt(action.bucketIndex)]
+                      });
                 const receipt = await publicClient.waitForTransactionReceipt({ hash });
                 if (receipt.status !== "success") {
-                  throw new Error("addQuoteToken simulation reverted");
+                  throw new Error(`${action.type} simulation reverted`);
                 }
 
                 observeState(await readPoolState());
@@ -225,11 +243,69 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
         targetBand
       );
       const baselineTerminalDistance = baselinePath.terminalDistanceToTargetBps;
+      const prefersHigherTerminalRate = baselinePrediction.predictedNextRateBps < targetBand.minRateBps;
+      const allowRemoveQuotePath =
+        prefersHigherTerminalRate &&
+        lookaheadUpdates > 1 &&
+        (readState.loansState?.noOfLoans ?? 0n) > 1n &&
+        !hasUninitializedAjnaEmaState(readState.rateState);
 
-      for (const addQuoteBucketIndex of addQuoteBucketIndexes) {
-        const evaluate = async (
-          quoteTokenAmount: bigint
-        ): Promise<{
+      async function evaluateAction(
+        action: SimulatedLendAction
+      ): Promise<{
+        predictedOutcome: RateMoveOutcome;
+        predictedRateWadAfterNextUpdate: bigint;
+        predictedRateBpsAfterNextUpdate: number;
+        predictedDistanceToTargetBps: number;
+        terminalRateBps: number;
+        terminalDistanceToTargetBps: number;
+        improvesConvergence: boolean;
+      }> {
+        try {
+          const candidatePath = await simulateLendPath(action);
+          const predictedRateWadAfterNextUpdate = candidatePath.firstRateWadAfterNextUpdate;
+          const predictedRateBpsAfterNextUpdate = candidatePath.firstRateBpsAfterNextUpdate;
+          const predictedDistance = distanceToTargetBand(
+            predictedRateBpsAfterNextUpdate,
+            targetBand
+          );
+          const predictedOutcome = candidatePath.firstOutcome;
+
+          return {
+            predictedOutcome,
+            predictedRateWadAfterNextUpdate,
+            predictedRateBpsAfterNextUpdate,
+            predictedDistanceToTargetBps: predictedDistance,
+            terminalRateBps: candidatePath.terminalRateBps,
+            terminalDistanceToTargetBps: candidatePath.terminalDistanceToTargetBps,
+            improvesConvergence:
+              lookaheadUpdates > 1
+                ? candidatePath.terminalDistanceToTargetBps < baselineTerminalDistance
+                : predictionChanged(baselinePredictionState, {
+                    predictedOutcome,
+                    predictedNextRateWad: predictedRateWadAfterNextUpdate,
+                    predictedNextRateBps: predictedRateBpsAfterNextUpdate,
+                    secondsUntilNextRateUpdate: 0
+                  }) &&
+                  predictedDistance < baselineNextDistance
+          };
+        } catch {
+          return {
+            predictedOutcome: baselinePath.firstOutcome,
+            predictedRateWadAfterNextUpdate: baselinePath.firstRateWadAfterNextUpdate,
+            predictedRateBpsAfterNextUpdate: baselinePath.firstRateBpsAfterNextUpdate,
+            predictedDistanceToTargetBps: baselineNextDistance,
+            terminalRateBps: baselinePath.terminalRateBps,
+            terminalDistanceToTargetBps: baselineTerminalDistance,
+            improvesConvergence: false
+          };
+        }
+      }
+
+      async function selectBestActionAmount(options: {
+        maximumAmount: bigint;
+        preferredSeedAmounts: Array<bigint | undefined>;
+        evaluate: (amount: bigint) => Promise<{
           predictedOutcome: RateMoveOutcome;
           predictedRateWadAfterNextUpdate: bigint;
           predictedRateBpsAfterNextUpdate: number;
@@ -237,54 +313,11 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
           terminalRateBps: number;
           terminalDistanceToTargetBps: number;
           improvesConvergence: boolean;
-        }> => {
-          try {
-            const candidatePath = await simulateLendPath({
-              amount: quoteTokenAmount,
-              bucketIndex: addQuoteBucketIndex
-            });
-            const predictedRateWadAfterNextUpdate = candidatePath.firstRateWadAfterNextUpdate;
-            const predictedRateBpsAfterNextUpdate = candidatePath.firstRateBpsAfterNextUpdate;
-            const predictedDistance = distanceToTargetBand(
-              predictedRateBpsAfterNextUpdate,
-              targetBand
-            );
-            const predictedOutcome = candidatePath.firstOutcome;
-
-            return {
-              predictedOutcome,
-              predictedRateWadAfterNextUpdate,
-              predictedRateBpsAfterNextUpdate,
-              predictedDistanceToTargetBps: predictedDistance,
-              terminalRateBps: candidatePath.terminalRateBps,
-              terminalDistanceToTargetBps: candidatePath.terminalDistanceToTargetBps,
-              improvesConvergence:
-                lookaheadUpdates > 1
-                  ? candidatePath.terminalDistanceToTargetBps < baselineTerminalDistance
-                  : predictionChanged(baselinePredictionState, {
-                      predictedOutcome,
-                      predictedNextRateWad: predictedRateWadAfterNextUpdate,
-                      predictedNextRateBps: predictedRateBpsAfterNextUpdate,
-                      secondsUntilNextRateUpdate: 0
-                    }) &&
-                    predictedDistance < baselineNextDistance
-            };
-          } catch {
-            return {
-              predictedOutcome: baselinePath.firstOutcome,
-              predictedRateWadAfterNextUpdate: baselinePath.firstRateWadAfterNextUpdate,
-              predictedRateBpsAfterNextUpdate: baselinePath.firstRateBpsAfterNextUpdate,
-              predictedDistanceToTargetBps: baselineNextDistance,
-              terminalRateBps: baselinePath.terminalRateBps,
-              terminalDistanceToTargetBps: baselineTerminalDistance,
-              improvesConvergence: false
-            };
-          }
-        };
-
-        let selectedQuoteAmount: bigint | undefined;
-        let selectedEvaluation:
-          | {
+        }>;
+      }): Promise<
+        | {
+            amount: bigint;
+            evaluation: {
               predictedOutcome: RateMoveOutcome;
               predictedRateWadAfterNextUpdate: bigint;
               predictedRateBpsAfterNextUpdate: number;
@@ -292,18 +325,27 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
               terminalRateBps: number;
               terminalDistanceToTargetBps: number;
               improvesConvergence: boolean;
-            }
-          | undefined;
+            };
+          }
+        | undefined
+      > {
+        if (minimumAmount > options.maximumAmount) {
+          return undefined;
+        }
 
         if (lookaheadUpdates > 1) {
           const anchorAmounts = [
-            heuristicSeedAmounts.get(addQuoteBucketIndex),
+            ...options.preferredSeedAmounts,
             minimumAmount,
-            ...buildExposureFractionAnchorAmounts(maxAmount, minimumAmount),
-            ...buildTokenScaleAnchorAmounts(readState.quoteTokenScale, minimumAmount, maxAmount)
+            ...buildExposureFractionAnchorAmounts(options.maximumAmount, minimumAmount),
+            ...buildTokenScaleAnchorAmounts(
+              readState.quoteTokenScale,
+              minimumAmount,
+              options.maximumAmount
+            )
           ];
           const searchAmounts = compressCapitalAwareSearchAmounts(
-            buildMultiCycleLendSearchAmounts(minimumAmount, maxAmount, anchorAmounts),
+            buildMultiCycleLendSearchAmounts(minimumAmount, options.maximumAmount, anchorAmounts),
             anchorAmounts,
             EXACT_MULTI_CYCLE_LEND_MAX_QUOTE_SAMPLES,
             EXACT_MULTI_CYCLE_LEND_LOW_END_QUOTE_SAMPLES
@@ -321,7 +363,7 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
           > = [];
 
           for (const quoteTokenAmount of searchAmounts) {
-            const evaluation = await evaluate(quoteTokenAmount);
+            const evaluation = await options.evaluate(quoteTokenAmount);
             if (evaluation.improvesConvergence) {
               improvingMatches.push({
                 amount: quoteTokenAmount,
@@ -332,7 +374,7 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
 
           if (improvingMatches.length === 0) {
             const fallbackSearchAmounts = Array.from(
-              new Set(buildExposureFractionAnchorAmounts(maxAmount, minimumAmount))
+              new Set(buildExposureFractionAnchorAmounts(options.maximumAmount, minimumAmount))
             ).sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
 
             for (const quoteTokenAmount of fallbackSearchAmounts) {
@@ -340,7 +382,7 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
                 continue;
               }
 
-              const evaluation = await evaluate(quoteTokenAmount);
+              const evaluation = await options.evaluate(quoteTokenAmount);
               if (evaluation.improvesConvergence) {
                 improvingMatches.push({
                   amount: quoteTokenAmount,
@@ -350,7 +392,7 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
             }
 
             if (improvingMatches.length === 0) {
-              continue;
+              return undefined;
             }
           }
 
@@ -382,98 +424,156 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
             return 0;
           });
 
-          selectedQuoteAmount = improvingMatches[0]!.amount;
-          selectedEvaluation = improvingMatches[0]!.evaluation;
-        } else {
-          let lowerBound = minimumAmount - 1n;
-          let upperBound = heuristicSeedAmounts.get(addQuoteBucketIndex) ?? minimumAmount;
-          if (upperBound < minimumAmount) {
-            upperBound = minimumAmount;
-          }
-          if (upperBound > maxAmount) {
-            upperBound = maxAmount;
-          }
-          let upperEvaluation = await evaluate(upperBound);
+          return {
+            amount: improvingMatches[0]!.amount,
+            evaluation: improvingMatches[0]!.evaluation
+          };
+        }
 
-          while (!upperEvaluation.improvesConvergence) {
-            lowerBound = upperBound;
-            if (upperBound === maxAmount) {
-              upperEvaluation = undefined as never;
-              break;
-            }
+        let lowerBound = minimumAmount - 1n;
+        let upperBound = options.preferredSeedAmounts.find(
+          (amount) =>
+            amount !== undefined &&
+            amount >= minimumAmount &&
+            amount <= options.maximumAmount
+        ) ?? minimumAmount;
+        let upperEvaluation = await options.evaluate(upperBound);
 
-            upperBound *= 2n;
-            if (upperBound > maxAmount) {
-              upperBound = maxAmount;
-            }
-            upperEvaluation = await evaluate(upperBound);
+        while (!upperEvaluation.improvesConvergence) {
+          lowerBound = upperBound;
+          if (upperBound === options.maximumAmount) {
+            upperEvaluation = undefined as never;
+            break;
           }
 
-          if (!upperEvaluation?.improvesConvergence) {
+          upperBound *= 2n;
+          if (upperBound > options.maximumAmount) {
+            upperBound = options.maximumAmount;
+          }
+          upperEvaluation = await options.evaluate(upperBound);
+        }
+
+        if (!upperEvaluation?.improvesConvergence) {
+          return undefined;
+        }
+
+        while (upperBound - lowerBound > 1n) {
+          const middle = lowerBound + (upperBound - lowerBound) / 2n;
+          const middleEvaluation = await options.evaluate(middle);
+          if (middleEvaluation.improvesConvergence) {
+            upperBound = middle;
+            upperEvaluation = middleEvaluation;
+          } else {
+            lowerBound = middle;
+          }
+        }
+
+        return {
+          amount: upperBound,
+          evaluation: upperEvaluation
+        };
+      }
+
+      if (allowRemoveQuotePath) {
+        for (const lenderBucketState of effectiveAccountState.lenderBucketStates ?? []) {
+          const selected = await selectBestActionAmount({
+            maximumAmount: lenderBucketState.maxWithdrawableQuoteAmount,
+            preferredSeedAmounts: [],
+            evaluate: (quoteTokenAmount) =>
+              evaluateAction({
+                type: "REMOVE_QUOTE",
+                amount: quoteTokenAmount,
+                bucketIndex: lenderBucketState.bucketIndex
+              })
+          });
+          if (!selected) {
             continue;
           }
 
-          while (upperBound - lowerBound > 1n) {
-            const middle = lowerBound + (upperBound - lowerBound) / 2n;
-            const middleEvaluation = await evaluate(middle);
-            if (middleEvaluation.improvesConvergence) {
-              upperBound = middle;
-              upperEvaluation = middleEvaluation;
-            } else {
-              lowerBound = middle;
-            }
+          const candidate: PlanCandidate = {
+            id: `sim-lend:${lenderBucketState.bucketIndex}:remove-quote:${selected.amount.toString()}`,
+            intent: "LEND",
+            minimumExecutionSteps: [
+              {
+                type: "REMOVE_QUOTE",
+                amount: selected.amount,
+                bucketIndex: lenderBucketState.bucketIndex,
+                note: "simulation-backed remove-quote search result"
+              }
+            ],
+            predictedOutcome: selected.evaluation.predictedOutcome,
+            predictedRateBpsAfterNextUpdate: selected.evaluation.predictedRateBpsAfterNextUpdate,
+            resultingDistanceToTargetBps: selected.evaluation.terminalDistanceToTargetBps,
+            quoteTokenDelta: selected.amount,
+            planningRateBps: selected.evaluation.terminalRateBps,
+            planningLookaheadUpdates: lookaheadUpdates,
+            explanation: `simulation-backed remove-quote result improves the ${lookaheadUpdates}-update path from ${baselinePath.firstOutcome} to ${selected.evaluation.predictedOutcome}`
+          };
+          const finalizedCandidate = finalizeCandidate(candidate);
+
+          if (!bestCandidate || compareCandidatePreference(finalizedCandidate, bestCandidate) < 0) {
+            bestCandidate = finalizedCandidate;
+          }
+        }
+      } else {
+        for (const addQuoteBucketIndex of addQuoteBucketIndexes) {
+          const selected = await selectBestActionAmount({
+            maximumAmount: maxAddQuoteAmount,
+            preferredSeedAmounts: [heuristicSeedAmounts.get(addQuoteBucketIndex)],
+            evaluate: (quoteTokenAmount) =>
+              evaluateAction({
+                type: "ADD_QUOTE",
+                amount: quoteTokenAmount,
+                bucketIndex: addQuoteBucketIndex
+              })
+          });
+          if (!selected) {
+            continue;
           }
 
-          selectedQuoteAmount = upperBound;
-          selectedEvaluation = upperEvaluation;
-        }
+          const expiry =
+            readState.rateState.nowTimestamp +
+            (config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS);
 
-        if (selectedQuoteAmount === undefined || selectedEvaluation === undefined) {
-          continue;
-        }
+          const candidate: PlanCandidate = {
+            id: `sim-lend:${addQuoteBucketIndex}:add-quote:${selected.amount.toString()}`,
+            intent: "LEND",
+            minimumExecutionSteps: [
+              {
+                type: "ADD_QUOTE",
+                amount: selected.amount,
+                bucketIndex: addQuoteBucketIndex,
+                expiry,
+                note:
+                  lookaheadUpdates > 1
+                    ? "simulation-backed add-quote search result"
+                    : "simulation-backed add-quote threshold"
+              }
+            ],
+            predictedOutcome: selected.evaluation.predictedOutcome,
+            predictedRateBpsAfterNextUpdate: selected.evaluation.predictedRateBpsAfterNextUpdate,
+            resultingDistanceToTargetBps:
+              lookaheadUpdates > 1
+                ? selected.evaluation.terminalDistanceToTargetBps
+                : distanceToTargetBand(
+                    selected.evaluation.predictedRateBpsAfterNextUpdate,
+                    targetBand
+                  ),
+            quoteTokenDelta: selected.amount,
+            explanation:
+              lookaheadUpdates > 1
+                ? `simulation-backed add-quote threshold improves the ${lookaheadUpdates}-update path from ${baselinePath.firstOutcome} to ${selected.evaluation.predictedOutcome}`
+                : `simulation-backed add-quote threshold changes the next eligible Ajna move from ${baselinePath.firstOutcome} to ${selected.evaluation.predictedOutcome}`
+          };
+          if (lookaheadUpdates > 1) {
+            candidate.planningRateBps = selected.evaluation.terminalRateBps;
+            candidate.planningLookaheadUpdates = lookaheadUpdates;
+          }
+          const finalizedCandidate = finalizeCandidate(candidate);
 
-        const expiry =
-          readState.rateState.nowTimestamp +
-          (config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS);
-
-        const candidate: PlanCandidate = {
-          id: `sim-lend:${addQuoteBucketIndex}:add-quote:${selectedQuoteAmount.toString()}`,
-          intent: "LEND",
-          minimumExecutionSteps: [
-            {
-              type: "ADD_QUOTE",
-              amount: selectedQuoteAmount,
-              bucketIndex: addQuoteBucketIndex,
-              expiry,
-              note:
-                lookaheadUpdates > 1
-                  ? "simulation-backed add-quote search result"
-                  : "simulation-backed add-quote threshold"
-            }
-          ],
-          predictedOutcome: selectedEvaluation.predictedOutcome,
-          predictedRateBpsAfterNextUpdate: selectedEvaluation.predictedRateBpsAfterNextUpdate,
-          resultingDistanceToTargetBps:
-            lookaheadUpdates > 1
-              ? selectedEvaluation.terminalDistanceToTargetBps
-              : distanceToTargetBand(
-                  selectedEvaluation.predictedRateBpsAfterNextUpdate,
-                  targetBand
-                ),
-          quoteTokenDelta: selectedQuoteAmount,
-          explanation:
-            lookaheadUpdates > 1
-              ? `simulation-backed add-quote threshold improves the ${lookaheadUpdates}-update path from ${baselinePath.firstOutcome} to ${selectedEvaluation.predictedOutcome}`
-              : `simulation-backed add-quote threshold changes the next eligible Ajna move from ${baselinePath.firstOutcome} to ${selectedEvaluation.predictedOutcome}`
-        };
-        if (lookaheadUpdates > 1) {
-          candidate.planningRateBps = selectedEvaluation.terminalRateBps;
-          candidate.planningLookaheadUpdates = lookaheadUpdates;
-        }
-        const finalizedCandidate = finalizeCandidate(candidate);
-
-        if (!bestCandidate || compareCandidatePreference(finalizedCandidate, bestCandidate) < 0) {
-          bestCandidate = finalizedCandidate;
+          if (!bestCandidate || compareCandidatePreference(finalizedCandidate, bestCandidate) < 0) {
+            bestCandidate = finalizedCandidate;
+          }
         }
       }
 

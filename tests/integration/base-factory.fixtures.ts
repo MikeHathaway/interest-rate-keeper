@@ -427,6 +427,54 @@ export const EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE = {
   ] as const
 } as const;
 
+export const EXPERIMENTAL_USED_POOL_UPWARD_ARCHETYPES = [
+  {
+    id: "existing-borrower-quote-heavy",
+    fixtureKind: "existing-borrower" as const,
+    scenario: EXPERIMENTAL_BOUNDARY_DERIVED_PREWINDOW_EXISTING_SCENARIOS[4],
+    targetOffsetBps: 100
+  },
+  {
+    id: "existing-borrower-multi-bucket",
+    fixtureKind: "existing-borrower-multi-bucket" as const,
+    scenario: EXPERIMENTAL_PREWINDOW_MULTI_BUCKET_EXISTING_BORROWER_SCENARIOS[1],
+    targetOffsetBps: 100
+  },
+  {
+    id: "large-used-pool-multi-week",
+    fixtureKind: "large-used-pool" as const,
+    targetRateBps: EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE.targetRateBps,
+    cycleCount: EXPERIMENTAL_LARGE_USED_POOL_MULTI_WEEK_BORROW_FIXTURE.cycleCount
+  }
+] as const;
+
+export const EXPERIMENTAL_PINNED_USED_POOL_UPWARD_ARCHETYPES = [
+  {
+    id: "pinned-used-pool-ac58-latest",
+    poolAddress: "0xAc58D4f94f9b77e47cd59B80b64790Af23cB084b",
+    blockNumber: 44_680_762n,
+    borrowerAddress: "0x31aFDdBE7977a82BAbce5b80D0A6B91918A7804b",
+    targetRateBps: 277,
+    toleranceBps: 50
+  },
+  {
+    id: "pinned-used-pool-0014-latest",
+    poolAddress: "0x0014D130E17197e609fd1509A1366249d0100E77",
+    blockNumber: 44_680_762n,
+    borrowerAddress: "0x31aFDdBE7977a82BAbce5b80D0A6B91918A7804b",
+    targetRateBps: 159,
+    toleranceBps: 50
+  },
+  {
+    id: "pinned-used-pool-903c-latest",
+    poolAddress: "0x903C2E9e9ff3820cAa93AfA4121872CbB280371B",
+    blockNumber: 44_680_762n,
+    borrowerAddress: "0x7ba01460ab4829223325d6ed1e8681f7366dF646",
+    targetRateBps: 163,
+    toleranceBps: 50
+  }
+] as const;
+
 export const MAX_EXACT_DUAL_VALIDATIONS_WITH_PURE_MATCH = 1;
 export const MAX_EXACT_DUAL_VALIDATIONS_WITHOUT_PURE_MATCH = 1;
 

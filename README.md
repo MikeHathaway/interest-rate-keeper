@@ -112,6 +112,8 @@ This is the case where quote and borrow actions together beat either side alone.
 Practical reading:
 - downward convergence is the strongest part of the system today
 - upward convergence is supported primarily through multi-cycle `BORROW`, not same-cycle borrower steering
+- exact block-pinned real used-pool upward archetypes now exist in the experimental suite, and they still do not surface a generic exact upward simulation candidate
+- even when those pinned real used-pool states are paired with recent real lender addresses from quote-token transfers into the pool, the generic exact paired `LEND_AND_BORROW` search still does not surface an upward candidate
 - abandoned-pool reset/recovery is modeled correctly, but not yet proven as a distinct end-to-end product mode
 
 ## Terms

@@ -201,6 +201,108 @@ describe("planCycle", () => {
     });
   });
 
+  it("keeps REMOVE_QUOTE unbuffered and treats it as zero new capital required", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 900,
+        predictedNextOutcome: "NO_CHANGE",
+        predictedNextRateBps: 900,
+        candidates: [
+          {
+            id: "remove-quote",
+            intent: "LEND",
+            minimumExecutionSteps: [
+              {
+                type: "REMOVE_QUOTE",
+                amount: 100n,
+                bucketIndex: 3000
+              }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 1000,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 100n,
+            explanation: "withdraw quote inventory to support higher rates"
+          }
+        ]
+      }),
+      {
+        ...baseConfig,
+        toleranceMode: "absolute",
+        toleranceBps: 50
+      }
+    );
+
+    expect(plan.intent).toBe("LEND");
+    expect(plan.requiredSteps).toEqual([
+      {
+        type: "REMOVE_QUOTE",
+        amount: 100n,
+        bucketIndex: 3000
+      }
+    ]);
+    expect(plan.operatorCapitalRequired).toBe(0n);
+    expect(plan.operatorCapitalAtRisk).toBe(0n);
+  });
+
+  it("treats REMOVE_QUOTE plus DRAW_DEBT as inventory-backed capital with only collateral externally required", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 900,
+        predictedNextOutcome: "NO_CHANGE",
+        predictedNextRateBps: 900,
+        candidates: [
+          {
+            id: "remove-quote-dual",
+            intent: "LEND_AND_BORROW",
+            minimumExecutionSteps: [
+              {
+                type: "REMOVE_QUOTE",
+                amount: 100n,
+                bucketIndex: 3000
+              },
+              {
+                type: "DRAW_DEBT",
+                amount: 50n,
+                limitIndex: 3200,
+                collateralAmount: 25n
+              }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 1000,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 150n,
+            explanation: "withdraw quote and draw debt to support higher rates"
+          }
+        ]
+      }),
+      {
+        ...baseConfig,
+        toleranceMode: "absolute",
+        toleranceBps: 50
+      }
+    );
+
+    expect(plan.intent).toBe("LEND_AND_BORROW");
+    expect(plan.requiredSteps).toEqual([
+      {
+        type: "REMOVE_QUOTE",
+        amount: 100n,
+        bucketIndex: 3000
+      },
+      {
+        type: "DRAW_DEBT",
+        amount: 51n,
+        limitIndex: 3200,
+        collateralAmount: 25n
+      }
+    ]);
+    expect(plan.additionalCollateralRequired).toBe(25n);
+    expect(plan.netQuoteBorrowed).toBe(151n);
+    expect(plan.operatorCapitalRequired).toBe(25n);
+    expect(plan.operatorCapitalAtRisk).toBe(0n);
+  });
+
   it("treats heuristic candidates as advisory unless heuristic execution is explicitly allowed", () => {
     const heuristicCandidate = {
       id: "heuristic-borrow",

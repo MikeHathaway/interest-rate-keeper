@@ -4,6 +4,7 @@ import { ajnaPoolAbi, erc20Abi } from "./abi.js";
 import {
   type AjnaPoolStateRead,
   type SimulationAccountState,
+  type SimulationLenderBucketState,
   buildSnapshotFingerprint,
   resolveSimulationBorrowerAddress,
   resolveSimulationSenderAddress
@@ -11,15 +12,64 @@ import {
 import {
   type AjnaRateState,
   classifyAjnaNextRate,
-  forecastAjnaNextEligibleRate
+  forecastAjnaNextEligibleRate,
+  WAD
 } from "./rate-state.js";
 import { deriveMeaningfulDepositThresholdFenwickIndex } from "./search-space.js";
 import { buildSimulationCacheKey, setBoundedCacheEntry } from "./snapshot-cache.js";
 import { type HexAddress, type KeeperConfig } from "../types.js";
 
 const MAX_SIMULATION_ACCOUNT_STATE_CACHE_ENTRIES = 256;
+const AJNA_FLOAT_STEP = 1.005;
 
 const simulationAccountStateCache = new Map<string, SimulationAccountState>();
+
+function fenwickIndexToPriceWad(index: number): bigint {
+  const bucketIndex = 4156 - index;
+  const price = AJNA_FLOAT_STEP ** bucketIndex;
+  return BigInt(Math.round(price * 1e18));
+}
+
+export function calculateMaxWithdrawableQuoteAmountFromLp(options: {
+  bucketLPAccumulator: bigint;
+  availableCollateral: bigint;
+  bucketDeposit: bigint;
+  lenderLpBalance: bigint;
+  bucketPriceWad: bigint;
+}): bigint {
+  if (
+    options.bucketLPAccumulator <= 0n ||
+    options.bucketDeposit <= 0n ||
+    options.lenderLpBalance <= 0n
+  ) {
+    return 0n;
+  }
+
+  const bucketValue =
+    options.bucketDeposit * WAD + options.availableCollateral * options.bucketPriceWad;
+  const quoteAmount =
+    (bucketValue * options.lenderLpBalance) / (options.bucketLPAccumulator * WAD);
+
+  return quoteAmount > options.bucketDeposit ? options.bucketDeposit : quoteAmount;
+}
+
+function serializeLenderBucketStates(states: readonly SimulationLenderBucketState[]): string {
+  return states
+    .map((state) =>
+      [
+        state.bucketIndex,
+        state.lpBalance.toString(),
+        state.depositTime.toString(),
+        state.lpAccumulator.toString(),
+        state.availableCollateral.toString(),
+        state.bankruptcyTime.toString(),
+        state.bucketDeposit.toString(),
+        state.bucketScale.toString(),
+        state.maxWithdrawableQuoteAmount.toString()
+      ].join(":")
+    )
+    .join("|");
+}
 
 export async function readAjnaPoolState(
   publicClient: PublicClient,
@@ -185,10 +235,14 @@ export async function readSimulationAccountState(
   options: {
     needsQuoteState: boolean;
     needsCollateralState: boolean;
+    lenderQuoteBucketIndexes?: number[];
   }
 ): Promise<SimulationAccountState> {
   const simulationSenderAddress = resolveSimulationSenderAddress(config);
   const borrowerAddress = resolveSimulationBorrowerAddress(config, simulationSenderAddress);
+  const lenderQuoteBucketIndexes = Array.from(
+    new Set(options.lenderQuoteBucketIndexes ?? [])
+  ).sort((left, right) => left - right);
   const snapshotFingerprint = buildSnapshotFingerprint(
     poolAddress,
     readState.blockNumber,
@@ -200,7 +254,10 @@ export async function readSimulationAccountState(
     simulationSenderAddress,
     borrowerAddress,
     options.needsQuoteState ? "quote" : "no-quote",
-    options.needsCollateralState ? "collateral" : "no-collateral"
+    options.needsCollateralState ? "collateral" : "no-collateral",
+    lenderQuoteBucketIndexes.length === 0
+      ? "no-lender-buckets"
+      : lenderQuoteBucketIndexes.join(",")
   ]);
   const cached = simulationAccountStateCache.get(cacheKey);
   if (cached) {
@@ -211,7 +268,8 @@ export async function readSimulationAccountState(
     quoteTokenBalance,
     quoteTokenAllowance,
     collateralBalance,
-    collateralAllowance
+    collateralAllowance,
+    lenderBucketStates
   ] = await Promise.all([
     options.needsQuoteState
       ? publicClient.readContract({
@@ -248,7 +306,54 @@ export async function readSimulationAccountState(
           args: [simulationSenderAddress, poolAddress],
           blockNumber: readState.blockNumber
         })
-      : Promise.resolve(undefined)
+      : Promise.resolve(undefined),
+    lenderQuoteBucketIndexes.length === 0
+      ? Promise.resolve(undefined)
+      : Promise.all(
+          lenderQuoteBucketIndexes.map(async (bucketIndex) => {
+            const [[lpBalance, depositTime], bucketState] = await Promise.all([
+              publicClient.readContract({
+                address: poolAddress,
+                abi: ajnaPoolAbi,
+                functionName: "lenderInfo",
+                args: [BigInt(bucketIndex), simulationSenderAddress],
+                blockNumber: readState.blockNumber
+              }),
+              publicClient.readContract({
+                address: poolAddress,
+                abi: ajnaPoolAbi,
+                functionName: "bucketInfo",
+                args: [BigInt(bucketIndex)],
+                blockNumber: readState.blockNumber
+              })
+            ]);
+            const [
+              lpAccumulator,
+              availableCollateral,
+              bankruptcyTime,
+              bucketDeposit,
+              bucketScale
+            ] = bucketState;
+
+            return {
+              bucketIndex,
+              lpBalance,
+              depositTime,
+              lpAccumulator,
+              availableCollateral,
+              bankruptcyTime,
+              bucketDeposit,
+              bucketScale,
+              maxWithdrawableQuoteAmount: calculateMaxWithdrawableQuoteAmountFromLp({
+                bucketLPAccumulator: lpAccumulator,
+                availableCollateral,
+                bucketDeposit,
+                lenderLpBalance: lpBalance,
+                bucketPriceWad: fenwickIndexToPriceWad(bucketIndex)
+              })
+            } satisfies SimulationLenderBucketState;
+          })
+        )
   ]);
 
   const accountState: SimulationAccountState = {
@@ -257,7 +362,13 @@ export async function readSimulationAccountState(
     ...(quoteTokenBalance === undefined ? {} : { quoteTokenBalance }),
     ...(quoteTokenAllowance === undefined ? {} : { quoteTokenAllowance }),
     ...(collateralBalance === undefined ? {} : { collateralBalance }),
-    ...(collateralAllowance === undefined ? {} : { collateralAllowance })
+    ...(collateralAllowance === undefined ? {} : { collateralAllowance }),
+    ...(lenderBucketStates === undefined ? {} : { lenderBucketStates }),
+    ...(lenderBucketStates === undefined
+      ? {}
+      : {
+          lenderBucketStateSignature: serializeLenderBucketStates(lenderBucketStates)
+        })
   };
   setBoundedCacheEntry(
     simulationAccountStateCache,

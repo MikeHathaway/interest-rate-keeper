@@ -67,6 +67,23 @@ interface SnapshotWindowState {
   meaningfulDepositThresholdFenwickIndex?: number;
 }
 
+function buildThresholdDerivedBucketIndexes(thresholdIndex: number): number[] {
+  const resolvedIndexes: number[] = [];
+  const seen = new Set<number>();
+
+  for (const offset of PREWINDOW_LEND_BUCKET_OFFSETS) {
+    const bucketIndex = thresholdIndex + offset;
+    if (bucketIndex < 0 || bucketIndex > MAX_AJNA_LIMIT_INDEX || seen.has(bucketIndex)) {
+      continue;
+    }
+
+    seen.add(bucketIndex);
+    resolvedIndexes.push(bucketIndex);
+  }
+
+  return resolvedIndexes;
+}
+
 function resolveMinimumCollateralActionAmount(config: KeeperConfig): bigint {
   return config.minExecutableCollateralAmount > 0n
     ? config.minExecutableCollateralAmount
@@ -146,20 +163,54 @@ export function resolvePreWindowLendBucketIndexes(
     return configured;
   }
 
-  const resolvedIndexes: number[] = [];
-  const seen = new Set<number>();
+  return buildThresholdDerivedBucketIndexes(thresholdIndex);
+}
 
-  for (const offset of PREWINDOW_LEND_BUCKET_OFFSETS) {
-    const bucketIndex = thresholdIndex + offset;
-    if (bucketIndex < 0 || bucketIndex > MAX_AJNA_LIMIT_INDEX || seen.has(bucketIndex)) {
-      continue;
-    }
-
-    seen.add(bucketIndex);
-    resolvedIndexes.push(bucketIndex);
+export function resolveProtocolShapedPreWindowDualBucketIndexes(
+  readState: SnapshotWindowState,
+  config: KeeperConfig
+): number[] {
+  const configured = resolveAddQuoteBucketIndexes(config);
+  if (readState.immediatePrediction.secondsUntilNextRateUpdate <= 0) {
+    return configured;
   }
 
-  return resolvedIndexes;
+  const thresholdIndex = readState.meaningfulDepositThresholdFenwickIndex;
+  if (thresholdIndex === undefined) {
+    return configured;
+  }
+
+  return Array.from(
+    new Set([...configured, ...buildThresholdDerivedBucketIndexes(thresholdIndex)])
+  ).sort((left, right) => left - right);
+}
+
+export function resolveProtocolApproximationBucketIndexes(
+  readState: SnapshotWindowState,
+  config: KeeperConfig,
+  options: {
+    borrowLimitIndexes?: number[];
+    addQuoteBucketIndexes?: number[];
+  } = {}
+): number[] {
+  const resolvedIndexes = new Set<number>([
+    ...resolveProtocolShapedPreWindowDualBucketIndexes(readState, config),
+    ...(options.addQuoteBucketIndexes ?? []),
+    ...resolveAddQuoteBucketIndexes(config)
+  ]);
+
+  for (const seedIndex of options.borrowLimitIndexes ?? resolveDrawDebtLimitIndexes(config)) {
+    for (const offset of BORROW_BUCKET_PROBE_OFFSETS) {
+      const bucketIndex = seedIndex + offset;
+      if (bucketIndex < 0 || bucketIndex > MAX_AJNA_LIMIT_INDEX) {
+        continue;
+      }
+
+      resolvedIndexes.add(bucketIndex);
+    }
+  }
+
+  return Array.from(resolvedIndexes).sort((left, right) => left - right);
 }
 
 export function resolveDrawDebtCollateralAmounts(config: KeeperConfig): bigint[] {

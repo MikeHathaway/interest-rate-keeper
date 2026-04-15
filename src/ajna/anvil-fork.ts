@@ -17,12 +17,14 @@ export interface TemporaryAnvilForkOptions {
 }
 
 export interface TemporaryAnvilForkContext {
+  rpcUrl?: string;
   publicClient: PublicClient;
   testClient: ReturnType<typeof createTestClient>;
   walletClient: ReturnType<typeof createWalletClient>;
 }
 
 interface TemporaryAnvilForkHandle extends TemporaryAnvilForkContext {
+  rpcUrl: string;
   stop: () => Promise<void>;
 }
 
@@ -152,6 +154,7 @@ async function startTemporaryAnvilFork(
     });
 
     return {
+      rpcUrl,
       publicClient,
       testClient,
       walletClient,
@@ -199,6 +202,7 @@ export async function withLazyTemporaryAnvilFork<T>(
     return await work(async () => {
       const handle = await getHandle();
       return {
+        rpcUrl: handle.rpcUrl,
         publicClient: handle.publicClient,
         testClient: handle.testClient,
         walletClient: handle.walletClient

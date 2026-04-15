@@ -8,6 +8,7 @@ import {
   type HexAddress,
   type KeeperConfig,
   type PlanCandidate,
+  type RemoveQuoteStep,
   type RateMoveOutcome
 } from "../types.js";
 import { resolveAjnaSignerAddress } from "./runtime.js";
@@ -26,6 +27,20 @@ export interface SimulationAccountState {
   quoteTokenAllowance?: bigint;
   collateralBalance?: bigint;
   collateralAllowance?: bigint;
+  lenderBucketStates?: SimulationLenderBucketState[];
+  lenderBucketStateSignature?: string;
+}
+
+export interface SimulationLenderBucketState {
+  bucketIndex: number;
+  lpBalance: bigint;
+  depositTime: bigint;
+  lpAccumulator: bigint;
+  availableCollateral: bigint;
+  bankruptcyTime: bigint;
+  bucketDeposit: bigint;
+  bucketScale: bigint;
+  maxWithdrawableQuoteAmount: bigint;
 }
 
 export interface AjnaPoolStateRead {
@@ -139,6 +154,16 @@ export function extractAddQuoteStep(
   );
 
   return addQuoteStep;
+}
+
+export function extractRemoveQuoteStep(
+  candidate: PlanCandidate | undefined
+): RemoveQuoteStep | undefined {
+  const removeQuoteStep = candidate?.minimumExecutionSteps.find(
+    (step): step is RemoveQuoteStep => step.type === "REMOVE_QUOTE"
+  );
+
+  return removeQuoteStep;
 }
 
 export function finalizeCandidate(candidate: PlanCandidate): PlanCandidate {

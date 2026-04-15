@@ -20,7 +20,10 @@ import {
   replayAjnaSimulationPath,
   withPreparedLazySimulationFork
 } from "./snapshot-sim-helpers.js";
-import { type AjnaRatePrediction } from "./rate-state.js";
+import {
+  hasUninitializedAjnaEmaState,
+  type AjnaRatePrediction
+} from "./rate-state.js";
 import {
   buildMultiCycleBorrowSearchAmounts,
   buildPreWindowBorrowSearchAmounts,
@@ -46,6 +49,7 @@ const EXACT_PREWINDOW_BORROW_MAX_LIMIT_INDEXES = 6;
 const EXACT_PREWINDOW_BORROW_MAX_COLLATERAL_SAMPLES = 8;
 const EXACT_MULTI_CYCLE_BORROW_MAX_LIMIT_INDEXES = 8;
 const EXACT_MULTI_CYCLE_BORROW_MAX_COLLATERAL_SAMPLES = 8;
+const EXACT_MULTI_CYCLE_BORROW_MAX_IMPROVING_MATCHES = 6;
 
 const borrowSimulationPathCache = new Map<string, BorrowSimulationPathResult | null>();
 
@@ -316,14 +320,24 @@ export async function synthesizeAjnaBorrowCandidateViaSimulation(
         }
       }
 
-      const baselinePath = await simulateBorrowPath(null);
+      let baselinePath: BorrowSimulationPathResult;
+      try {
+        baselinePath = await simulateBorrowPath(null);
+      } catch {
+        return undefined;
+      }
       const baselineNextDistance = distanceToTargetBand(
         baselinePath.firstRateBpsAfterNextUpdate,
         targetBand
       );
       const baselineTerminalDistance = baselinePath.terminalDistanceToTargetBps;
+      const broadenMultiCycleBorrowSearch =
+        lookaheadUpdates > 1 &&
+        (readState.loansState?.noOfLoans ?? 0n) > 1n &&
+        !hasUninitializedAjnaEmaState(readState.rateState);
 
       let bestCandidate: PlanCandidate | undefined;
+      let improvingMatchCount = 0;
 
       for (const limitIndex of limitIndexes) {
         for (const {
@@ -465,20 +479,25 @@ export async function synthesizeAjnaBorrowCandidateViaSimulation(
           }
           const finalizedCandidate = finalizeCandidate(candidate);
 
-          if (lookaheadUpdates > 1) {
-            // Multi-cycle borrow is a rolling-control path: once we find the
-            // smallest improving candidate in the capital-aware search order,
-            // we prefer returning it rather than exhaustively chasing a larger
-            // terminal improvement that will be replanned on the next cycle.
+          if (!bestCandidate || compareCandidatePreference(finalizedCandidate, bestCandidate) < 0) {
+            bestCandidate = finalizedCandidate;
+          }
+
+          if (lookaheadUpdates > 1 && broadenMultiCycleBorrowSearch) {
+            improvingMatchCount += 1;
+            if (improvingMatchCount >= EXACT_MULTI_CYCLE_BORROW_MAX_IMPROVING_MATCHES) {
+              return {
+                ...(bestCandidate ? { candidate: bestCandidate } : {}),
+                baselinePlanningRateBps: baselinePath.terminalRateBps,
+                planningLookaheadUpdates: lookaheadUpdates
+              };
+            }
+          } else if (lookaheadUpdates > 1) {
             return {
               candidate: finalizedCandidate,
               baselinePlanningRateBps: baselinePath.terminalRateBps,
               planningLookaheadUpdates: lookaheadUpdates
             };
-          }
-
-          if (!bestCandidate || compareCandidatePreference(finalizedCandidate, bestCandidate) < 0) {
-            bestCandidate = finalizedCandidate;
           }
         }
       }

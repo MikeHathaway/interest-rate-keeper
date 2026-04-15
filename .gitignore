@@ -14,3 +14,4 @@ logs/
 *.pid
 *.tsbuildinfo
 .DS_Store
+.claude

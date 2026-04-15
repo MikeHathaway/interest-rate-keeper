@@ -17,6 +17,7 @@ export const ajnaPoolAbi = parseAbi([
   "function totalT0Debt() view returns (uint256)",
   "function totalT0DebtInAuction() view returns (uint256)",
   "function bucketInfo(uint256 index_) view returns (uint256 lpAccumulator_, uint256 availableCollateral_, uint256 bankruptcyTime_, uint256 bucketDeposit_, uint256 bucketScale_)",
+  "function lenderInfo(uint256 index_, address lender_) view returns (uint256 lpBalance_, uint256 depositTime_)",
   "function quoteTokenAddress() view returns (address)",
   "function collateralAddress() view returns (address)",
   "function quoteTokenScale() view returns (uint256)",
