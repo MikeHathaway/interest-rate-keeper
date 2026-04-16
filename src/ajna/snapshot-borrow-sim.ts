@@ -53,6 +53,10 @@ const EXACT_MULTI_CYCLE_BORROW_MAX_IMPROVING_MATCHES = 6;
 
 const borrowSimulationPathCache = new Map<string, BorrowSimulationPathResult | null>();
 
+export function clearAjnaBorrowSimulationPathCache(): void {
+  borrowSimulationPathCache.clear();
+}
+
 export async function synthesizeAjnaBorrowCandidateViaSimulation(
   readState: AjnaPoolStateRead,
   config: KeeperConfig,

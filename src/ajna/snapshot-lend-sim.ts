@@ -45,6 +45,10 @@ const EXACT_MULTI_CYCLE_LEND_LOW_END_QUOTE_SAMPLES = 8;
 
 const lendSimulationPathCache = new Map<string, LendSimulationPathResult | null>();
 
+export function clearAjnaLendSimulationPathCache(): void {
+  lendSimulationPathCache.clear();
+}
+
 type SimulatedLendAction =
   | {
       type: "ADD_QUOTE";

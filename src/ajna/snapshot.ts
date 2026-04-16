@@ -18,8 +18,14 @@ import {
   serializeExecutionStepForValidation
 } from "./snapshot-internal.js";
 import { synthesizeAjnaHeuristicCandidates } from "./snapshot-dual.js";
-import { synthesizeAjnaLendCandidateViaSimulation } from "./snapshot-lend-sim.js";
-import { synthesizeAjnaBorrowCandidateViaSimulation } from "./snapshot-borrow-sim.js";
+import {
+  clearAjnaLendSimulationPathCache,
+  synthesizeAjnaLendCandidateViaSimulation
+} from "./snapshot-lend-sim.js";
+import {
+  clearAjnaBorrowSimulationPathCache,
+  synthesizeAjnaBorrowCandidateViaSimulation
+} from "./snapshot-borrow-sim.js";
 import { synthesizeAjnaLendAndBorrowCandidateViaSimulation } from "./snapshot-dual-sim.js";
 import { hasUninitializedAjnaEmaState, toRateBps } from "./rate-state.js";
 import { resolveAjnaSignerAddress } from "./runtime.js";
@@ -34,7 +40,11 @@ import {
   resolveTimedBorrowSimulationLookaheadAttempts
 } from "./search-space.js";
 import { buildSimulationCacheKey, setBoundedCacheEntry } from "./snapshot-cache.js";
-import { readAjnaPoolState, readSimulationAccountState } from "./snapshot-read.js";
+import {
+  clearAjnaSimulationAccountStateCache,
+  readAjnaPoolState,
+  readSimulationAccountState
+} from "./snapshot-read.js";
 import { type SnapshotSource } from "../snapshot.js";
 import { buildTargetBand } from "../planner.js";
 import {
@@ -93,6 +103,13 @@ interface SimulationExecutionCompatibility {
 }
 
 const simulationCandidateCache = new Map<string, CachedSimulationCandidates>();
+
+export function clearAjnaSnapshotCaches(): void {
+  simulationCandidateCache.clear();
+  clearAjnaSimulationAccountStateCache();
+  clearAjnaLendSimulationPathCache();
+  clearAjnaBorrowSimulationPathCache();
+}
 
 function buildSimulationCandidateCacheKey(
   snapshotFingerprint: string,

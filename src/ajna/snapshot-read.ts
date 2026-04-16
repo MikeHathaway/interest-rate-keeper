@@ -24,6 +24,10 @@ const AJNA_FLOAT_STEP = 1.005;
 
 const simulationAccountStateCache = new Map<string, SimulationAccountState>();
 
+export function clearAjnaSimulationAccountStateCache(): void {
+  simulationAccountStateCache.clear();
+}
+
 function fenwickIndexToPriceWad(index: number): bigint {
   const bucketIndex = 4156 - index;
   const price = AJNA_FLOAT_STEP ** bucketIndex;
