@@ -21,6 +21,8 @@ describe("resolveKeeperConfig", () => {
       enableManagedInventoryUpwardControl: true,
       enableManagedDualUpwardControl: true,
       minimumManagedImprovementBps: 15,
+      maxManagedInventoryReleaseBps: 2500,
+      minimumManagedSensitivityBpsPer10PctRelease: 5,
       simulationSenderAddress: "0x2222222222222222222222222222222222222222",
       drawDebtLimitIndex: 3100,
       drawDebtLimitIndexes: [2800, 3000, 3100],
@@ -52,6 +54,8 @@ describe("resolveKeeperConfig", () => {
     expect(config.enableManagedInventoryUpwardControl).toBe(true);
     expect(config.enableManagedDualUpwardControl).toBe(true);
     expect(config.minimumManagedImprovementBps).toBe(15);
+    expect(config.maxManagedInventoryReleaseBps).toBe(2500);
+    expect(config.minimumManagedSensitivityBpsPer10PctRelease).toBe(5);
     expect(config.simulationSenderAddress).toBe("0x2222222222222222222222222222222222222222");
     expect(config.drawDebtLimitIndex).toBe(3100);
     expect(config.drawDebtLimitIndexes).toEqual([2800, 3000, 3100]);
@@ -83,6 +87,20 @@ describe("resolveKeeperConfig", () => {
     expect(config.minExecutableBorrowAmount).toBe(22n);
     expect(config.minExecutableCollateralAmount).toBe(33n);
     expect(config.allowHeuristicExecution).toBe(true);
+  });
+
+  it("rejects managed inventory release caps above 10000 bps", () => {
+    expect(() =>
+      resolveKeeperConfig({
+        chainId: 8453,
+        poolId: "base:pool",
+        targetRateBps: 1200,
+        toleranceBps: 1000,
+        maxQuoteTokenExposure: "1000000",
+        maxBorrowExposure: "500000",
+        maxManagedInventoryReleaseBps: 10001
+      })
+    ).toThrow(/maxManagedInventoryReleaseBps/);
   });
 
   it("maps the legacy minExecutableActionQuoteToken field onto all action floors", () => {

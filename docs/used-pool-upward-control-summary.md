@@ -24,7 +24,7 @@ After synthetic fixtures, boundary-ranked borrower probes, protocol-shaped appro
 - the generic snapshot path across those hand-picked managed states still does not surface inventory-backed candidates on its own
 - a manual bounded `REMOVE_QUOTE` sizing probe now has a real 2-update positive on the dog/USDC managed archetype `0xb156f09e8ab6756cd23cf283d495ab75f8334104`
 - a targeted exact seeded `REMOVE_QUOTE` candidate now surfaces on that same dog/USDC archetype when the lender bucket is pinned into the planner
-- bounded manual `REMOVE_QUOTE + DRAW_DEBT` probes can still improve some hand-picked managed states, but the previously cited PRIME/USDC positive does not hold on the current rerun once the dual branch has to beat the matching `REMOVE_QUOTE` branch
+- bounded manual `REMOVE_QUOTE + DRAW_DEBT` probes can still improve some hand-picked managed states once the dual branch has to beat the matching `REMOVE_QUOTE` branch
 - even with the lender bucket and productive borrow limit indexes seeded, the exact surfaced `REMOVE_QUOTE + DRAW_DEBT` path is still not appearing on PRIME/USDC
 - the realistic remaining path is likely inventory-backed control, not cold-start borrower steering
 
@@ -111,7 +111,7 @@ It is closer to:
 
 ### Negative results that now look robust
 
-- Representative used-pool borrower-only upward probes stayed negative
+- Representative used-pool borrower-only upward probes stayed mostly negative, although a representative existing-borrower fixture can now surface a tiny exact pre-window `BORROW` candidate
 - Large used-pool multi-week borrower replay surfaced real debt addition without beating the passive path
 - Pinned real used-pool upward archetypes did not surface a generic exact upward simulation candidate
 - Even when those same pinned real used-pool states were paired with recent real lender addresses mined from quote-token transfers into the pool, the generic exact paired `LEND_AND_BORROW` search still did not surface an upward candidate
@@ -143,8 +143,7 @@ It is closer to:
 - After widening the exact multi-cycle remove-quote search to preserve those high-end managed-pool anchors, a targeted seeded exact `REMOVE_QUOTE` candidate now surfaces on that same dog/USDC state
 - A rerun of the bounded manual dual probes tightened the real dual boundary further:
   - some hand-picked managed states can still show manual `REMOVE_QUOTE + DRAW_DEBT` improvement
-  - the previously cited PRIME/USDC positive does not hold on the current rerun once the dual branch has to beat the matching `REMOVE_QUOTE` branch
-  - so PRIME/USDC is no longer a trusted manual-positive reference state
+  - the current boundary is still weaker than exact surfaced support, because the exact planner does not emit a meaningful dual inventory-backed action automatically on the pinned managed states
 - Even after seeding the exact planner with the known lender bucket, and for PRIME also seeding the productive limit-index family, the exact surfaced `REMOVE_QUOTE + DRAW_DEBT` planner still does not emit a meaningful dual inventory-backed action automatically
 
 ### What those negatives likely mean
@@ -190,7 +189,7 @@ The first inventory-backed steps are now in place:
 That changed the research boundary but not the supported product boundary, so the next serious step is:
 
 5. Promote the dog/USDC targeted seeded exact `REMOVE_QUOTE` path from experimental research to a more explicit managed-pool supported mode if it stays stable across reruns.
-6. If dual-side work continues, first re-derive a trusted pinned-state manual dual positive under the stricter "beat remove-only" rule before trying to surface it exactly.
+6. If dual-side work continues, focus on turning one of the existing hand-picked manual dual positives into an exact surfaced candidate under the stricter "beat remove-only" rule.
 7. Add a controllability gate so the keeper refuses low-sensitivity used-pool upward interventions.
 
 ## Recommended Product Policy

@@ -19,6 +19,8 @@ export function formatCycleCapitalSummary(
     ...(result.plan.planningRateBps === undefined
       ? []
       : [`planning_rate=${result.plan.planningRateBps}`]),
+    `inventory_deployed=${result.plan.quoteInventoryDeployed.toString()}`,
+    `inventory_released=${result.plan.quoteInventoryReleased.toString()}`,
     `required=${result.plan.operatorCapitalRequired.toString()}`,
     `at_risk=${result.plan.operatorCapitalAtRisk.toString()}`,
     `net_quote=${result.plan.netQuoteBorrowed.toString()}`,

@@ -51,7 +51,7 @@ Today, the snapshot builder reads real pool state and predicts the next Ajna rat
 - snapshot `predictedNextOutcome` / `predictedNextRateBps` now describe the next eligible Ajna rate update, even when that update is not due yet
 - candidate usefulness is now judged against the do-nothing next update path, not just against the current rate, so the planner can prefer neutralizing a bad upcoming move over letting the pool drift farther away
 
-The current Base-fork evidence is important: the keeper now finds a lend plan in representative borrowed-pool step-up fixtures, borrower-side lookahead planning can find and live-execute a representative multi-cycle `BORROW` plan when a wider search space is enabled, and multi-bucket quote search now surfaces, naturally selects, and live-executes a representative exact `LEND_AND_BORROW` candidate on the fork. Due-window mutating plans no longer append a separate `UPDATE_INTEREST` step, because the first mutating action can consume the overdue update itself. The fork suite now also proves that the keeper aborts safely when another actor changes the pool between planning and execution. On the borrower side, exact same-cycle `DRAW_DEBT` search still does not find a safe candidate in the representative brand-new quote-only fixture covered by routine integration, while heuristic `DRAW_DEBT` synthesis is now available as advisory guidance only. The broader existing-borrower exact same-cycle negative proof remains in the `experimental` profile, now filtered to true borrower/loan states, and it is still negative even on a deliberately borrower-heavy existing-loan fixture set. Experimental manual one-update borrower probes are now also negative in both the saved brand-new quote-only fixture and the borrower-heavy existing-loan fixture set, even after widening the probe to near-current targets, tiny collateral adds, and sub-token borrow amounts. Brand-new first-update probes are now also negative in both a single-bucket quote-only pool and a deliberately multi-bucket quote-only pool searched near the collateralization boundary. Even a first-update multi-bucket search that binary-discovers the minimum executable collateral at the execution boundary is still negative, and a bounded mechanics-first boundary-targeted existing-borrower search is also still negative. So the current same-cycle gap is no longer just “the exact search missed it” in those representative states. Pre-window lend is no longer best understood as “flip the next update.” DWATP-threshold probes now show a positive manual pre-window `LEND` effect over a two-update horizon in the deterministic not-due step-up fixture, which matches Ajna’s lagged meaningful-deposit EMA mechanics. A deterministic exact surfaced-plan proof for that fixture now lives in the routine `slow` profile, while the execution proofs remain exploratory. The generic threshold-aware path is still experimental, but it no longer collapses to a near-max quote deposit in that deterministic proof. A second representative complex ongoing multi-actor fixture now has both a generic surfaced exact pre-window `LEND` proof and targeted execution proofs on a manually positive ongoing state. Borrower-side exact mode is now useful for representative multi-cycle live steering, and there is also an experimental generic exact surfaced-plan proof plus targeted execution proof for pre-window `BORROW` on a deterministic brand-new quote-only post-update fixture. But that richer borrower-side path is still narrow: representative existing-borrower and complex ongoing multi-actor borrower fixtures remain negative for generic exact pre-window `BORROW`, bounded manual multi-cycle pre-window borrower probes across those used-pool fixture families have not yet produced a positive counterexample, the newer boundary-math-ranked existing-borrower pre-window search remains negative, and even a representative multi-bucket existing-borrower pre-window borrower probe stays negative after ranking candidates with a protocol-grounded cached-interest-state approximation. Same-cycle borrower steering is still experimental and not a supported live path.
+The current Base-fork evidence is important: the keeper now finds a lend plan in representative borrowed-pool step-up fixtures, borrower-side lookahead planning can find and live-execute a representative multi-cycle `BORROW` plan when a wider search space is enabled, and multi-bucket quote search now surfaces, naturally selects, and live-executes a representative exact `LEND_AND_BORROW` candidate on the fork. Due-window mutating plans no longer append a separate `UPDATE_INTEREST` step, because the first mutating action can consume the overdue update itself. The fork suite now also proves that the keeper aborts safely when another actor changes the pool between planning and execution. On the borrower side, exact same-cycle `DRAW_DEBT` search still does not find a safe candidate in the representative brand-new quote-only fixture covered by routine integration, while heuristic `DRAW_DEBT` synthesis is now available as advisory guidance only. The broader existing-borrower exact same-cycle negative proof remains in the `experimental` profile, now filtered to true borrower/loan states, and it is still negative even on a deliberately borrower-heavy existing-loan fixture set. Experimental manual one-update borrower probes are now also negative in both the saved brand-new quote-only fixture and the borrower-heavy existing-loan fixture set, even after widening the probe to near-current targets, tiny collateral adds, and sub-token borrow amounts. Brand-new first-update probes are now also negative in both a single-bucket quote-only pool and a deliberately multi-bucket quote-only pool searched near the collateralization boundary. Even a first-update multi-bucket search that binary-discovers the minimum executable collateral at the execution boundary is still negative, and a bounded mechanics-first boundary-targeted existing-borrower search is also still negative. So the current same-cycle gap is no longer just “the exact search missed it” in those representative states. Pre-window lend is no longer best understood as “flip the next update.” DWATP-threshold probes now show a positive manual pre-window `LEND` effect over a two-update horizon in the deterministic not-due step-up fixture, which matches Ajna’s lagged meaningful-deposit EMA mechanics. A deterministic exact surfaced-plan proof for that fixture now lives in the routine `slow` profile, while the execution proofs remain exploratory. The generic threshold-aware path is still experimental, but it no longer collapses to a near-max quote deposit in that deterministic proof. A second representative complex ongoing multi-actor fixture now has both a generic surfaced exact pre-window `LEND` proof and targeted execution proofs on a manually positive ongoing state. Borrower-side exact mode is now useful for representative multi-cycle live steering, and there is also an experimental generic exact surfaced-plan proof plus targeted execution proof for pre-window `BORROW` on a deterministic brand-new quote-only post-update fixture. That richer borrower-side path is still narrow, but it is no longer uniformly negative across used-pool fixtures: a representative existing-borrower fixture can now surface a tiny exact pre-window `BORROW` plan, while the representative complex ongoing multi-actor borrower fixture family still remains negative, bounded manual multi-cycle pre-window borrower probes across those used-pool fixture families have not yet produced a broader positive counterexample, the newer boundary-math-ranked existing-borrower pre-window search remains negative, and even a representative multi-bucket existing-borrower pre-window borrower probe stays negative after ranking candidates with a protocol-grounded cached-interest-state approximation. Same-cycle borrower steering is still experimental and not a supported live path.
 
 ## Product Modes
 
@@ -183,7 +183,7 @@ Notes:
 - If `BASE_LOCAL_ANVIL_URL` is unset, the managed fork runner picks a profile-specific free local port, starts its own local Anvil fork there, and tears it down after the run.
 - If `BASE_LOCAL_ANVIL_URL` is set, the test harness reuses that already-running local Anvil fork instead of spawning a fresh one.
 - The Base integration test logs the selected profile plus either the explicit reused local fork host or the spawned upstream/local hosts at startup.
-- CLI `run` output now carries the selected plan's capital metrics directly on `plan`, and KeeperHub responses include the same values under `capital`.
+- CLI `run` output now carries the selected plan's capital metrics directly on `plan`, and KeeperHub responses include the same values under `capital`, including curator-facing `quoteInventoryDeployed` and `quoteInventoryReleased`.
 
 ## CI/CD
 
@@ -310,6 +310,13 @@ Optional live-execution fields:
 - `addQuoteExpirySeconds`
 - `enableSimulationBackedLendSynthesis`
 - `enableSimulationBackedBorrowSynthesis`
+- `enableManagedInventoryUpwardControl`
+- `enableManagedDualUpwardControl`
+- `minimumManagedImprovementBps`
+- `maxManagedInventoryReleaseBps`
+- `minimumManagedSensitivityBpsPer10PctRelease`
+- `removeQuoteBucketIndex`
+- `removeQuoteBucketIndexes`
 - `simulationSenderAddress`
 - `drawDebtLimitIndex`
 - `drawDebtLimitIndexes`
@@ -321,6 +328,35 @@ Optional live-execution fields:
 
 The synthesis flags are now best thought of as explicit overrides. When they are left unset, the live Ajna snapshot source auto-selects a default internal synthesis policy from the available runtime context.
 
+### Curator-Mode Config Example
+
+For managed used-pool upward control, enable the remove-only curator path explicitly:
+
+```json
+{
+  "chainId": 8453,
+  "poolAddress": "0x0000000000000000000000000000000000000000",
+  "rpcUrl": "https://mainnet.base.org",
+  "targetRateBps": 1200,
+  "toleranceBps": 50,
+  "toleranceMode": "absolute",
+  "maxQuoteTokenExposure": "1000000000000000000000000",
+  "maxBorrowExposure": "1000000000000000000000000",
+  "enableManagedInventoryUpwardControl": true,
+  "minimumManagedImprovementBps": 10,
+  "maxManagedInventoryReleaseBps": 2000,
+  "minimumManagedSensitivityBpsPer10PctRelease": 5,
+  "removeQuoteBucketIndexes": [2618]
+}
+```
+
+Practical reading:
+- `enableManagedInventoryUpwardControl` turns on exact managed `REMOVE_QUOTE` search for used-pool upward states.
+- `minimumManagedImprovementBps` requires a real improvement margin over the passive path.
+- `maxManagedInventoryReleaseBps` caps one-cycle inventory release relative to the total withdrawable managed inventory visible in the snapshot.
+- `minimumManagedSensitivityBpsPer10PctRelease` is the controllability gate. It requires enough predicted band-distance improvement per 10% of managed inventory released.
+- `removeQuoteBucketIndex(es)` optionally seed the keeper with known productive managed buckets.
+
 ## Live Execution Notes
 
 The live executor currently:
@@ -330,6 +366,7 @@ The live executor currently:
 - estimates gas cost before each live step and aborts when the estimate exceeds `maxGasCostWei`, if that cap is configured
 - does not auto-submit approval transactions for you
 - treats exact simulation-backed candidates as live-executable only when the simulation sender and the live signer are the same account
+- revalidates managed inventory-backed plans against fresh managed-eligibility metadata and `maxManagedInventoryReleaseBps` before submit
 
 Supported low-level execution steps:
 - `ADD_QUOTE`

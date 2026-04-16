@@ -92,6 +92,8 @@ export interface PlanCandidate {
   predictedRateBpsAfterNextUpdate: number;
   resultingDistanceToTargetBps: number;
   quoteTokenDelta: bigint;
+  quoteInventoryDeployed?: bigint;
+  quoteInventoryReleased?: bigint;
   additionalCollateralRequired?: bigint;
   netQuoteBorrowed?: bigint;
   operatorCapitalRequired?: bigint;
@@ -151,6 +153,8 @@ export interface KeeperConfig {
   enableManagedInventoryUpwardControl?: boolean;
   enableManagedDualUpwardControl?: boolean;
   minimumManagedImprovementBps?: number;
+  maxManagedInventoryReleaseBps?: number;
+  minimumManagedSensitivityBpsPer10PctRelease?: number;
   simulationSenderAddress?: HexAddress;
   drawDebtLimitIndex?: number;
   drawDebtLimitIndexes?: number[];
@@ -176,6 +180,8 @@ export interface CyclePlan {
   planningRateBps?: number;
   planningLookaheadUpdates?: number;
   quoteTokenDelta: bigint;
+  quoteInventoryDeployed: bigint;
+  quoteInventoryReleased: bigint;
   additionalCollateralRequired: bigint;
   netQuoteBorrowed: bigint;
   operatorCapitalRequired: bigint;
@@ -189,6 +195,9 @@ export interface GuardFailure {
     | "QUOTE_CAP_EXCEEDED"
     | "BORROW_CAP_EXCEEDED"
     | "MIN_EXECUTION_AMOUNT"
+    | "MANAGED_CONTROL_UNAVAILABLE"
+    | "MANAGED_RELEASE_CAP_EXCEEDED"
+    | "MANAGED_CONTROLLABILITY_TOO_LOW"
     | "POOL_STATE_CHANGED"
     | "CANDIDATE_INVALIDATED";
   reason: string;

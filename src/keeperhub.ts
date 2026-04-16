@@ -98,6 +98,8 @@ export function formatKeeperHubResponse(result: Awaited<ReturnType<typeof runKee
     inventoryBacked,
     capital: {
       quoteTokenDelta: result.plan.quoteTokenDelta,
+      quoteInventoryDeployed: result.plan.quoteInventoryDeployed,
+      quoteInventoryReleased: result.plan.quoteInventoryReleased,
       additionalCollateralRequired: result.plan.additionalCollateralRequired,
       netQuoteBorrowed: result.plan.netQuoteBorrowed,
       operatorCapitalRequired: result.plan.operatorCapitalRequired,

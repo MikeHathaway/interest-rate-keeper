@@ -356,6 +356,24 @@ export function resolveKeeperConfig(input: unknown): KeeperConfig {
     );
   }
 
+  if (record.maxManagedInventoryReleaseBps !== undefined) {
+    const parsedMaxManagedInventoryReleaseBps = parseNonNegativeInteger(
+      record.maxManagedInventoryReleaseBps,
+      "maxManagedInventoryReleaseBps"
+    );
+    if (parsedMaxManagedInventoryReleaseBps > 10_000) {
+      throw new Error("maxManagedInventoryReleaseBps must not exceed 10000");
+    }
+    config.maxManagedInventoryReleaseBps = parsedMaxManagedInventoryReleaseBps;
+  }
+
+  if (record.minimumManagedSensitivityBpsPer10PctRelease !== undefined) {
+    config.minimumManagedSensitivityBpsPer10PctRelease = parseNonNegativeInteger(
+      record.minimumManagedSensitivityBpsPer10PctRelease,
+      "minimumManagedSensitivityBpsPer10PctRelease"
+    );
+  }
+
   if (record.simulationSenderAddress !== undefined) {
     config.simulationSenderAddress = parseHexAddress(
       record.simulationSenderAddress,

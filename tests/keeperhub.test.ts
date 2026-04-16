@@ -113,6 +113,8 @@ describe("keeperhub", () => {
     });
 
     expect(payload.snapshot.candidates[0]?.additionalCollateralRequired).toBe(25n);
+    expect(payload.snapshot.candidates[0]?.quoteInventoryDeployed).toBe(100n);
+    expect(payload.snapshot.candidates[0]?.quoteInventoryReleased).toBe(0n);
     expect(payload.snapshot.candidates[0]?.netQuoteBorrowed).toBe(-50n);
     expect(payload.snapshot.candidates[0]?.operatorCapitalRequired).toBe(125n);
     expect(payload.snapshot.candidates[0]?.operatorCapitalAtRisk).toBe(125n);
@@ -291,6 +293,8 @@ describe("keeperhub", () => {
     expect(formatted.planningLookaheadUpdates).toBeUndefined();
     expect(formatted.capital).toEqual({
       quoteTokenDelta: "51",
+      quoteInventoryDeployed: "0",
+      quoteInventoryReleased: "0",
       additionalCollateralRequired: "25",
       netQuoteBorrowed: "51",
       operatorCapitalRequired: "25",
@@ -498,6 +502,8 @@ describe("keeperhub", () => {
         predictedOutcomeAfterPlan: "STEP_UP",
         predictedRateBpsAfterNextUpdate: 1000,
         quoteTokenDelta: 100n,
+        quoteInventoryDeployed: 0n,
+        quoteInventoryReleased: 100n,
         additionalCollateralRequired: 0n,
         netQuoteBorrowed: 100n,
         operatorCapitalRequired: 0n,

@@ -29,6 +29,8 @@ describe("formatCycleCapitalSummary", () => {
         planningRateBps: 1005,
         planningLookaheadUpdates: 3,
         quoteTokenDelta: 150n,
+        quoteInventoryDeployed: 100n,
+        quoteInventoryReleased: 0n,
         additionalCollateralRequired: 25n,
         netQuoteBorrowed: -50n,
         operatorCapitalRequired: 125n,
@@ -37,7 +39,7 @@ describe("formatCycleCapitalSummary", () => {
     };
 
     expect(formatCycleCapitalSummary(result)).toBe(
-      "summary dry_run=true status=EXECUTED intent=LEND_AND_BORROW inventory_backed=false candidate_mode=supported lookahead=3 planning_rate=1005 required=125 at_risk=125 net_quote=-50 addl_collateral=25"
+      "summary dry_run=true status=EXECUTED intent=LEND_AND_BORROW inventory_backed=false candidate_mode=supported lookahead=3 planning_rate=1005 inventory_deployed=100 inventory_released=0 required=125 at_risk=125 net_quote=-50 addl_collateral=25"
     );
   });
 });

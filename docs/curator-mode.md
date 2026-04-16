@@ -157,6 +157,48 @@ Good future guard rails:
 - minimum improvement margin over passive
 - explicit inventory and debt caps
 
+## Current Config Surface
+
+The managed remove-only path is now explicit in keeper config:
+
+- `enableManagedInventoryUpwardControl`
+- `minimumManagedImprovementBps`
+- `maxManagedInventoryReleaseBps`
+- `minimumManagedSensitivityBpsPer10PctRelease`
+- `removeQuoteBucketIndex`
+- `removeQuoteBucketIndexes`
+
+Representative config:
+
+```json
+{
+  "enableManagedInventoryUpwardControl": true,
+  "minimumManagedImprovementBps": 10,
+  "maxManagedInventoryReleaseBps": 2000,
+  "minimumManagedSensitivityBpsPer10PctRelease": 5,
+  "removeQuoteBucketIndexes": [2618]
+}
+```
+
+Operational meaning:
+
+- the keeper only considers exact managed `REMOVE_QUOTE` when upward control is needed in a used / EMA-initialized pool and it can see real withdrawable lender inventory
+- `minimumManagedImprovementBps` keeps the keeper from releasing inventory for trivial gains
+- `maxManagedInventoryReleaseBps` caps one-cycle inventory release as a fraction of total withdrawable managed inventory
+- `minimumManagedSensitivityBpsPer10PctRelease` is the controllability gate for managed upward actions
+- if the fresh submit-time snapshot no longer satisfies those conditions, the keeper refuses the plan instead of degrading silently
+
+## Operator Reporting
+
+Curator-mode outputs now separate inventory movement from generic capital terms:
+
+- `quoteInventoryDeployed`
+- `quoteInventoryReleased`
+- `operatorCapitalRequired`
+- `operatorCapitalAtRisk`
+
+This matters because `REMOVE_QUOTE` is not borrowed quote. It is released inventory plus reduced in-pool yield exposure.
+
 ## Product Boundary
 
 The clean product boundary is:

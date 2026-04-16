@@ -81,6 +81,7 @@ Practical product conclusion:
 - exact block-pinned real used-pool upward archetypes now exist in the experimental suite, and they still do not surface a generic exact upward simulation candidate
 - even when those pinned real used-pool states are paired with recent real lender addresses from quote-token transfers into the pool, the generic exact paired `LEND_AND_BORROW` search still does not surface an upward candidate
 - the only currently credible used-pool upward path is managed inventory-backed control; see [docs/curator-mode.md](./docs/curator-mode.md)
+- the managed remove-only path is now an explicit config-gated mode through `enableManagedInventoryUpwardControl`, `minimumManagedImprovementBps`, `maxManagedInventoryReleaseBps`, `minimumManagedSensitivityBpsPer10PctRelease`, and optional `removeQuoteBucketIndex(es)`
 - abandoned-pool reset/recovery is modeled correctly, but still should not be marketed as a separately proven end-to-end mode
 
 ### Current Product Conclusion For Borrower Steering
@@ -100,7 +101,7 @@ Why:
 - deliberately borrower-heavy existing-loan fixtures also remain negative for exact same-cycle borrower steering
 - representative multi-cycle borrower steering is positively proven
 - deterministic not-due quote-only fixtures can now surface and targeted-execute an exact pre-window borrower plan, but that remains experimental rather than routine supported execution
-- representative existing-borrower and complex ongoing multi-actor borrower fixtures still remain negative for generic exact pre-window borrower steering
+- a representative existing-borrower fixture can now surface a tiny exact pre-window borrower plan, but the broader complex ongoing multi-actor borrower family still remains negative for generic exact pre-window borrower steering
 - bounded manual multi-cycle pre-window borrower probes across those used-pool fixture families also remain negative so far, the newer boundary-math-ranked existing-borrower pre-window search remains negative as well, and even a representative multi-bucket existing-borrower pre-window borrower probe stays negative after ranking candidates with a protocol-grounded cached-interest-state approximation, which suggests the deterministic quote-only pre-window borrower proof is still a narrow case rather than a generalized used-pool control path
 - protocol source inspection now explains the main split: in normal due-window states Ajna computes the next rate move from previously cached `interestParams` values and only writes the fresh debt/deposit/debtCol/lupt0Debt inputs after that calculation, so default exact borrower search should focus on pre-window and multi-cycle paths instead of due-window same-cycle search
 

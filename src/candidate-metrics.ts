@@ -5,6 +5,8 @@ import {
 
 export interface PlanCandidateCapitalMetrics {
   quoteTokenDelta: bigint;
+  quoteInventoryDeployed: bigint;
+  quoteInventoryReleased: bigint;
   additionalCollateralRequired: bigint;
   netQuoteBorrowed: bigint;
   operatorCapitalRequired: bigint;
@@ -15,6 +17,8 @@ export function derivePlanCandidateCapitalMetrics(
   steps: readonly ExecutionStep[]
 ): PlanCandidateCapitalMetrics {
   let quoteTokenDelta = 0n;
+  let quoteInventoryDeployed = 0n;
+  let quoteInventoryReleased = 0n;
   let additionalCollateralRequired = 0n;
   let netQuoteBorrowed = 0n;
   let operatorCapitalRequired = 0n;
@@ -24,12 +28,14 @@ export function derivePlanCandidateCapitalMetrics(
     switch (step.type) {
       case "ADD_QUOTE":
         quoteTokenDelta += step.amount;
+        quoteInventoryDeployed += step.amount;
         netQuoteBorrowed -= step.amount;
         operatorCapitalRequired += step.amount;
         operatorCapitalAtRisk += step.amount;
         break;
       case "REMOVE_QUOTE":
         quoteTokenDelta += step.amount;
+        quoteInventoryReleased += step.amount;
         netQuoteBorrowed += step.amount;
         operatorCapitalAtRisk -= step.amount;
         break;
@@ -63,6 +69,8 @@ export function derivePlanCandidateCapitalMetrics(
 
   return {
     quoteTokenDelta,
+    quoteInventoryDeployed,
+    quoteInventoryReleased,
     additionalCollateralRequired,
     netQuoteBorrowed,
     operatorCapitalRequired,
@@ -77,6 +85,10 @@ export function resolveCandidateCapitalMetrics(
 
   return {
     quoteTokenDelta: candidate.quoteTokenDelta,
+    quoteInventoryDeployed:
+      candidate.quoteInventoryDeployed ?? derived.quoteInventoryDeployed,
+    quoteInventoryReleased:
+      candidate.quoteInventoryReleased ?? derived.quoteInventoryReleased,
     additionalCollateralRequired:
       candidate.additionalCollateralRequired ?? derived.additionalCollateralRequired,
     netQuoteBorrowed: candidate.netQuoteBorrowed ?? derived.netQuoteBorrowed,

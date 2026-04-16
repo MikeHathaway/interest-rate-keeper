@@ -313,6 +313,20 @@ export function resolvePlanCandidate(input: unknown, label = "plan candidate"): 
     );
   }
 
+  if (record.quoteInventoryDeployed !== undefined) {
+    candidate.quoteInventoryDeployed = parseBigIntValue(
+      record.quoteInventoryDeployed,
+      `${label}.quoteInventoryDeployed`
+    );
+  }
+
+  if (record.quoteInventoryReleased !== undefined) {
+    candidate.quoteInventoryReleased = parseBigIntValue(
+      record.quoteInventoryReleased,
+      `${label}.quoteInventoryReleased`
+    );
+  }
+
   return withPlanCandidateCapitalMetrics(candidate);
 }
 

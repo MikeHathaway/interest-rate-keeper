@@ -1,5 +1,14 @@
 import { distanceToTargetBand } from "./planner.js";
 import {
+  managedImprovementBps,
+  maximumManagedReleasedQuoteAmount,
+  normalizedManagedSensitivityBpsPer10PctRelease,
+  readManagedControlSnapshotMetadata,
+  releasedQuoteInventoryAmount,
+  stepsUseManagedDual,
+  stepsUseManagedRemoveQuote
+} from "./managed-controls.js";
+import {
   type CyclePlan,
   type ExecutionStep,
   type GuardFailure,
@@ -106,6 +115,14 @@ function projectedRateBps(snapshot: PoolSnapshot): number {
   return snapshot.planningRateBps ?? snapshot.predictedNextRateBps;
 }
 
+function planUsesRemoveQuote(plan: CyclePlan): boolean {
+  return stepsUseManagedRemoveQuote(plan.requiredSteps);
+}
+
+function planUsesManagedDual(plan: CyclePlan): boolean {
+  return stepsUseManagedDual(plan.requiredSteps);
+}
+
 function currentAndProjectedRatesAreInBand(
   snapshot: PoolSnapshot,
   plan: CyclePlan
@@ -114,6 +131,16 @@ function currentAndProjectedRatesAreInBand(
     distanceToTargetBand(snapshot.currentRateBps, plan.targetBand) === 0 &&
     distanceToTargetBand(projectedRateBps(snapshot), plan.targetBand) === 0
   );
+}
+
+function managedPlanImprovementBps(plan: CyclePlan, snapshot: PoolSnapshot): number {
+  const baselineDistance = distanceToTargetBand(projectedRateBps(snapshot), plan.targetBand);
+  const planDistance = distanceToTargetBand(
+    plan.planningRateBps ?? plan.predictedRateBpsAfterNextUpdate,
+    plan.targetBand
+  );
+
+  return managedImprovementBps(baselineDistance, planDistance);
 }
 
 function sameSemanticPoolState(previousSnapshot: PoolSnapshot, freshSnapshot: PoolSnapshot): boolean {
@@ -162,6 +189,110 @@ function snapshotGuards(
   return undefined;
 }
 
+function managedInventoryGuards(
+  plan: CyclePlan,
+  snapshot: PoolSnapshot,
+  config: KeeperConfig
+): GuardFailure | undefined {
+  if (!planUsesRemoveQuote(plan)) {
+    return undefined;
+  }
+
+  const managedMetadata = readManagedControlSnapshotMetadata(snapshot);
+  if (managedMetadata.managedInventoryUpwardEligible !== true) {
+    const ineligibilityReason = managedMetadata.managedInventoryIneligibilityReason;
+    return {
+      code: "MANAGED_CONTROL_UNAVAILABLE",
+      reason:
+        ineligibilityReason === undefined
+          ? "managed inventory upward control is no longer eligible in the fresh snapshot"
+          : `managed inventory upward control is no longer eligible because ${ineligibilityReason}`
+    };
+  }
+
+  if (
+    planUsesManagedDual(plan) &&
+    managedMetadata.managedDualUpwardEligible !== true
+  ) {
+    const ineligibilityReason = managedMetadata.managedDualIneligibilityReason;
+    return {
+      code: "MANAGED_CONTROL_UNAVAILABLE",
+      reason:
+        ineligibilityReason === undefined
+          ? "managed dual upward control is no longer eligible in the fresh snapshot"
+          : `managed dual upward control is no longer eligible because ${ineligibilityReason}`
+    };
+  }
+
+  const maxManagedInventoryReleaseBps = config.maxManagedInventoryReleaseBps;
+  const totalWithdrawableQuoteAmount = managedMetadata.managedTotalWithdrawableQuoteAmount;
+  if (totalWithdrawableQuoteAmount === undefined || totalWithdrawableQuoteAmount <= 0n) {
+    return {
+      code: "MANAGED_CONTROL_UNAVAILABLE",
+      reason:
+        "managed upward control is configured, but the fresh snapshot no longer exposes withdrawable managed inventory totals"
+    };
+  }
+
+  const released = releasedQuoteInventoryAmount(plan.requiredSteps);
+
+  if (
+    maxManagedInventoryReleaseBps !== undefined &&
+    maxManagedInventoryReleaseBps < 10_000
+  ) {
+    const maximumReleased = maximumManagedReleasedQuoteAmount(
+      totalWithdrawableQuoteAmount,
+      maxManagedInventoryReleaseBps
+    );
+    if (released > maximumReleased) {
+      return {
+        code: "MANAGED_RELEASE_CAP_EXCEEDED",
+        reason: `plan exceeds the configured managed inventory release cap of ${maxManagedInventoryReleaseBps} bps`
+      };
+    }
+  }
+
+  const minimumManagedSensitivityBpsPer10PctRelease =
+    config.minimumManagedSensitivityBpsPer10PctRelease ?? 0;
+  if (minimumManagedSensitivityBpsPer10PctRelease <= 0) {
+    return undefined;
+  }
+
+  const improvementBps = managedPlanImprovementBps(plan, snapshot);
+  if (improvementBps <= 0) {
+    return {
+      code: "MANAGED_CONTROLLABILITY_TOO_LOW",
+      reason:
+        "managed inventory plan no longer improves the passive path in the fresh snapshot"
+    };
+  }
+
+  const normalizedSensitivityBpsPer10PctRelease =
+    normalizedManagedSensitivityBpsPer10PctRelease(
+      improvementBps,
+      released,
+      totalWithdrawableQuoteAmount
+    );
+  if (normalizedSensitivityBpsPer10PctRelease === undefined) {
+    return {
+      code: "MANAGED_CONTROLLABILITY_TOO_LOW",
+      reason:
+        "managed controllability gate is configured, but the fresh snapshot produced a zero effective release fraction"
+    };
+  }
+  if (
+    normalizedSensitivityBpsPer10PctRelease <
+    BigInt(minimumManagedSensitivityBpsPer10PctRelease)
+  ) {
+    return {
+      code: "MANAGED_CONTROLLABILITY_TOO_LOW",
+      reason: `plan failed the configured controllability gate of ${minimumManagedSensitivityBpsPer10PctRelease} bps per 10% inventory release`
+    };
+  }
+
+  return undefined;
+}
+
 export function validatePlan(
   plan: CyclePlan,
   snapshot: PoolSnapshot,
@@ -170,6 +301,11 @@ export function validatePlan(
   const snapshotFailure = snapshotGuards(plan, snapshot, config);
   if (snapshotFailure) {
     return snapshotFailure;
+  }
+
+  const managedFailure = managedInventoryGuards(plan, snapshot, config);
+  if (managedFailure) {
+    return managedFailure;
   }
 
   let totalQuoteExposure = 0n;

@@ -81,6 +81,8 @@ const plan: CyclePlan = {
   predictedOutcomeAfterPlan: "STEP_UP",
   predictedRateBpsAfterNextUpdate: 950,
   quoteTokenDelta: 10n,
+  quoteInventoryDeployed: 10n,
+  quoteInventoryReleased: 0n,
   additionalCollateralRequired: 0n,
   netQuoteBorrowed: -10n,
   operatorCapitalRequired: 10n,
@@ -231,5 +233,79 @@ describe("policy", () => {
     );
 
     expect(failure).toBeUndefined();
+  });
+
+  it("rejects managed remove-quote plans that exceed the configured inventory release cap", () => {
+    const failure = validatePlan(
+      {
+        ...plan,
+        requiredSteps: [
+          {
+            type: "REMOVE_QUOTE",
+            amount: 250n,
+            bucketIndex: 1
+          }
+        ],
+        quoteTokenDelta: 250n,
+        quoteInventoryDeployed: 0n,
+        quoteInventoryReleased: 250n,
+        netQuoteBorrowed: 250n,
+        operatorCapitalRequired: 0n,
+        operatorCapitalAtRisk: 0n
+      },
+      {
+        ...snapshot,
+        metadata: {
+          ...snapshot.metadata,
+          managedInventoryUpwardEligible: true,
+          managedTotalWithdrawableQuoteAmount: "1000"
+        }
+      },
+      {
+        ...config,
+        enableManagedInventoryUpwardControl: true,
+        maxManagedInventoryReleaseBps: 2000
+      }
+    );
+
+    expect(failure?.code).toBe("MANAGED_RELEASE_CAP_EXCEEDED");
+  });
+
+  it("rejects managed remove-quote plans that fail the controllability gate", () => {
+    const failure = validatePlan(
+      {
+        ...plan,
+        requiredSteps: [
+          {
+            type: "REMOVE_QUOTE",
+            amount: 100n,
+            bucketIndex: 1
+          }
+        ],
+        predictedRateBpsAfterNextUpdate: 946,
+        quoteTokenDelta: 100n,
+        quoteInventoryDeployed: 0n,
+        quoteInventoryReleased: 100n,
+        netQuoteBorrowed: 100n,
+        operatorCapitalRequired: 0n,
+        operatorCapitalAtRisk: 0n
+      },
+      {
+        ...snapshot,
+        predictedNextRateBps: 900,
+        metadata: {
+          ...snapshot.metadata,
+          managedInventoryUpwardEligible: true,
+          managedTotalWithdrawableQuoteAmount: "1000"
+        }
+      },
+      {
+        ...config,
+        enableManagedInventoryUpwardControl: true,
+        minimumManagedSensitivityBpsPer10PctRelease: 10
+      }
+    );
+
+    expect(failure?.code).toBe("MANAGED_CONTROLLABILITY_TOO_LOW");
   });
 });
