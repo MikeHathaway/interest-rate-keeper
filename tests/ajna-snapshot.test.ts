@@ -6,6 +6,8 @@ import {
   hasUninitializedAjnaEmaState,
   rankProtocolShapedDualBranches,
   resolveProtocolApproximationBucketIndexes,
+  resolveRemoveQuoteBucketIndexes,
+  resolveManagedInventoryBucketIndexes,
   resolveAjnaSynthesisPolicy,
   resolveProtocolShapedPreWindowDualBucketIndexes,
   resolveSimulationBorrowCollateralAmounts,
@@ -737,6 +739,35 @@ describe("resolveProtocolShapedPreWindowDualBucketIndexes", () => {
         }
       )
     ).toEqual([3000, 3250, 3500]);
+  });
+});
+
+describe("resolveManagedInventoryBucketIndexes", () => {
+  it("preserves explicitly configured remove-quote buckets", () => {
+    expect(
+      resolveRemoveQuoteBucketIndexes({
+        ...baseConfig,
+        removeQuoteBucketIndexes: [3100, 2900]
+      })
+    ).toEqual([2900, 3100]);
+  });
+
+  it("unions configured remove-quote buckets with threshold-derived buckets when managed control is enabled pre-window", () => {
+    expect(
+      resolveManagedInventoryBucketIndexes(
+        {
+          immediatePrediction: {
+            secondsUntilNextRateUpdate: 3600
+          },
+          meaningfulDepositThresholdFenwickIndex: 3000
+        },
+        {
+          ...baseConfig,
+          enableManagedInventoryUpwardControl: true,
+          removeQuoteBucketIndexes: [3500]
+        }
+      )
+    ).toEqual([2000, 2500, 2750, 2900, 2950, 2980, 2990, 2995, 3000, 3500]);
   });
 });
 

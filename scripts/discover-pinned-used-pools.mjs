@@ -7,6 +7,7 @@ const RPC_URL =
   process.env.BASE_LOCAL_ANVIL_URL ?? process.env.BASE_RPC_URL ?? "http://127.0.0.1:9545";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const MAX_POOLS = 80;
+const ACTOR_POOL_DISCOVERY_LIMIT = 300;
 const MAX_MATCHES = 12;
 const MAX_LOOKBACK_BLOCKS = 40_000_000n;
 const LOG_CHUNK = 200_000n;
@@ -19,6 +20,20 @@ const FOCUSED_POOL_LOOKBACK_BLOCKS = 6_000_000n;
 const FOCUSED_ACTIVITY_CHUNK = 200_000n;
 const MAX_FOCUSED_ACTIVITY_TRANSACTIONS = 1_500;
 const MAX_FOCUSED_CANDIDATE_BLOCKS = 10;
+const CURATED_MANAGED_ACTORS = [
+  "0x31aFDdBE7977a82BAbce5b80D0A6B91918A7804b",
+  "0x7ba01460ab4829223325d6ed1e8681f7366dF646"
+];
+const CURATED_ACTOR_LOOKBACK_BLOCKS = 6_000_000n;
+const CURATED_ACTOR_MAX_TRANSACTIONS_PER_POOL = 600;
+const CURATED_ACTOR_MAX_CANDIDATE_BLOCKS = 8;
+const AJNA_INFO_API_BASE = "https://ajna-api.blockanalitica.com";
+const AJNA_INFO_POOL_PAGE_LIMIT = 5;
+const AJNA_INFO_POOL_PAGE_SIZE = 25;
+const AJNA_INFO_POSITIONS_PAGE_SIZE = 200;
+const AJNA_INFO_EVENTS_PAGE_SIZE = 50;
+const AJNA_INFO_MAX_MANAGED_MATCHES = 12;
+const AJNA_INFO_ONLY = process.argv.includes("--ajna-info-only");
 const FOCUSED_PINNED_POOLS = [
   {
     id: "pinned-used-pool-ac58",
@@ -164,6 +179,37 @@ function secondsUntilNextRateUpdate(rateUpdateTimestamp, nowTimestamp) {
   return remainder === 0 ? 0 : step - remainder;
 }
 
+function isStrictlyPositiveDecimalString(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (normalized.length === 0) {
+    return false;
+  }
+
+  return !/^0+(?:\.0+)?(?:e[+-]?\d+)?$/.test(normalized);
+}
+
+function decimalStringMagnitude(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+async function fetchAjnaInfoJson(path, query = {}) {
+  const url = new URL(path, AJNA_INFO_API_BASE);
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === "") {
+      continue;
+    }
+    url.searchParams.set(key, String(value));
+  }
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`ajna.info request failed: ${response.status} ${response.statusText} for ${url}`);
+  }
+
+  return response.json();
+}
+
 async function readPoolState(publicClient, poolAddress, blockNumber, borrowerAddress) {
   const block = await publicClient.getBlock({ blockNumber });
   const [
@@ -255,14 +301,14 @@ async function readPoolState(publicClient, poolAddress, blockNumber, borrowerAdd
   };
 }
 
-async function listRecentPools(publicClient) {
+async function listRecentPools(publicClient, limit = MAX_POOLS) {
   const latestBlock = await publicClient.getBlockNumber();
   const seen = new Set();
   const pools = [];
 
   for (
     let scanned = 0n;
-    scanned < MAX_LOOKBACK_BLOCKS && pools.length < MAX_POOLS;
+    scanned < MAX_LOOKBACK_BLOCKS && pools.length < limit;
     scanned += LOG_CHUNK
   ) {
     const toBlock = latestBlock > scanned ? latestBlock - scanned : 0n;
@@ -296,7 +342,7 @@ async function listRecentPools(publicClient) {
       }
       seen.add(normalized);
       pools.push(poolAddress);
-      if (pools.length >= MAX_POOLS) {
+      if (pools.length >= limit) {
         break;
       }
     }
@@ -621,17 +667,411 @@ async function discoverFocusedHistoricalManagedMatches(publicClient, latestBlock
   return focusedManagedMatches;
 }
 
+async function discoverCuratedActorManagedMatches(publicClient, actorFocusedPools, latestBlock) {
+  const curatedActorMatches = [];
+  const fromBlock =
+    latestBlock > CURATED_ACTOR_LOOKBACK_BLOCKS ? latestBlock - CURATED_ACTOR_LOOKBACK_BLOCKS : 0n;
+
+  for (const actorAddress of CURATED_MANAGED_ACTORS) {
+    const pools = actorFocusedPools.get(actorAddress.toLowerCase()) ?? [];
+    for (const poolAddress of pools) {
+      const candidateBlocks = new Set();
+      const bucketIndexes = new Set();
+      const seenTransactions = new Set();
+
+      for (
+        let chunkStart = latestBlock;
+        chunkStart >= fromBlock && seenTransactions.size < CURATED_ACTOR_MAX_TRANSACTIONS_PER_POOL;
+        chunkStart = chunkStart > FOCUSED_ACTIVITY_CHUNK ? chunkStart - FOCUSED_ACTIVITY_CHUNK : 0n
+      ) {
+        const chunkEnd = chunkStart;
+        const chunkFrom = chunkEnd > FOCUSED_ACTIVITY_CHUNK ? chunkEnd - FOCUSED_ACTIVITY_CHUNK + 1n : 0n;
+        const boundedChunkFrom = chunkFrom < fromBlock ? fromBlock : chunkFrom;
+        let logs = [];
+
+        try {
+          logs = await publicClient.getLogs({
+            address: poolAddress,
+            fromBlock: boundedChunkFrom,
+            toBlock: chunkEnd
+          });
+        } catch {
+          continue;
+        }
+
+        for (const log of [...logs].reverse()) {
+          if (log.transactionHash === undefined || seenTransactions.has(log.transactionHash)) {
+            continue;
+          }
+          seenTransactions.add(log.transactionHash);
+          if (seenTransactions.size > CURATED_ACTOR_MAX_TRANSACTIONS_PER_POOL) {
+            break;
+          }
+
+          let transaction;
+          try {
+            transaction = await publicClient.getTransaction({
+              hash: log.transactionHash
+            });
+          } catch {
+            continue;
+          }
+
+          if (
+            transaction.to === undefined ||
+            transaction.to.toLowerCase() !== poolAddress.toLowerCase() ||
+            transaction.from.toLowerCase() !== actorAddress.toLowerCase() ||
+            transaction.input === undefined ||
+            transaction.input === "0x"
+          ) {
+            continue;
+          }
+
+          let decoded;
+          try {
+            decoded = decodeFunctionData({
+              abi: POOL_ABI,
+              data: transaction.input
+            });
+          } catch {
+            continue;
+          }
+
+          if (decoded.functionName === "drawDebt") {
+            candidateBlocks.add(transaction.blockNumber);
+          }
+
+          if (decoded.functionName === "addQuoteToken") {
+            const bucketIndex = Number(decoded.args[1]);
+            if (Number.isInteger(bucketIndex) && bucketIndex >= 0 && bucketIndex <= 7388) {
+              bucketIndexes.add(bucketIndex);
+              candidateBlocks.add(transaction.blockNumber);
+            }
+          }
+        }
+
+        if (chunkStart === 0n || boundedChunkFrom === 0n) {
+          break;
+        }
+      }
+
+      if (bucketIndexes.size === 0 || candidateBlocks.size === 0) {
+        continue;
+      }
+
+      const candidateBlockList = [...candidateBlocks]
+        .sort((left, right) => Number(right - left))
+        .slice(0, CURATED_ACTOR_MAX_CANDIDATE_BLOCKS);
+      for (const blockNumber of candidateBlockList) {
+        let baseState;
+        let borrowerState;
+        try {
+          baseState = await readPoolState(publicClient, poolAddress, blockNumber);
+          borrowerState = await readPoolState(publicClient, poolAddress, blockNumber, actorAddress);
+        } catch {
+          continue;
+        }
+
+        const borrowerInfo = borrowerState.borrowerInfo;
+        if (
+          !borrowerInfo ||
+          baseState.currentDebtWad <= 0n ||
+          baseState.depositEmaWad <= 0n ||
+          baseState.noOfLoans === 0n ||
+          baseState.secondsUntilNextRateUpdate <= 0
+        ) {
+          continue;
+        }
+
+        const [borrowerT0Debt, borrowerCollateral] = borrowerInfo;
+        if (borrowerT0Debt <= 0n || borrowerCollateral <= 0n) {
+          continue;
+        }
+
+        const thresholdIndex = deriveMeaningfulDepositThresholdFenwickIndex(
+          borrowerState.inflatorWad,
+          borrowerState.totalT0Debt,
+          borrowerState.totalT0DebtInAuction,
+          borrowerState.t0Debt2ToCollateralWad
+        );
+        const candidateBucketIndexes = new Set([
+          ...resolveThresholdBucketIndexes(thresholdIndex),
+          ...bucketIndexes
+        ]);
+
+        for (const bucketIndex of [...candidateBucketIndexes].sort((left, right) => left - right)) {
+          try {
+            const [[lpBalance], bucketState] = await Promise.all([
+              publicClient.readContract({
+                address: poolAddress,
+                abi: POOL_ABI,
+                functionName: "lenderInfo",
+                args: [BigInt(bucketIndex), actorAddress],
+                blockNumber
+              }),
+              publicClient.readContract({
+                address: poolAddress,
+                abi: POOL_ABI,
+                functionName: "bucketInfo",
+                args: [BigInt(bucketIndex)],
+                blockNumber
+              })
+            ]);
+            const [lpAccumulator, availableCollateral, bankruptcyTime, bucketDeposit] = bucketState;
+            if (bankruptcyTime !== 0n || lpBalance <= 0n || bucketDeposit <= 0n) {
+              continue;
+            }
+
+            const maxWithdrawableQuoteAmount = calculateMaxWithdrawableQuoteAmountFromLp({
+              bucketLPAccumulator: lpAccumulator,
+              availableCollateral,
+              bucketDeposit,
+              lenderLpBalance: lpBalance,
+              bucketPriceWad: fenwickIndexToPriceWad(bucketIndex)
+            });
+            if (maxWithdrawableQuoteAmount <= 0n) {
+              continue;
+            }
+
+            curatedActorMatches.push({
+              actorAddress,
+              poolAddress,
+              blockNumber: blockNumber.toString(),
+              blockTimestamp: borrowerState.blockTimestamp,
+              currentRateBps: borrowerState.currentRateBps,
+              targetRateBps: borrowerState.currentRateBps + 100,
+              secondsUntilNextRateUpdate: borrowerState.secondsUntilNextRateUpdate,
+              noOfLoans: borrowerState.noOfLoans.toString(),
+              wasMaxBorrower: actorAddress.toLowerCase() === baseState.maxBorrower.toLowerCase(),
+              lenderBucketIndex: bucketIndex,
+              thresholdBucketIndex: thresholdIndex,
+              candidateBucketIndexes: [...candidateBucketIndexes].sort((left, right) => left - right),
+              maxWithdrawableQuoteAmount: maxWithdrawableQuoteAmount.toString(),
+              borrowerT0Debt: borrowerT0Debt.toString(),
+              borrowerCollateral: borrowerCollateral.toString()
+            });
+            break;
+          } catch {
+            continue;
+          }
+        }
+      }
+    }
+  }
+
+  return curatedActorMatches;
+}
+
+async function discoverActorFocusedPools(publicClient, latestBlock) {
+  const pools = await listRecentPools(publicClient, ACTOR_POOL_DISCOVERY_LIMIT);
+  const actorFocusedPools = new Map(
+    CURATED_MANAGED_ACTORS.map((actorAddress) => [actorAddress.toLowerCase(), []])
+  );
+
+  for (const poolAddress of pools) {
+    let loansInfo;
+    try {
+      loansInfo = await publicClient.readContract({
+        address: poolAddress,
+        abi: POOL_ABI,
+        functionName: "loansInfo",
+        blockNumber: latestBlock
+      });
+    } catch {
+      continue;
+    }
+
+    const [maxBorrower] = loansInfo;
+    const focusedPools = actorFocusedPools.get(maxBorrower.toLowerCase());
+    if (focusedPools !== undefined) {
+      focusedPools.push(poolAddress);
+    }
+  }
+
+  return actorFocusedPools;
+}
+
+async function discoverAjnaInfoManagedMatches() {
+  const managedMatches = [];
+  const seen = new Set();
+
+  for (let page = 1; page <= AJNA_INFO_POOL_PAGE_LIMIT; page += 1) {
+    let poolPage;
+    try {
+      poolPage = await fetchAjnaInfoJson("/v4/base/pools/", {
+        p: page,
+        p_size: AJNA_INFO_POOL_PAGE_SIZE,
+        order: "-tvl"
+      });
+    } catch {
+      continue;
+    }
+
+    for (const pool of poolPage.results ?? []) {
+      if (!pool?.address || !isStrictlyPositiveDecimalString(pool.debt)) {
+        continue;
+      }
+
+      let borrowerPositions;
+      let depositorPositions;
+      try {
+        [borrowerPositions, depositorPositions] = await Promise.all([
+          fetchAjnaInfoJson(`/v4/base/pools/${pool.address}/positions/`, {
+            p: 1,
+            p_size: AJNA_INFO_POSITIONS_PAGE_SIZE,
+            order: "-debt",
+            type: "borrower"
+          }),
+          fetchAjnaInfoJson(`/v4/base/pools/${pool.address}/positions/`, {
+            p: 1,
+            p_size: AJNA_INFO_POSITIONS_PAGE_SIZE,
+            order: "-supply",
+            type: "depositor"
+          })
+        ]);
+      } catch {
+        continue;
+      }
+
+      const borrowerByAddress = new Map(
+        (borrowerPositions.results ?? [])
+          .filter((position) => isStrictlyPositiveDecimalString(position.debt))
+          .map((position) => [position.wallet_address.toLowerCase(), position])
+      );
+      const depositorByAddress = new Map(
+        (depositorPositions.results ?? [])
+          .filter((position) => isStrictlyPositiveDecimalString(position.supply))
+          .map((position) => [position.wallet_address.toLowerCase(), position])
+      );
+      const overlapAddresses = [...borrowerByAddress.keys()].filter((address) =>
+        depositorByAddress.has(address)
+      );
+
+      for (const overlapAddress of overlapAddresses) {
+        const borrowerPosition = borrowerByAddress.get(overlapAddress);
+        const depositorPosition = depositorByAddress.get(overlapAddress);
+        if (!borrowerPosition || !depositorPosition) {
+          continue;
+        }
+
+        let poolPosition;
+        let bucketPage;
+        let eventPage;
+        try {
+          [poolPosition, bucketPage, eventPage] = await Promise.all([
+            fetchAjnaInfoJson(`/v4/base/wallets/${overlapAddress}/pools/${pool.address}/`),
+            fetchAjnaInfoJson(`/v4/base/wallets/${overlapAddress}/pools/${pool.address}/buckets/`, {
+              p: 1,
+              p_size: 50
+            }),
+            fetchAjnaInfoJson(`/v4/base/wallets/${overlapAddress}/pools/${pool.address}/events/`, {
+              p: 1,
+              p_size: AJNA_INFO_EVENTS_PAGE_SIZE,
+              order: "-order_index"
+            })
+          ]);
+        } catch {
+          continue;
+        }
+
+        if (
+          !isStrictlyPositiveDecimalString(poolPosition.debt) ||
+          !isStrictlyPositiveDecimalString(poolPosition.supply)
+        ) {
+          continue;
+        }
+
+        const drawDebtEvent = (eventPage.results ?? []).find((event) => event.name === "DrawDebt");
+        const firstBucket = (bucketPage.results ?? []).find((bucket) =>
+          isStrictlyPositiveDecimalString(bucket.deposit)
+        );
+        if (!drawDebtEvent || !firstBucket) {
+          continue;
+        }
+
+        const key = `${pool.address.toLowerCase()}:${overlapAddress}:${drawDebtEvent.block_number}:${firstBucket.bucket_index}`;
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+
+        managedMatches.push({
+          poolAddress: pool.address,
+          senderAddress: overlapAddress,
+          borrowerAddress: overlapAddress,
+          blockNumber: String(drawDebtEvent.block_number),
+          lenderBucketIndex: firstBucket.bucket_index,
+          currentRateBps: Math.round(Number(pool.borrow_rate ?? 0) * 10_000),
+          targetRateBps: Math.round(Number(pool.borrow_rate ?? 0) * 10_000) + 200,
+          supply: poolPosition.supply,
+          debt: poolPosition.debt,
+          collateral: poolPosition.collateral,
+          supplyShare: poolPosition.supply_share,
+          debtShare: poolPosition.debt_share,
+          lenderBucketDeposit: firstBucket.deposit,
+          lenderBucketPrice: firstBucket.bucket_price,
+          drawDebtBlockNumber: drawDebtEvent.block_number,
+          drawDebtTimestamp: drawDebtEvent.block_datetime,
+          borrowerFirstActivity: borrowerPosition.first_activity,
+          borrowerLastActivity: borrowerPosition.last_activity,
+          depositorFirstActivity: depositorPosition.first_activity,
+          depositorLastActivity: depositorPosition.last_activity,
+          eventNames: (eventPage.results ?? []).map((event) => event.name)
+        });
+
+        if (managedMatches.length >= AJNA_INFO_MAX_MANAGED_MATCHES) {
+          return managedMatches.sort(
+            (left, right) =>
+              decimalStringMagnitude(right.debt) +
+              decimalStringMagnitude(right.supply) -
+              (decimalStringMagnitude(left.debt) + decimalStringMagnitude(left.supply))
+          );
+        }
+      }
+    }
+  }
+
+  return managedMatches.sort(
+    (left, right) =>
+      decimalStringMagnitude(right.debt) +
+      decimalStringMagnitude(right.supply) -
+      (decimalStringMagnitude(left.debt) + decimalStringMagnitude(left.supply))
+  );
+}
+
 async function main() {
+  if (AJNA_INFO_ONLY) {
+    const ajnaInfoManagedMatches = await discoverAjnaInfoManagedMatches();
+    console.log(
+      JSON.stringify(
+        {
+          mode: "ajna-info-only",
+          ajnaInfoManagedMatches
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
   const publicClient = createPublicClient({
     chain: base,
     transport: http(RPC_URL)
   });
   const latestBlock = await publicClient.getBlockNumber();
   const pools = await listRecentPools(publicClient);
+  const actorFocusedPools = await discoverActorFocusedPools(publicClient, latestBlock);
   const matches = [];
   const managedMatches = [];
   const focusedManagedMatches = await discoverFocusedHistoricalManagedMatches(
     publicClient,
+    latestBlock
+  );
+  const ajnaInfoManagedMatches = await discoverAjnaInfoManagedMatches();
+  const curatedActorManagedMatches = await discoverCuratedActorManagedMatches(
+    publicClient,
+    actorFocusedPools,
     latestBlock
   );
   const diagnostics = [];
@@ -819,10 +1259,13 @@ async function main() {
         latestBlock: latestBlock.toString(),
         scannedPoolCount: pools.length,
         firstPools: pools.slice(0, 10),
+        actorFocusedPools: Object.fromEntries(actorFocusedPools),
         diagnostics,
         matches,
         managedMatches,
-        focusedManagedMatches
+        focusedManagedMatches,
+        ajnaInfoManagedMatches,
+        curatedActorManagedMatches
       },
       null,
       2

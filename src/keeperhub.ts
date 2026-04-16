@@ -81,6 +81,7 @@ export async function runKeeperHubPayload(
 }
 
 export function formatKeeperHubResponse(result: Awaited<ReturnType<typeof runKeeperHubPayload>>): string {
+  const inventoryBacked = result.plan.requiredSteps.some((step) => step.type === "REMOVE_QUOTE");
   return safeJsonStringify({
     dryRun: result.dryRun,
     status: result.status,
@@ -94,6 +95,7 @@ export function formatKeeperHubResponse(result: Awaited<ReturnType<typeof runKee
     predictedRateBpsAfterNextUpdate: result.plan.predictedRateBpsAfterNextUpdate,
     planningRateBps: result.plan.planningRateBps,
     planningLookaheadUpdates: result.plan.planningLookaheadUpdates,
+    inventoryBacked,
     capital: {
       quoteTokenDelta: result.plan.quoteTokenDelta,
       additionalCollateralRequired: result.plan.additionalCollateralRequired,

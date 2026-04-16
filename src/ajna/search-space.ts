@@ -108,6 +108,15 @@ export function resolveAddQuoteBucketIndexes(config: KeeperConfig): number[] {
   return Array.from(new Set(configured)).sort((left, right) => left - right);
 }
 
+export function resolveRemoveQuoteBucketIndexes(config: KeeperConfig): number[] {
+  const configured = [
+    ...(config.removeQuoteBucketIndexes ?? []),
+    ...(config.removeQuoteBucketIndex === undefined ? [] : [config.removeQuoteBucketIndex])
+  ];
+
+  return Array.from(new Set(configured)).sort((left, right) => left - right);
+}
+
 export function priceToFenwickIndex(priceWad: bigint): number | undefined {
   const price = Number(priceWad) / 1e18;
   if (!Number.isFinite(price) || price <= 0) {
@@ -171,6 +180,32 @@ export function resolveProtocolShapedPreWindowDualBucketIndexes(
   config: KeeperConfig
 ): number[] {
   const configured = resolveAddQuoteBucketIndexes(config);
+  if (readState.immediatePrediction.secondsUntilNextRateUpdate <= 0) {
+    return configured;
+  }
+
+  const thresholdIndex = readState.meaningfulDepositThresholdFenwickIndex;
+  if (thresholdIndex === undefined) {
+    return configured;
+  }
+
+  return Array.from(
+    new Set([...configured, ...buildThresholdDerivedBucketIndexes(thresholdIndex)])
+  ).sort((left, right) => left - right);
+}
+
+export function resolveManagedInventoryBucketIndexes(
+  readState: SnapshotWindowState,
+  config: KeeperConfig
+): number[] {
+  const configured = resolveRemoveQuoteBucketIndexes(config);
+  if (
+    config.enableManagedInventoryUpwardControl !== true &&
+    config.enableManagedDualUpwardControl !== true
+  ) {
+    return configured;
+  }
+
   if (readState.immediatePrediction.secondsUntilNextRateUpdate <= 0) {
     return configured;
   }
@@ -256,11 +291,15 @@ export function resolveSimulationBorrowLimitIndexes(config: KeeperConfig): numbe
   ).sort((left, right) => left - right);
 }
 
-function buildBorrowBucketProbeIndexes(config: KeeperConfig): number[] {
+function buildBorrowBucketProbeIndexes(
+  config: KeeperConfig,
+  additionalSeedIndexes: number[] = []
+): number[] {
   const seedIndexes = Array.from(
     new Set([
       ...resolveSimulationBorrowLimitIndexes(config),
-      ...resolveAddQuoteBucketIndexes(config)
+      ...resolveAddQuoteBucketIndexes(config),
+      ...additionalSeedIndexes
     ])
   );
 
@@ -279,10 +318,18 @@ export async function resolvePoolAwareBorrowLimitIndexes(
   publicClient: PublicClient,
   poolAddress: HexAddress,
   blockNumber: bigint,
-  config: KeeperConfig
+  config: KeeperConfig,
+  options: {
+    seedIndexes?: number[];
+  } = {}
 ): Promise<number[]> {
-  const baseIndexes = resolveSimulationBorrowLimitIndexes(config);
-  const probeIndexes = buildBorrowBucketProbeIndexes(config);
+  const baseIndexes = Array.from(
+    new Set([
+      ...resolveSimulationBorrowLimitIndexes(config),
+      ...(options.seedIndexes ?? [])
+    ])
+  ).sort((left, right) => left - right);
+  const probeIndexes = buildBorrowBucketProbeIndexes(config, options.seedIndexes ?? []);
   if (probeIndexes.length === 0) {
     return baseIndexes;
   }
@@ -633,6 +680,32 @@ export function buildExposureFractionAnchorAmounts(
   const values = new Set<bigint>();
   for (const denominator of [1_000_000n, 100_000n, 10_000n, 1_000n, 100n, 50n, 20n, 10n, 2n]) {
     const amount = maximumAmount / denominator;
+    if (amount >= minimumAmount && amount <= maximumAmount) {
+      values.add(amount);
+    }
+  }
+
+  return Array.from(values).sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0
+  );
+}
+
+export function buildHighEndExposureFractionAnchorAmounts(
+  maximumAmount: bigint,
+  minimumAmount: bigint
+): bigint[] {
+  if (maximumAmount <= 0n || minimumAmount > maximumAmount) {
+    return [];
+  }
+
+  const values = new Set<bigint>();
+  for (const [numerator, denominator] of [
+    [2n, 3n],
+    [3n, 4n],
+    [9n, 10n],
+    [1n, 1n]
+  ] as const) {
+    const amount = (maximumAmount * numerator) / denominator;
     if (amount >= minimumAmount && amount <= maximumAmount) {
       values.add(amount);
     }

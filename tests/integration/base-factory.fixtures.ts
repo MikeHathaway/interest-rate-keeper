@@ -475,6 +475,64 @@ export const EXPERIMENTAL_PINNED_USED_POOL_UPWARD_ARCHETYPES = [
   }
 ] as const;
 
+export const EXPERIMENTAL_AJNA_INFO_MANAGED_USED_POOL_ARCHETYPES = [
+  {
+    id: "ajna-info-managed-weth-usdc-2024-12-01",
+    poolAddress: "0x0b17159f2486f669a1f930926638008e2ccb4287",
+    blockNumber: 23_139_570n,
+    senderAddress: "0x0ecdf706d25f9ded9cb68a028376cfc2eaf212c0",
+    borrowerAddress: "0x0ecdf706d25f9ded9cb68a028376cfc2eaf212c0",
+    lenderBucketIndex: 2618,
+    inventorySource: "transfer_lp" as const,
+    targetOffsetBps: 200,
+    toleranceBps: 50
+  },
+  {
+    id: "ajna-info-managed-2388-2024-04-08",
+    poolAddress: "0x238862f4d2f3a3c6808736aa6fead766c2296d2d",
+    blockNumber: 12_904_736n,
+    senderAddress: "0x72f85a69b79954ffd253ac0b8a37fb26d1a84917",
+    borrowerAddress: "0x72f85a69b79954ffd253ac0b8a37fb26d1a84917",
+    lenderBucketIndex: 4156,
+    inventorySource: "transfer_lp" as const,
+    targetOffsetBps: 200,
+    toleranceBps: 50
+  },
+  {
+    id: "ajna-info-managed-prime-usdc-2025-10-17",
+    poolAddress: "0x1abc629d901100218cdfd389e6e778b9399e9f70",
+    blockNumber: 36_968_900n,
+    senderAddress: "0x41c7b055ff83c33915242c2642640b9b35dea840",
+    borrowerAddress: "0x41c7b055ff83c33915242c2642640b9b35dea840",
+    lenderBucketIndex: 3506,
+    inventorySource: "direct_add_quote" as const,
+    targetOffsetBps: 200,
+    toleranceBps: 50
+  },
+  {
+    id: "ajna-info-managed-weth-usdglo-2024-10-03",
+    poolAddress: "0xc73d1e1b5463920325ae42318a20f88181617185",
+    blockNumber: 20_586_751n,
+    senderAddress: "0xddf9e5a32f83ea24eb8dbae02e9890c80c06ea13",
+    borrowerAddress: "0xddf9e5a32f83ea24eb8dbae02e9890c80c06ea13",
+    lenderBucketIndex: 2632,
+    inventorySource: "direct_add_quote" as const,
+    targetOffsetBps: 200,
+    toleranceBps: 50
+  },
+  {
+    id: "ajna-info-managed-dog-usdc-2026-03-18",
+    poolAddress: "0xb156f09e8ab6756cd23cf283d495ab75f8334104",
+    blockNumber: 43_506_804n,
+    senderAddress: "0x7500c95cc6f6c9ede82d4043f9337715360d6b6a",
+    borrowerAddress: "0x7500c95cc6f6c9ede82d4043f9337715360d6b6a",
+    lenderBucketIndex: 6003,
+    inventorySource: "direct_add_quote" as const,
+    targetOffsetBps: 200,
+    toleranceBps: 50
+  }
+] as const;
+
 export const MAX_EXACT_DUAL_VALIDATIONS_WITH_PURE_MATCH = 1;
 export const MAX_EXACT_DUAL_VALIDATIONS_WITHOUT_PURE_MATCH = 1;
 

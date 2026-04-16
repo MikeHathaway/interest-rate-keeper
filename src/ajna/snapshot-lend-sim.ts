@@ -19,15 +19,17 @@ import {
   replayAjnaSimulationPath,
   withPreparedLazySimulationFork
 } from "./snapshot-sim-helpers.js";
-import { hasUninitializedAjnaEmaState, type AjnaRatePrediction } from "./rate-state.js";
+import { type AjnaRatePrediction } from "./rate-state.js";
 import {
   type ScalarSearchMatch,
   buildExposureFractionAnchorAmounts,
+  buildHighEndExposureFractionAnchorAmounts,
   buildMultiCycleLendSearchAmounts,
   buildTokenScaleAnchorAmounts,
   compareCandidatePreference,
   compressCapitalAwareSearchAmounts,
-  resolveAddQuoteBucketIndexes
+  resolveAddQuoteBucketIndexes,
+  resolveRemoveQuoteBucketIndexes
 } from "./search-space.js";
 import { buildTargetBand, distanceToTargetBand } from "../planner.js";
 import {
@@ -66,7 +68,8 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
   }
 ): Promise<LendSimulationSynthesisResult | undefined> {
   const addQuoteBucketIndexes = resolveAddQuoteBucketIndexes(config);
-  if (addQuoteBucketIndexes.length === 0) {
+  const removeQuoteBucketIndexes = resolveRemoveQuoteBucketIndexes(config);
+  if (addQuoteBucketIndexes.length === 0 && removeQuoteBucketIndexes.length === 0) {
     return undefined;
   }
 
@@ -77,6 +80,7 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
   }
   const lookaheadUpdates = readState.immediatePrediction.secondsUntilNextRateUpdate > 0 ? 2 : 1;
   const minimumAmount = resolveMinimumQuoteActionAmount(config);
+  const minimumManagedImprovementBps = config.minimumManagedImprovementBps ?? 0;
   const heuristicSeedCandidate = synthesizeAjnaLendCandidate(readState.rateState, config, {
     quoteTokenScale: readState.quoteTokenScale,
     nowTimestamp: readState.rateState.nowTimestamp,
@@ -116,7 +120,9 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
           {
             needsQuoteState: true,
             needsCollateralState: false,
-            lenderQuoteBucketIndexes: addQuoteBucketIndexes
+            lenderQuoteBucketIndexes: Array.from(
+              new Set([...addQuoteBucketIndexes, ...removeQuoteBucketIndexes])
+            )
           }
         ));
 
@@ -245,10 +251,9 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
       const baselineTerminalDistance = baselinePath.terminalDistanceToTargetBps;
       const prefersHigherTerminalRate = baselinePrediction.predictedNextRateBps < targetBand.minRateBps;
       const allowRemoveQuotePath =
+        config.enableManagedInventoryUpwardControl === true &&
         prefersHigherTerminalRate &&
-        lookaheadUpdates > 1 &&
-        (readState.loansState?.noOfLoans ?? 0n) > 1n &&
-        !hasUninitializedAjnaEmaState(readState.rateState);
+        lookaheadUpdates > 1;
 
       async function evaluateAction(
         action: SimulatedLendAction
@@ -279,15 +284,20 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
             terminalRateBps: candidatePath.terminalRateBps,
             terminalDistanceToTargetBps: candidatePath.terminalDistanceToTargetBps,
             improvesConvergence:
-              lookaheadUpdates > 1
-                ? candidatePath.terminalDistanceToTargetBps < baselineTerminalDistance
-                : predictionChanged(baselinePredictionState, {
-                    predictedOutcome,
-                    predictedNextRateWad: predictedRateWadAfterNextUpdate,
-                    predictedNextRateBps: predictedRateBpsAfterNextUpdate,
-                    secondsUntilNextRateUpdate: 0
-                  }) &&
-                  predictedDistance < baselineNextDistance
+              (
+                lookaheadUpdates > 1
+                  ? candidatePath.terminalDistanceToTargetBps < baselineTerminalDistance
+                  : predictionChanged(baselinePredictionState, {
+                      predictedOutcome,
+                      predictedNextRateWad: predictedRateWadAfterNextUpdate,
+                      predictedNextRateBps: predictedRateBpsAfterNextUpdate,
+                      secondsUntilNextRateUpdate: 0
+                    }) &&
+                    predictedDistance < baselineNextDistance
+              ) &&
+              (action.type !== "REMOVE_QUOTE" ||
+                baselineTerminalDistance - candidatePath.terminalDistanceToTargetBps >=
+                  minimumManagedImprovementBps)
           };
         } catch {
           return {
@@ -346,7 +356,7 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
           ];
           const searchAmounts = compressCapitalAwareSearchAmounts(
             buildMultiCycleLendSearchAmounts(minimumAmount, options.maximumAmount, anchorAmounts),
-            anchorAmounts,
+            options.preferredSeedAmounts,
             EXACT_MULTI_CYCLE_LEND_MAX_QUOTE_SAMPLES,
             EXACT_MULTI_CYCLE_LEND_LOW_END_QUOTE_SAMPLES
           );
@@ -478,7 +488,10 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
         for (const lenderBucketState of effectiveAccountState.lenderBucketStates ?? []) {
           const selected = await selectBestActionAmount({
             maximumAmount: lenderBucketState.maxWithdrawableQuoteAmount,
-            preferredSeedAmounts: [],
+            preferredSeedAmounts: buildHighEndExposureFractionAnchorAmounts(
+              lenderBucketState.maxWithdrawableQuoteAmount,
+              minimumAmount
+            ),
             evaluate: (quoteTokenAmount) =>
               evaluateAction({
                 type: "REMOVE_QUOTE",

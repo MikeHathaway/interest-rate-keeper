@@ -383,6 +383,33 @@ describe("planCycle", () => {
     expect(plan.reason).toMatch(/different sender than the live execution signer/i);
   });
 
+  it("surfaces a managed-inventory refusal reason when curator mode is enabled but no withdrawable quote inventory is available", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 900,
+        predictedNextOutcome: "NO_CHANGE",
+        predictedNextRateBps: 900,
+        metadata: {
+          managedInventoryUpwardControlEnabled: true,
+          managedInventoryUpwardEligible: false,
+          managedInventoryIneligibilityReason:
+            "no withdrawable quote inventory was found in the configured or derived managed buckets"
+        }
+      }),
+      {
+        ...baseConfig,
+        targetRateBps: 1000,
+        toleranceMode: "absolute",
+        toleranceBps: 25,
+        enableManagedInventoryUpwardControl: true
+      }
+    );
+
+    expect(plan.intent).toBe("NO_OP");
+    expect(plan.reason).toMatch(/managed inventory upward control is enabled but unavailable/i);
+    expect(plan.reason).toMatch(/no withdrawable quote inventory/i);
+  });
+
   it("can choose a candidate using planningRateBps instead of only the next update rate", () => {
     const plan = planCycle(
       snapshot({

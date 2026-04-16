@@ -294,6 +294,26 @@ export function resolveKeeperConfig(input: unknown): KeeperConfig {
     );
   }
 
+  if (record.removeQuoteBucketIndex !== undefined) {
+    config.removeQuoteBucketIndex = parseNonNegativeInteger(
+      record.removeQuoteBucketIndex,
+      "removeQuoteBucketIndex"
+    );
+  }
+
+  if (record.removeQuoteBucketIndexes !== undefined) {
+    const parsedBucketIndexes = parseIntegerArray(
+      record.removeQuoteBucketIndexes,
+      "removeQuoteBucketIndexes"
+    );
+    if (parsedBucketIndexes.length === 0) {
+      throw new Error("removeQuoteBucketIndexes must not be empty");
+    }
+    config.removeQuoteBucketIndexes = Array.from(new Set(parsedBucketIndexes)).sort(
+      (left, right) => left - right
+    );
+  }
+
   if (record.addQuoteExpirySeconds !== undefined) {
     config.addQuoteExpirySeconds = parsePositiveInteger(
       record.addQuoteExpirySeconds,
@@ -312,6 +332,27 @@ export function resolveKeeperConfig(input: unknown): KeeperConfig {
     config.enableSimulationBackedBorrowSynthesis = parseBoolean(
       record.enableSimulationBackedBorrowSynthesis,
       "enableSimulationBackedBorrowSynthesis"
+    );
+  }
+
+  if (record.enableManagedInventoryUpwardControl !== undefined) {
+    config.enableManagedInventoryUpwardControl = parseBoolean(
+      record.enableManagedInventoryUpwardControl,
+      "enableManagedInventoryUpwardControl"
+    );
+  }
+
+  if (record.enableManagedDualUpwardControl !== undefined) {
+    config.enableManagedDualUpwardControl = parseBoolean(
+      record.enableManagedDualUpwardControl,
+      "enableManagedDualUpwardControl"
+    );
+  }
+
+  if (record.minimumManagedImprovementBps !== undefined) {
+    config.minimumManagedImprovementBps = parseNonNegativeInteger(
+      record.minimumManagedImprovementBps,
+      "minimumManagedImprovementBps"
     );
   }
 

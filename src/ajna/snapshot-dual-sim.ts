@@ -31,10 +31,12 @@ import {
 } from "./snapshot-sim-helpers.js";
 import { hasUninitializedAjnaEmaState, type AjnaRatePrediction } from "./rate-state.js";
 import {
+  resolvePoolAwareBorrowLimitIndexes,
   compareCandidatePreference,
   resolveProtocolApproximationBucketIndexes,
   resolveDrawDebtCollateralAmounts,
   resolveDrawDebtLimitIndexes,
+  resolveRemoveQuoteBucketIndexes,
   resolveProtocolShapedPreWindowDualBucketIndexes,
   searchCoarseToFineDualSpace
 } from "./search-space.js";
@@ -54,6 +56,7 @@ const EXACT_DUAL_MAX_BRANCHES = 6;
 const EXACT_DUAL_MAX_QUOTE_SAMPLES = 6;
 const EXACT_DUAL_MAX_BORROW_SAMPLES = 6;
 const EXACT_DUAL_MAX_PROMISING_BASINS = 3;
+const EXACT_DUAL_MAX_LIMIT_INDEXES = 8;
 
 export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
   readState: AjnaPoolStateRead,
@@ -68,7 +71,8 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
   }
 ): Promise<PlanCandidate | undefined> {
   const addQuoteBucketIndexes = resolveProtocolShapedPreWindowDualBucketIndexes(readState, config);
-  if (addQuoteBucketIndexes.length === 0) {
+  const removeQuoteBucketIndexes = resolveRemoveQuoteBucketIndexes(config);
+  if (addQuoteBucketIndexes.length === 0 && removeQuoteBucketIndexes.length === 0) {
     return undefined;
   }
 
@@ -114,16 +118,17 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
   const lookaheadUpdates =
     heuristicAnchorBorrowCandidate?.planningLookaheadUpdates ??
     resolveBorrowSimulationLookaheadUpdates(config);
+  const minimumManagedImprovementBps = config.minimumManagedImprovementBps ?? 0;
   const protocolShapedDualSearch =
     lookaheadUpdates > 1 &&
     readState.immediatePrediction.secondsUntilNextRateUpdate > 0 &&
     (readState.loansState?.noOfLoans ?? 0n) > 1n;
   const allowRemoveQuoteDualSearch =
+    config.enableManagedDualUpwardControl === true &&
     protocolShapedDualSearch &&
     baselinePrediction.predictedNextRateBps < targetBand.minRateBps &&
     !hasUninitializedAjnaEmaState(readState.rateState) &&
     borrowerAddress.toLowerCase() === simulationSenderAddress.toLowerCase();
-  const limitIndexes = resolveDrawDebtLimitIndexes(config);
   const resolvedDualBucketIndexes = Array.from(
     new Set(
       [
@@ -133,15 +138,6 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
       ].filter((bucketIndex): bucketIndex is number => bucketIndex !== undefined)
     )
   );
-  const protocolApproximationBucketIndexes = protocolShapedDualSearch
-    ? resolveProtocolApproximationBucketIndexes(readState, config, {
-        borrowLimitIndexes: limitIndexes,
-        addQuoteBucketIndexes: resolvedDualBucketIndexes
-      })
-    : resolvedDualBucketIndexes;
-  const exactDualBucketIndexes = protocolShapedDualSearch
-    ? resolvedDualBucketIndexes
-    : resolvedDualBucketIndexes.slice(0, EXACT_DUAL_MAX_BUCKETS);
   const minimumQuoteAmount = resolveMinimumQuoteActionAmount(config);
   const minimumBorrowAmount = resolveMinimumBorrowActionAmount(config);
   const maxBorrowAmount = config.maxBorrowExposure;
@@ -157,6 +153,39 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
     },
     simulationSenderAddress,
     async ({ publicClient, testClient, walletClient }) => {
+      const limitIndexSeedIndexes = Array.from(
+        new Set([
+          ...resolveDrawDebtLimitIndexes(config),
+          anchorDrawDebtStep?.limitIndex,
+          anchorDualDrawDebtStep?.limitIndex,
+          ...singleActionDrawDebtSteps.map((step) => step.limitIndex),
+          ...resolvedDualBucketIndexes,
+          readState.meaningfulDepositThresholdFenwickIndex
+        ].filter((limitIndex): limitIndex is number => limitIndex !== undefined))
+      );
+      const limitIndexes = (
+        await resolvePoolAwareBorrowLimitIndexes(
+          publicClient,
+          options.poolAddress,
+          readState.blockNumber,
+          config,
+          {
+            seedIndexes: limitIndexSeedIndexes
+          }
+        )
+      ).slice(0, EXACT_DUAL_MAX_LIMIT_INDEXES);
+      if (limitIndexes.length === 0) {
+        return undefined;
+      }
+      const protocolApproximationBucketIndexes = protocolShapedDualSearch
+        ? resolveProtocolApproximationBucketIndexes(readState, config, {
+            borrowLimitIndexes: limitIndexes,
+            addQuoteBucketIndexes: resolvedDualBucketIndexes
+          })
+        : resolvedDualBucketIndexes;
+      const exactDualBucketIndexes = protocolShapedDualSearch
+        ? resolvedDualBucketIndexes
+        : resolvedDualBucketIndexes.slice(0, EXACT_DUAL_MAX_BUCKETS);
       const effectiveAccountState =
         options.accountState ??
         (await readSimulationAccountState(
@@ -167,7 +196,9 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
           {
             needsQuoteState: true,
             needsCollateralState: true,
-            lenderQuoteBucketIndexes: addQuoteBucketIndexes
+            lenderQuoteBucketIndexes: Array.from(
+              new Set([...addQuoteBucketIndexes, ...removeQuoteBucketIndexes])
+            )
           }
         ));
 
@@ -176,7 +207,8 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
         effectiveAccountState.quoteTokenBalance ?? 0n,
         effectiveAccountState.quoteTokenAllowance ?? 0n
       );
-      if (minimumQuoteAmount > maxAvailableQuote) {
+      const canSimulateAddQuote = minimumQuoteAmount <= maxAvailableQuote;
+      if (!canSimulateAddQuote && !allowRemoveQuoteDualSearch) {
         return undefined;
       }
       const maxAvailableCollateral = smallestBigInt(
@@ -193,9 +225,7 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
         ? (effectiveAccountState.lenderBucketStates ?? [])
             .filter(
               (state) =>
-                state.maxWithdrawableQuoteAmount >= minimumQuoteAmount &&
-                (readState.meaningfulDepositThresholdFenwickIndex === undefined ||
-                  state.bucketIndex <= readState.meaningfulDepositThresholdFenwickIndex)
+                state.maxWithdrawableQuoteAmount >= minimumQuoteAmount
             )
             .sort((left, right) => {
               const thresholdIndex = readState.meaningfulDepositThresholdFenwickIndex;
@@ -441,9 +471,36 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
           amount: step.amount
         }))
       ];
-      const dualBranches: ProtocolShapedDualBranch[] = protocolShapedDualSearch
-        ? rankProtocolShapedDualBranches(readState, config, {
-            branches: exactDualBucketIndexes.flatMap((addQuoteBucketIndex) =>
+      const dualBranches: ProtocolShapedDualBranch[] = !canSimulateAddQuote
+        ? []
+        : protocolShapedDualSearch
+          ? rankProtocolShapedDualBranches(readState, config, {
+              branches: exactDualBucketIndexes.flatMap((addQuoteBucketIndex) =>
+                limitIndexes.flatMap((limitIndex) =>
+                  candidateCollateralAmounts.map((collateralAmount) => ({
+                    addQuoteBucketIndex,
+                    limitIndex,
+                    collateralAmount
+                  }))
+                )
+              ),
+              minimumQuoteAmount,
+              maximumQuoteAmount: maxAvailableQuote,
+              minimumBorrowAmount,
+              maximumBorrowAmount: maxBorrowAmount,
+              quoteAnchorSteps,
+              borrowAnchorSteps,
+              ...(anchorDrawDebtStep === undefined
+                ? {}
+                : { anchorBorrowLimitIndex: anchorDrawDebtStep.limitIndex }),
+              ...(anchorDrawDebtStep?.collateralAmount === undefined
+                ? {}
+                : { anchorCollateralAmount: anchorDrawDebtStep.collateralAmount }),
+              ...(protocolApproximation === undefined
+                ? {}
+                : { approximation: protocolApproximation })
+            }).slice(0, EXACT_DUAL_MAX_BRANCHES)
+          : exactDualBucketIndexes.flatMap((addQuoteBucketIndex) =>
               limitIndexes.flatMap((limitIndex) =>
                 candidateCollateralAmounts.map((collateralAmount) => ({
                   addQuoteBucketIndex,
@@ -451,32 +508,7 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
                   collateralAmount
                 }))
               )
-            ),
-            minimumQuoteAmount,
-            maximumQuoteAmount: maxAvailableQuote,
-            minimumBorrowAmount,
-            maximumBorrowAmount: maxBorrowAmount,
-            quoteAnchorSteps,
-            borrowAnchorSteps,
-            ...(anchorDrawDebtStep === undefined
-              ? {}
-              : { anchorBorrowLimitIndex: anchorDrawDebtStep.limitIndex }),
-            ...(anchorDrawDebtStep?.collateralAmount === undefined
-              ? {}
-              : { anchorCollateralAmount: anchorDrawDebtStep.collateralAmount }),
-            ...(protocolApproximation === undefined
-              ? {}
-              : { approximation: protocolApproximation })
-          }).slice(0, EXACT_DUAL_MAX_BRANCHES)
-        : exactDualBucketIndexes.flatMap((addQuoteBucketIndex) =>
-            limitIndexes.flatMap((limitIndex) =>
-              candidateCollateralAmounts.map((collateralAmount) => ({
-                addQuoteBucketIndex,
-                limitIndex,
-                collateralAmount
-              }))
-            )
-          );
+            );
       let bestCandidate: PlanCandidate | undefined;
       interface DualSimulationEvaluation {
         candidatePath: {
@@ -725,6 +757,8 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
                       candidatePath.terminalDistanceToTargetBps <= comparisonTerminalDistance) ||
                       (candidatePath.terminalDistanceToTargetBps < comparisonTerminalDistance &&
                         nextDistance <= comparisonNextDistance)) &&
+                    comparisonTerminalDistance - candidatePath.terminalDistanceToTargetBps >=
+                      minimumManagedImprovementBps &&
                     (lookaheadUpdates > 1 ||
                       nextDistance < comparisonNextDistance ||
                       predictionChanged(baselinePrediction, candidatePrediction));

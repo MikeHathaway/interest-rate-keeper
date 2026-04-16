@@ -9,7 +9,7 @@ This repo currently contains:
 - CLI and KeeperHub entrypoints
 - unit tests plus a Base-fork integration test that uses the deployed Base Ajna ERC20 factory
 
-The detailed product and engineering decisions are in [DESIGN.md](./DESIGN.md). Deferred work is tracked in [TODOS.md](./TODOS.md).
+The detailed product and engineering decisions are in [DESIGN.md](./DESIGN.md). The used-pool upward research boundary is summarized in [docs/used-pool-upward-control-summary.md](./docs/used-pool-upward-control-summary.md), and the managed inventory-backed operating model is in [docs/curator-mode.md](./docs/curator-mode.md). Deferred work is tracked in [TODOS.md](./TODOS.md).
 
 An architecture diagram for the keeper runtime and module layout lives in [DESIGN.md#architecture](./DESIGN.md#architecture).
 
@@ -114,6 +114,7 @@ Practical reading:
 - upward convergence is supported primarily through multi-cycle `BORROW`, not same-cycle borrower steering
 - exact block-pinned real used-pool upward archetypes now exist in the experimental suite, and they still do not surface a generic exact upward simulation candidate
 - even when those pinned real used-pool states are paired with recent real lender addresses from quote-token transfers into the pool, the generic exact paired `LEND_AND_BORROW` search still does not surface an upward candidate
+- the only currently credible used-pool upward path is managed inventory-backed control; see [docs/curator-mode.md](./docs/curator-mode.md)
 - abandoned-pool reset/recovery is modeled correctly, but not yet proven as a distinct end-to-end product mode
 
 ## Terms

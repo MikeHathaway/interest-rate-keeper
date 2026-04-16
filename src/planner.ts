@@ -102,6 +102,20 @@ function snapshotMetadataBoolean(snapshot: PoolSnapshot, key: string): boolean |
   return typeof value === "boolean" ? value : undefined;
 }
 
+function snapshotMetadataNumber(snapshot: PoolSnapshot, key: string): number | undefined {
+  const value = snapshot.metadata?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function snapshotMetadataString(snapshot: PoolSnapshot, key: string): string | undefined {
+  const value = snapshot.metadata?.[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function candidateUsesRemoveQuote(candidate: PlanCandidate): boolean {
+  return candidate.minimumExecutionSteps.some((step) => step.type === "REMOVE_QUOTE");
+}
+
 function candidateExecutionAllowed(candidate: PlanCandidate, config: KeeperConfig): boolean {
   if (candidate.executionMode === "unsupported") {
     return false;
@@ -182,6 +196,33 @@ function candidateImprovesConvergence(
   return candidateDistance < baselineDistance;
 }
 
+function candidateClearsManagedImprovementThreshold(
+  candidate: PlanCandidate,
+  snapshot: PoolSnapshot,
+  band: TargetBand,
+  config: KeeperConfig
+): boolean {
+  if (!candidateUsesRemoveQuote(candidate)) {
+    return true;
+  }
+
+  const minimumManagedImprovementBps = config.minimumManagedImprovementBps ?? 0;
+  if (minimumManagedImprovementBps <= 0) {
+    return true;
+  }
+
+  const baselineDistance = distanceToTargetBand(
+    snapshot.planningRateBps ?? snapshot.predictedNextRateBps,
+    band
+  );
+  const candidateDistance = distanceToTargetBand(
+    candidate.planningRateBps ?? candidate.predictedRateBpsAfterNextUpdate,
+    band
+  );
+
+  return baselineDistance - candidateDistance >= minimumManagedImprovementBps;
+}
+
 function naturalConvergenceReason(snapshot: PoolSnapshot): string {
   if (snapshot.planningLookaheadUpdates && snapshot.planningLookaheadUpdates > 1) {
     return rateUpdateIsDue(snapshot)
@@ -222,6 +263,44 @@ function unsupportedCandidateReason(snapshot: PoolSnapshot): string {
   }
 
   return "only unsupported candidates improved convergence, and none can be executed safely in the current runtime";
+}
+
+function managedInventoryNoCandidateReason(
+  snapshot: PoolSnapshot,
+  band: TargetBand
+): string | undefined {
+  const projectedRate = snapshot.planningRateBps ?? snapshot.predictedNextRateBps;
+  if (projectedRate >= band.minRateBps) {
+    return undefined;
+  }
+
+  if (snapshotMetadataBoolean(snapshot, "managedInventoryUpwardControlEnabled") !== true) {
+    return undefined;
+  }
+
+  const eligible = snapshotMetadataBoolean(snapshot, "managedInventoryUpwardEligible");
+  const ineligibilityReason = snapshotMetadataString(
+    snapshot,
+    "managedInventoryIneligibilityReason"
+  );
+  if (eligible === false) {
+    return ineligibilityReason === undefined
+      ? "managed inventory upward control is enabled but unavailable in the current state"
+      : `managed inventory upward control is enabled but unavailable because ${ineligibilityReason}`;
+  }
+
+  const removeCandidateCount =
+    snapshotMetadataNumber(snapshot, "managedRemoveQuoteCandidateCount") ?? 0;
+  const dualEnabled = snapshotMetadataBoolean(snapshot, "managedDualUpwardControlEnabled");
+  const dualCandidateCount = snapshotMetadataNumber(snapshot, "managedDualCandidateCount") ?? 0;
+
+  if (eligible === true && removeCandidateCount + dualCandidateCount === 0) {
+    return dualEnabled === true
+      ? "managed inventory upward control was eligible, but no exact managed candidate beat the passive path"
+      : "managed remove-quote control was eligible, but no exact managed candidate beat the passive path";
+  }
+
+  return undefined;
 }
 
 function chooseBestCandidate(
@@ -303,8 +382,10 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
     };
   }
 
-  const viableCandidates = snapshot.candidates.filter((candidate) =>
-    candidateImprovesConvergence(candidate, snapshot, targetBand)
+  const viableCandidates = snapshot.candidates.filter(
+    (candidate) =>
+      candidateImprovesConvergence(candidate, snapshot, targetBand) &&
+      candidateClearsManagedImprovementThreshold(candidate, snapshot, targetBand, config)
   );
   const executableCandidates = viableCandidates.filter((candidate) =>
     candidateExecutionAllowed(candidate, config)
@@ -423,7 +504,9 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
 
   return {
     intent: "NO_OP",
-    reason: "no candidate changes the next-rate outcome in a way that improves convergence",
+    reason:
+      managedInventoryNoCandidateReason(snapshot, targetBand) ??
+      "no candidate changes the next-rate outcome in a way that improves convergence",
     targetBand,
     requiredSteps: [],
     predictedOutcomeAfterPlan: snapshot.predictedNextOutcome,

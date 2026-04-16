@@ -25,6 +25,8 @@ import { hasUninitializedAjnaEmaState, toRateBps } from "./rate-state.js";
 import { resolveAjnaSignerAddress } from "./runtime.js";
 import {
   resolveAddQuoteBucketIndexes,
+  resolveRemoveQuoteBucketIndexes,
+  resolveManagedInventoryBucketIndexes,
   resolveDrawDebtCollateralAmounts,
   resolveDrawDebtLimitIndexes,
   resolvePreWindowLendBucketIndexes,
@@ -34,6 +36,7 @@ import {
 import { buildSimulationCacheKey, setBoundedCacheEntry } from "./snapshot-cache.js";
 import { readAjnaPoolState, readSimulationAccountState } from "./snapshot-read.js";
 import { type SnapshotSource } from "../snapshot.js";
+import { buildTargetBand } from "../planner.js";
 import {
   type HexAddress,
   type KeeperConfig,
@@ -58,6 +61,8 @@ export {
   resolveSimulationBorrowCollateralAmounts,
   resolveSimulationBorrowLimitIndexes,
   resolveBorrowSimulationLookaheadAttempts,
+  resolveRemoveQuoteBucketIndexes,
+  resolveManagedInventoryBucketIndexes,
   resolveProtocolApproximationBucketIndexes,
   resolveTimedBorrowSimulationLookaheadAttempts,
   resolveProtocolShapedPreWindowDualBucketIndexes,
@@ -109,11 +114,15 @@ function buildSimulationCandidateCacheKey(
     config.minExecutableCollateralAmount,
     config.addQuoteExpirySeconds ?? DEFAULT_ADD_QUOTE_EXPIRY_SECONDS,
     resolveAddQuoteBucketIndexes(config).join(","),
+    resolveRemoveQuoteBucketIndexes(config).join(","),
     resolveDrawDebtLimitIndexes(config).join(","),
     resolveDrawDebtCollateralAmounts(config)
       .map((value) => value.toString())
       .join(","),
     config.borrowSimulationLookaheadUpdates ?? 1,
+    config.enableManagedInventoryUpwardControl ? "managed-upward" : "no-managed-upward",
+    config.enableManagedDualUpwardControl ? "managed-dual" : "no-managed-dual",
+    config.minimumManagedImprovementBps ?? 0,
     accountState.simulationSenderAddress,
     accountState.borrowerAddress,
     accountState.quoteTokenBalance,
@@ -248,6 +257,140 @@ function serializeCandidateForValidation(candidate: PlanCandidate): string {
   ].join(":");
 }
 
+function candidateHasStep(candidate: PlanCandidate, stepType: string): boolean {
+  return candidate.minimumExecutionSteps.some((step) => step.type === stepType);
+}
+
+function deriveManagedInventoryDiagnostics(
+  readState: AjnaPoolStateRead,
+  config: KeeperConfig,
+  simulationPrerequisitesAvailable: boolean,
+  accountState?: SimulationAccountState
+): {
+  managedInventoryUpwardControlEnabled?: boolean;
+  managedDualUpwardControlEnabled?: boolean;
+  managedUpwardControlNeeded?: boolean;
+  managedInventoryUpwardEligible?: boolean;
+  managedInventoryIneligibilityReason?: string;
+  managedDualUpwardEligible?: boolean;
+  managedDualIneligibilityReason?: string;
+  managedInventoryBucketCount?: number;
+  managedConfiguredBucketCount?: number;
+  managedMaxWithdrawableQuoteAmount?: string;
+  managedTotalWithdrawableQuoteAmount?: string;
+} {
+  const managedInventoryUpwardControlEnabled =
+    config.enableManagedInventoryUpwardControl === true;
+  const managedDualUpwardControlEnabled = config.enableManagedDualUpwardControl === true;
+  if (!managedInventoryUpwardControlEnabled && !managedDualUpwardControlEnabled) {
+    return {};
+  }
+
+  const targetBand = buildTargetBand(config);
+  const managedUpwardControlNeeded =
+    readState.prediction.predictedNextRateBps < targetBand.minRateBps;
+  const configuredBucketCount = resolveRemoveQuoteBucketIndexes(config).length;
+  const eligibleLenderBucketStates = (accountState?.lenderBucketStates ?? []).filter(
+    (bucketState) => bucketState.maxWithdrawableQuoteAmount > 0n
+  );
+  const totalWithdrawableQuoteAmount = eligibleLenderBucketStates.reduce(
+    (total, bucketState) => total + bucketState.maxWithdrawableQuoteAmount,
+    0n
+  );
+  const maxWithdrawableQuoteAmount = eligibleLenderBucketStates.reduce(
+    (largest, bucketState) =>
+      bucketState.maxWithdrawableQuoteAmount > largest
+        ? bucketState.maxWithdrawableQuoteAmount
+        : largest,
+    0n
+  );
+  const preWindowState = readState.immediatePrediction.secondsUntilNextRateUpdate > 0;
+  const usedPoolLike =
+    (readState.loansState?.noOfLoans ?? 0n) > 1n &&
+    !hasUninitializedAjnaEmaState(readState.rateState);
+  const sameAccountManagedBorrower =
+    accountState === undefined
+      ? undefined
+      : accountState.borrowerAddress.toLowerCase() ===
+        accountState.simulationSenderAddress.toLowerCase();
+
+  let managedInventoryUpwardEligible = managedInventoryUpwardControlEnabled;
+  let managedInventoryIneligibilityReason: string | undefined;
+  if (managedInventoryUpwardControlEnabled) {
+    if (!simulationPrerequisitesAvailable) {
+      managedInventoryUpwardEligible = false;
+      managedInventoryIneligibilityReason =
+        "exact managed inventory control requires a resolvable simulation sender/private key";
+    } else if (!managedUpwardControlNeeded) {
+      managedInventoryUpwardEligible = false;
+      managedInventoryIneligibilityReason =
+        "the current target does not require upward steering";
+    } else if (!preWindowState) {
+      managedInventoryUpwardEligible = false;
+      managedInventoryIneligibilityReason =
+        "managed inventory upward control currently only runs before the next eligible rate update";
+    } else if (!usedPoolLike) {
+      managedInventoryUpwardEligible = false;
+      managedInventoryIneligibilityReason =
+        "managed inventory upward control is only modeled on EMA-initialized used pools";
+    } else if (totalWithdrawableQuoteAmount <= 0n) {
+      managedInventoryUpwardEligible = false;
+      managedInventoryIneligibilityReason =
+        "no withdrawable quote inventory was found in the configured or derived managed buckets";
+    }
+  }
+
+  let managedDualUpwardEligible = managedDualUpwardControlEnabled;
+  let managedDualIneligibilityReason: string | undefined;
+  if (managedDualUpwardControlEnabled) {
+    if (!simulationPrerequisitesAvailable) {
+      managedDualUpwardEligible = false;
+      managedDualIneligibilityReason =
+        "exact managed dual control requires a resolvable simulation sender/private key";
+    } else if (!managedUpwardControlNeeded) {
+      managedDualUpwardEligible = false;
+      managedDualIneligibilityReason =
+        "the current target does not require upward steering";
+    } else if (!preWindowState) {
+      managedDualUpwardEligible = false;
+      managedDualIneligibilityReason =
+        "managed dual upward control currently only runs before the next eligible rate update";
+    } else if (!usedPoolLike) {
+      managedDualUpwardEligible = false;
+      managedDualIneligibilityReason =
+        "managed dual upward control is only modeled on EMA-initialized used pools";
+    } else if (totalWithdrawableQuoteAmount <= 0n) {
+      managedDualUpwardEligible = false;
+      managedDualIneligibilityReason =
+        "no withdrawable quote inventory was found in the configured or derived managed buckets";
+    } else if (sameAccountManagedBorrower === false) {
+      managedDualUpwardEligible = false;
+      managedDualIneligibilityReason =
+        "managed remove-quote plus draw-debt currently requires the lender and borrower to be the same live account";
+    }
+  }
+
+  return {
+    managedInventoryUpwardControlEnabled,
+    managedDualUpwardControlEnabled,
+    managedUpwardControlNeeded,
+    ...(managedInventoryUpwardControlEnabled
+      ? { managedInventoryUpwardEligible }
+      : {}),
+    ...(managedInventoryIneligibilityReason === undefined
+      ? {}
+      : { managedInventoryIneligibilityReason }),
+    ...(managedDualUpwardControlEnabled ? { managedDualUpwardEligible } : {}),
+    ...(managedDualIneligibilityReason === undefined
+      ? {}
+      : { managedDualIneligibilityReason }),
+    managedInventoryBucketCount: eligibleLenderBucketStates.length,
+    managedConfiguredBucketCount: configuredBucketCount,
+    managedMaxWithdrawableQuoteAmount: maxWithdrawableQuoteAmount.toString(),
+    managedTotalWithdrawableQuoteAmount: totalWithdrawableQuoteAmount.toString()
+  };
+}
+
 async function readManualCandidateBucketSignatures(
   publicClient: PublicClient,
   poolAddress: HexAddress,
@@ -363,6 +506,19 @@ function buildPoolSnapshot(
     simulationExecutionCompatibilityReason?: string;
     simulationSenderAddress?: HexAddress;
     liveSignerAddress?: HexAddress;
+    managedInventoryUpwardControlEnabled?: boolean;
+    managedDualUpwardControlEnabled?: boolean;
+    managedUpwardControlNeeded?: boolean;
+    managedInventoryUpwardEligible?: boolean;
+    managedInventoryIneligibilityReason?: string;
+    managedDualUpwardEligible?: boolean;
+    managedDualIneligibilityReason?: string;
+    managedInventoryBucketCount?: number;
+    managedConfiguredBucketCount?: number;
+    managedMaxWithdrawableQuoteAmount?: string;
+    managedTotalWithdrawableQuoteAmount?: string;
+    managedRemoveQuoteCandidateCount?: number;
+    managedDualCandidateCount?: number;
   }
 ): PoolSnapshot {
   return {
@@ -443,7 +599,65 @@ function buildPoolSnapshot(
         : { simulationSenderAddress: diagnostics.simulationSenderAddress }),
       ...(diagnostics?.liveSignerAddress === undefined
         ? {}
-        : { liveSignerAddress: diagnostics.liveSignerAddress })
+        : { liveSignerAddress: diagnostics.liveSignerAddress }),
+      ...(diagnostics?.managedInventoryUpwardControlEnabled === undefined
+        ? {}
+        : {
+            managedInventoryUpwardControlEnabled:
+              diagnostics.managedInventoryUpwardControlEnabled
+          }),
+      ...(diagnostics?.managedDualUpwardControlEnabled === undefined
+        ? {}
+        : {
+            managedDualUpwardControlEnabled: diagnostics.managedDualUpwardControlEnabled
+          }),
+      ...(diagnostics?.managedUpwardControlNeeded === undefined
+        ? {}
+        : { managedUpwardControlNeeded: diagnostics.managedUpwardControlNeeded }),
+      ...(diagnostics?.managedInventoryUpwardEligible === undefined
+        ? {}
+        : {
+            managedInventoryUpwardEligible: diagnostics.managedInventoryUpwardEligible
+          }),
+      ...(diagnostics?.managedInventoryIneligibilityReason === undefined
+        ? {}
+        : {
+            managedInventoryIneligibilityReason:
+              diagnostics.managedInventoryIneligibilityReason
+          }),
+      ...(diagnostics?.managedDualUpwardEligible === undefined
+        ? {}
+        : { managedDualUpwardEligible: diagnostics.managedDualUpwardEligible }),
+      ...(diagnostics?.managedDualIneligibilityReason === undefined
+        ? {}
+        : { managedDualIneligibilityReason: diagnostics.managedDualIneligibilityReason }),
+      ...(diagnostics?.managedInventoryBucketCount === undefined
+        ? {}
+        : { managedInventoryBucketCount: diagnostics.managedInventoryBucketCount }),
+      ...(diagnostics?.managedConfiguredBucketCount === undefined
+        ? {}
+        : { managedConfiguredBucketCount: diagnostics.managedConfiguredBucketCount }),
+      ...(diagnostics?.managedMaxWithdrawableQuoteAmount === undefined
+        ? {}
+        : {
+            managedMaxWithdrawableQuoteAmount:
+              diagnostics.managedMaxWithdrawableQuoteAmount
+          }),
+      ...(diagnostics?.managedTotalWithdrawableQuoteAmount === undefined
+        ? {}
+        : {
+            managedTotalWithdrawableQuoteAmount:
+              diagnostics.managedTotalWithdrawableQuoteAmount
+          }),
+      ...(diagnostics?.managedRemoveQuoteCandidateCount === undefined
+        ? {}
+        : {
+            managedRemoveQuoteCandidateCount:
+              diagnostics.managedRemoveQuoteCandidateCount
+          }),
+      ...(diagnostics?.managedDualCandidateCount === undefined
+        ? {}
+        : { managedDualCandidateCount: diagnostics.managedDualCandidateCount })
     }
   };
 }
@@ -515,12 +729,36 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
       readState,
       baseSynthesisConfig
     );
+    const derivedManagedInventoryBucketIndexes = resolveManagedInventoryBucketIndexes(
+      readState,
+      baseSynthesisConfig
+    );
     const synthesisConfig: KeeperConfig =
-      derivedPreWindowBucketIndexes.length === 0
+      derivedPreWindowBucketIndexes.length === 0 &&
+      derivedManagedInventoryBucketIndexes.length === 0
         ? baseSynthesisConfig
         : {
             ...baseSynthesisConfig,
-            addQuoteBucketIndexes: derivedPreWindowBucketIndexes
+            ...(derivedPreWindowBucketIndexes.length === 0
+              ? {}
+              : {
+                  addQuoteBucketIndexes: Array.from(
+                    new Set([
+                      ...resolveAddQuoteBucketIndexes(baseSynthesisConfig),
+                      ...derivedPreWindowBucketIndexes
+                    ])
+                  )
+                }),
+            ...(derivedManagedInventoryBucketIndexes.length === 0
+              ? {}
+              : {
+                  removeQuoteBucketIndexes: Array.from(
+                    new Set([
+                      ...resolveRemoveQuoteBucketIndexes(baseSynthesisConfig),
+                      ...derivedManagedInventoryBucketIndexes
+                    ])
+                  )
+                })
           };
     const snapshotFingerprint = buildSnapshotFingerprint(
       this.poolAddress,
@@ -532,6 +770,11 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
     let autoCandidateSource: "simulation" | "heuristic" | undefined;
     let planningRateBps: number | undefined;
     let planningLookaheadUpdates: number | undefined;
+    let managedDiagnostics = deriveManagedInventoryDiagnostics(
+      readState,
+      synthesisConfig,
+      simulationPrerequisitesAvailable
+    );
 
     if (
       synthesisPolicy.simulationLend ||
@@ -548,13 +791,25 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
           needsCollateralState: synthesisPolicy.simulationBorrow,
           ...(synthesisPolicy.simulationLend
             ? {
-                lenderQuoteBucketIndexes: resolveProtocolShapedPreWindowDualBucketIndexes(
-                  readState,
-                  synthesisConfig
+                lenderQuoteBucketIndexes: Array.from(
+                  new Set([
+                    ...resolveAddQuoteBucketIndexes(synthesisConfig),
+                    ...resolveRemoveQuoteBucketIndexes(synthesisConfig),
+                    ...resolveProtocolShapedPreWindowDualBucketIndexes(
+                      readState,
+                      synthesisConfig
+                    )
+                  ])
                 )
               }
             : {})
         }
+      );
+      managedDiagnostics = deriveManagedInventoryDiagnostics(
+        readState,
+        synthesisConfig,
+        simulationPrerequisitesAvailable,
+        simulationAccountState
       );
       const simulationCacheKey = buildSimulationCandidateCacheKey(
         snapshotFingerprint,
@@ -733,6 +988,16 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
       readState,
       synthesisConfig.manualCandidates ?? []
     );
+    const managedRemoveQuoteCandidateCount = autoCandidates.filter(
+      (candidate) =>
+        candidateHasStep(candidate, "REMOVE_QUOTE") &&
+        !candidateHasStep(candidate, "DRAW_DEBT")
+    ).length;
+    const managedDualCandidateCount = autoCandidates.filter(
+      (candidate) =>
+        candidateHasStep(candidate, "REMOVE_QUOTE") &&
+        candidateHasStep(candidate, "DRAW_DEBT")
+    ).length;
 
     return buildPoolSnapshot(
       synthesisConfig.poolId,
@@ -772,7 +1037,10 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
             }),
         ...(simulationExecutionCompatibility.liveSignerAddress === undefined
           ? {}
-          : { liveSignerAddress: simulationExecutionCompatibility.liveSignerAddress })
+          : { liveSignerAddress: simulationExecutionCompatibility.liveSignerAddress }),
+        ...managedDiagnostics,
+        managedRemoveQuoteCandidateCount,
+        managedDualCandidateCount
       }
     );
   }

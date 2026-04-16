@@ -13,9 +13,14 @@ describe("resolveKeeperConfig", () => {
       rpcUrl: "https://base.example.invalid",
       addQuoteBucketIndex: 3000,
       addQuoteBucketIndexes: [2800, 3000, 3200],
+      removeQuoteBucketIndex: 2900,
+      removeQuoteBucketIndexes: [2800, 2900, 3000],
       addQuoteExpirySeconds: 7200,
       enableSimulationBackedLendSynthesis: true,
       enableSimulationBackedBorrowSynthesis: true,
+      enableManagedInventoryUpwardControl: true,
+      enableManagedDualUpwardControl: true,
+      minimumManagedImprovementBps: 15,
       simulationSenderAddress: "0x2222222222222222222222222222222222222222",
       drawDebtLimitIndex: 3100,
       drawDebtLimitIndexes: [2800, 3000, 3100],
@@ -39,9 +44,14 @@ describe("resolveKeeperConfig", () => {
     expect(config.rpcUrl).toBe("https://base.example.invalid");
     expect(config.addQuoteBucketIndex).toBe(3000);
     expect(config.addQuoteBucketIndexes).toEqual([2800, 3000, 3200]);
+    expect(config.removeQuoteBucketIndex).toBe(2900);
+    expect(config.removeQuoteBucketIndexes).toEqual([2800, 2900, 3000]);
     expect(config.addQuoteExpirySeconds).toBe(7200);
     expect(config.enableSimulationBackedLendSynthesis).toBe(true);
     expect(config.enableSimulationBackedBorrowSynthesis).toBe(true);
+    expect(config.enableManagedInventoryUpwardControl).toBe(true);
+    expect(config.enableManagedDualUpwardControl).toBe(true);
+    expect(config.minimumManagedImprovementBps).toBe(15);
     expect(config.simulationSenderAddress).toBe("0x2222222222222222222222222222222222222222");
     expect(config.drawDebtLimitIndex).toBe(3100);
     expect(config.drawDebtLimitIndexes).toEqual([2800, 3000, 3100]);

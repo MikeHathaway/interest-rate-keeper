@@ -143,9 +143,14 @@ export interface KeeperConfig {
   allowHeuristicExecution: boolean;
   addQuoteBucketIndex?: number;
   addQuoteBucketIndexes?: number[];
+  removeQuoteBucketIndex?: number;
+  removeQuoteBucketIndexes?: number[];
   addQuoteExpirySeconds?: number;
   enableSimulationBackedLendSynthesis?: boolean;
   enableSimulationBackedBorrowSynthesis?: boolean;
+  enableManagedInventoryUpwardControl?: boolean;
+  enableManagedDualUpwardControl?: boolean;
+  minimumManagedImprovementBps?: number;
   simulationSenderAddress?: HexAddress;
   drawDebtLimitIndex?: number;
   drawDebtLimitIndexes?: number[];

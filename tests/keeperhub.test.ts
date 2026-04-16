@@ -470,4 +470,41 @@ describe("keeperhub", () => {
     expect(formatted.planningRateBps).toBe(990);
     expect(formatted.planningLookaheadUpdates).toBe(2);
   });
+
+  it("marks inventory-backed plans in KeeperHub responses", () => {
+    const response = formatKeeperHubResponse({
+      dryRun: true,
+      status: "NO_OP",
+      reason: "managed remove-quote plan",
+      poolId: "base:pool",
+      chainId: 8453,
+      snapshotFingerprint: "snapshot",
+      transactionHashes: [],
+      executedSteps: [],
+      plan: {
+        intent: "LEND",
+        reason: "managed remove quote",
+        targetBand: {
+          minRateBps: 900,
+          maxRateBps: 1100
+        },
+        requiredSteps: [
+          {
+            type: "REMOVE_QUOTE",
+            amount: 100n,
+            bucketIndex: 3000
+          }
+        ],
+        predictedOutcomeAfterPlan: "STEP_UP",
+        predictedRateBpsAfterNextUpdate: 1000,
+        quoteTokenDelta: 100n,
+        additionalCollateralRequired: 0n,
+        netQuoteBorrowed: 100n,
+        operatorCapitalRequired: 0n,
+        operatorCapitalAtRisk: 0n
+      }
+    });
+
+    expect(response).toMatch(/"inventoryBacked":true/);
+  });
 });
