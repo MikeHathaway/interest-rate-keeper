@@ -31,6 +31,11 @@ import {
   type PoolSnapshot
 } from "../../src/index.js";
 import {
+  readSnapshotMetadataBigInt,
+  requireSnapshotMetadataBigInt,
+  requireSnapshotMetadataScalar
+} from "../../src/snapshot-metadata.js";
+import {
   AJNA_COLLATERALIZATION_FACTOR_WAD,
   TWELVE_HOURS_SECONDS,
   priceToFenwickIndex,
@@ -119,6 +124,94 @@ export function formatTokenAmount(amountWad: bigint): string {
 
 export function formatWeiAsEth(amountWei: bigint): string {
   return formatTokenAmount(amountWei);
+}
+
+export function distanceToTargetRateBps(rateBps: number, targetRateBps: number): number {
+  return Math.abs(rateBps - targetRateBps);
+}
+
+export async function withRevertedBranch<T>(
+  testClient: any,
+  runBranch: () => Promise<T>
+): Promise<T> {
+  const branchId = await testClient.snapshot();
+
+  try {
+    return await runBranch();
+  } finally {
+    await testClient.revert({ id: branchId });
+  }
+}
+
+export async function capturePassiveRateBranch<TPath extends { currentRateBps: number }>(
+  testClient: any,
+  targetRateBps: number,
+  runPath: () => Promise<TPath>
+): Promise<{
+  passivePath: TPath;
+  passiveDistanceToTargetBps: number;
+}> {
+  const passivePath = await withRevertedBranch(testClient, runPath);
+
+  return {
+    passivePath,
+    passiveDistanceToTargetBps: distanceToTargetRateBps(
+      passivePath.currentRateBps,
+      targetRateBps
+    )
+  };
+}
+
+export async function executeRateProbeBranch<TPath extends { currentRateBps: number }>(options: {
+  testClient: any;
+  targetRateBps: number;
+  observations: string[];
+  label: string;
+  runBranch: () => Promise<TPath>;
+  passivePath?: { currentRateBps: number };
+}): Promise<{
+  activePath?: TPath;
+  activeDistanceToTargetBps?: number;
+  error?: string;
+}> {
+  const { observations, passivePath, targetRateBps, testClient } = options;
+
+  return withRevertedBranch(testClient, async () => {
+    try {
+      const activePath = await options.runBranch();
+      const activeDistanceToTargetBps = distanceToTargetRateBps(
+        activePath.currentRateBps,
+        targetRateBps
+      );
+      observations.push(
+        [
+          options.label,
+          ...(passivePath === undefined ? [] : [`passive=${passivePath.currentRateBps}`]),
+          ...(passivePath === undefined
+            ? []
+            : [
+                `passiveDistance=${distanceToTargetRateBps(
+                  passivePath.currentRateBps,
+                  targetRateBps
+                )}`
+              ]),
+          `active=${activePath.currentRateBps}`,
+          `activeDistance=${activeDistanceToTargetBps}`
+        ].join(" ")
+      );
+
+      return {
+        activePath,
+        activeDistanceToTargetBps
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      observations.push(`${options.label} error=${message}`);
+      return {
+        error: message
+      };
+    }
+  });
 }
 
 export function repoRoot(): string {
@@ -393,8 +486,7 @@ export function buildRepresentativeBorrowAbortCandidate(
   config: KeeperConfig
 ): PlanCandidate {
   const collateralAmount =
-    BigInt(String((snapshot.metadata?.borrowerCollateralWad as string | number | undefined) ?? "0")) >
-    0n
+    (readSnapshotMetadataBigInt(snapshot, "borrowerCollateral") ?? 0n) > 0n
       ? 0n
       : 10n * 10n ** 18n;
 
@@ -706,14 +798,17 @@ export async function advanceAndApplyEligibleUpdatesDirect(
 
 export function requireSnapshotMetadataValue(
   snapshot: TestAjnaSnapshot,
-  key: string
+  key:
+    | "currentRateWad"
+    | "currentDebtWad"
+    | "debtEmaWad"
+    | "depositEmaWad"
+    | "debtColEmaWad"
+    | "lupt0DebtEmaWad"
+    | "lastInterestRateUpdateTimestamp"
+    | "quoteTokenScale"
 ): string | number {
-  const value = snapshot.metadata?.[key];
-  if (typeof value !== "string" && typeof value !== "number") {
-    throw new Error(`snapshot metadata is missing ${key}`);
-  }
-
-  return value;
+  return requireSnapshotMetadataScalar(snapshot, key);
 }
 
 export function extractAjnaRateState(snapshot: TestAjnaSnapshot, chainNow: number): AjnaRateState {
@@ -732,7 +827,7 @@ export function extractAjnaRateState(snapshot: TestAjnaSnapshot, chainNow: numbe
 }
 
 export function extractQuoteTokenScale(snapshot: TestAjnaSnapshot): bigint {
-  return BigInt(String(requireSnapshotMetadataValue(snapshot, "quoteTokenScale")));
+  return requireSnapshotMetadataBigInt(snapshot, "quoteTokenScale");
 }
 
 export function drawDebtIntoRateStateForTest(

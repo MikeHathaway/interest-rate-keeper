@@ -39,10 +39,12 @@ import {
   LOCAL_RPC_URL,
   approveToken,
   advanceAndApplyEligibleUpdates,
+  capturePassiveRateBranch,
   computeStepUpMargin,
   deployMockToken,
   deployPoolThroughFactory,
   drawDebtIntoRateStateForTest,
+  executeRateProbeBranch,
   extractAjnaRateState,
   mintToken,
   readCurrentRateInfo,
@@ -860,75 +862,74 @@ export function createBaseFactoryBorrowerPreWindowHelpers(
         }
 
         for (const lookaheadUpdates of EXPERIMENTAL_COMPLEX_PREWINDOW_BORROW_LOOKAHEAD_UPDATES) {
-          const passiveBranchId = await testClient.snapshot();
-          const passivePath = await advanceAndApplyEligibleUpdates(
-            account,
-            publicClient,
-            walletClient,
+          const { passivePath, passiveDistanceToTargetBps } = await capturePassiveRateBranch(
             testClient,
-            config,
-            lookaheadUpdates
+            targetRateBps,
+            () =>
+              advanceAndApplyEligibleUpdates(
+                account,
+                publicClient,
+                walletClient,
+                testClient,
+                config,
+                lookaheadUpdates
+              )
           );
-          await testClient.revert({ id: passiveBranchId });
 
           for (const limitIndex of EXPERIMENTAL_PREWINDOW_EXISTING_BORROWER_LIMIT_INDEXES) {
             for (const rawCollateralAmount of EXPERIMENTAL_PREWINDOW_EXISTING_BORROWER_COLLATERAL_AMOUNTS) {
               const collateralAmount = BigInt(rawCollateralAmount);
 
               for (const amount of EXPERIMENTAL_COMPLEX_PREWINDOW_BORROW_AMOUNTS_WAD) {
-                const branchId = await testClient.snapshot();
+                const probe = await executeRateProbeBranch({
+                  testClient,
+                  targetRateBps,
+                  observations,
+                  passivePath,
+                  label: `scenario=${scenarioIndex} target=${targetRateBps} updates=${lookaheadUpdates} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()}`,
+                  runBranch: async () => {
+                    const drawDebtHash = await walletClient.writeContract({
+                      account,
+                      chain: undefined,
+                      address: poolAddress,
+                      abi: ajnaPoolAbi,
+                      functionName: "drawDebt",
+                      args: [account.address, amount, BigInt(limitIndex), collateralAmount]
+                    });
+                    await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
 
-                try {
-                  const drawDebtHash = await walletClient.writeContract({
-                    account,
-                    chain: undefined,
-                    address: poolAddress,
-                    abi: ajnaPoolAbi,
-                    functionName: "drawDebt",
-                    args: [account.address, amount, BigInt(limitIndex), collateralAmount]
-                  });
-                  await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
-
-                  const activePath = await advanceAndApplyEligibleUpdates(
-                    account,
-                    publicClient,
-                    walletClient,
-                    testClient,
-                    config,
-                    lookaheadUpdates
-                  );
-
-                  observations.push(
-                    `scenario=${scenarioIndex} target=${targetRateBps} updates=${lookaheadUpdates} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()} rate=${activePath.currentRateBps}`
-                  );
-
-                  if (
-                    activePath.currentRateBps > passivePath.currentRateBps &&
-                    Math.abs(activePath.currentRateBps - targetRateBps) <
-                      Math.abs(passivePath.currentRateBps - targetRateBps)
-                  ) {
-                    return {
-                      observations,
-                      positiveMatch: {
-                        poolAddress,
-                        chainNow,
-                        scenarioIndex,
-                        config,
-                        amount,
-                        limitIndex,
-                        collateralAmount,
-                        lookaheadUpdates,
-                        passiveRateBps: passivePath.currentRateBps,
-                        activeRateBps: activePath.currentRateBps
-                      }
-                    };
+                    return advanceAndApplyEligibleUpdates(
+                      account,
+                      publicClient,
+                      walletClient,
+                      testClient,
+                      config,
+                      lookaheadUpdates
+                    );
                   }
-                } catch (error) {
-                  observations.push(
-                    `scenario=${scenarioIndex} target=${targetRateBps} updates=${lookaheadUpdates} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()} error=${error instanceof Error ? error.message : String(error)}`
-                  );
-                } finally {
-                  await testClient.revert({ id: branchId });
+                });
+
+                if (
+                  probe.activePath !== undefined &&
+                  probe.activePath.currentRateBps > passivePath.currentRateBps &&
+                  (probe.activeDistanceToTargetBps ?? Number.POSITIVE_INFINITY) <
+                    passiveDistanceToTargetBps
+                ) {
+                  return {
+                    observations,
+                    positiveMatch: {
+                      poolAddress,
+                      chainNow,
+                      scenarioIndex,
+                      config,
+                      amount,
+                      limitIndex,
+                      collateralAmount,
+                      lookaheadUpdates,
+                      passiveRateBps: passivePath.currentRateBps,
+                      activeRateBps: probe.activePath.currentRateBps
+                    }
+                  };
                 }
               }
             }
@@ -1069,16 +1070,19 @@ export function createBaseFactoryBorrowerPreWindowHelpers(
         }
 
         for (const lookaheadUpdates of options.lookaheadUpdates ?? ([2] as const)) {
-          const passiveBranchId = await testClient.snapshot();
-          const passivePath = await advanceAndApplyEligibleUpdates(
-            account,
-            publicClient,
-            walletClient,
+          const { passivePath, passiveDistanceToTargetBps } = await capturePassiveRateBranch(
             testClient,
-            config,
-            lookaheadUpdates
+            targetRateBps,
+            () =>
+              advanceAndApplyEligibleUpdates(
+                account,
+                publicClient,
+                walletClient,
+                testClient,
+                config,
+                lookaheadUpdates
+              )
           );
-          await testClient.revert({ id: passiveBranchId });
 
           for (const limitIndex of options.limitIndexes ??
             EXPERIMENTAL_MANUAL_PREWINDOW_EXISTING_BORROW_LIMIT_INDEXES) {
@@ -1088,59 +1092,55 @@ export function createBaseFactoryBorrowerPreWindowHelpers(
 
               for (const amount of options.amounts ??
                 EXPERIMENTAL_MANUAL_PREWINDOW_EXISTING_BORROW_AMOUNTS_WAD) {
-                const branchId = await testClient.snapshot();
+                const probe = await executeRateProbeBranch({
+                  testClient,
+                  targetRateBps,
+                  observations,
+                  passivePath,
+                  label: `scenario=${scenario.initialQuoteAmount.toString()}/${scenario.borrowAmount.toString()} target=${targetRateBps} updates=${lookaheadUpdates} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()}`,
+                  runBranch: async () => {
+                    const drawDebtHash = await walletClient.writeContract({
+                      account,
+                      chain: undefined,
+                      address: poolAddress,
+                      abi: ajnaPoolAbi,
+                      functionName: "drawDebt",
+                      args: [account.address, amount, BigInt(limitIndex), collateralAmount]
+                    });
+                    await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
 
-                try {
-                  const drawDebtHash = await walletClient.writeContract({
-                    account,
-                    chain: undefined,
-                    address: poolAddress,
-                    abi: ajnaPoolAbi,
-                    functionName: "drawDebt",
-                    args: [account.address, amount, BigInt(limitIndex), collateralAmount]
-                  });
-                  await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
-
-                  const activePath = await advanceAndApplyEligibleUpdates(
-                    account,
-                    publicClient,
-                    walletClient,
-                    testClient,
-                    config,
-                    lookaheadUpdates
-                  );
-
-                  observations.push(
-                    `scenario=${scenario.initialQuoteAmount.toString()}/${scenario.borrowAmount.toString()} target=${targetRateBps} updates=${lookaheadUpdates} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()} rate=${activePath.currentRateBps}`
-                  );
-
-                  if (
-                    activePath.currentRateBps > passivePath.currentRateBps &&
-                    Math.abs(activePath.currentRateBps - targetRateBps) <
-                      Math.abs(passivePath.currentRateBps - targetRateBps)
-                  ) {
-                    return {
-                      observations,
-                      positiveMatch: {
-                        poolAddress,
-                        chainNow,
-                        scenario,
-                        config,
-                        amount,
-                        limitIndex,
-                        collateralAmount,
-                        lookaheadUpdates,
-                        passiveRateBps: passivePath.currentRateBps,
-                        activeRateBps: activePath.currentRateBps
-                      }
-                    };
+                    return advanceAndApplyEligibleUpdates(
+                      account,
+                      publicClient,
+                      walletClient,
+                      testClient,
+                      config,
+                      lookaheadUpdates
+                    );
                   }
-                } catch (error) {
-                  observations.push(
-                    `scenario=${scenario.initialQuoteAmount.toString()}/${scenario.borrowAmount.toString()} target=${targetRateBps} updates=${lookaheadUpdates} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()} error=${error instanceof Error ? error.message : String(error)}`
-                  );
-                } finally {
-                  await testClient.revert({ id: branchId });
+                });
+
+                if (
+                  probe.activePath !== undefined &&
+                  probe.activePath.currentRateBps > passivePath.currentRateBps &&
+                  (probe.activeDistanceToTargetBps ?? Number.POSITIVE_INFINITY) <
+                    passiveDistanceToTargetBps
+                ) {
+                  return {
+                    observations,
+                    positiveMatch: {
+                      poolAddress,
+                      chainNow,
+                      scenario,
+                      config,
+                      amount,
+                      limitIndex,
+                      collateralAmount,
+                      lookaheadUpdates,
+                      passiveRateBps: passivePath.currentRateBps,
+                      activeRateBps: probe.activePath.currentRateBps
+                    }
+                  };
                 }
               }
             }
@@ -1375,16 +1375,19 @@ export function createBaseFactoryBorrowerPreWindowHelpers(
 
     for (const rankedState of rankedStates.slice(0, 1)) {
       for (const lookaheadUpdates of [2] as const) {
-        const passiveBranchId = await testClient.snapshot();
-        const passivePath = await advanceAndApplyEligibleUpdates(
-          account,
-          publicClient,
-          walletClient,
+        const { passivePath, passiveDistanceToTargetBps } = await capturePassiveRateBranch(
           testClient,
-          rankedState.config,
-          lookaheadUpdates
+          rankedState.config.targetRateBps,
+          () =>
+            advanceAndApplyEligibleUpdates(
+              account,
+              publicClient,
+              walletClient,
+              testClient,
+              rankedState.config,
+              lookaheadUpdates
+            )
         );
-        await testClient.revert({ id: passiveBranchId });
 
         observations.push(
           `validating scenario ${rankedState.scenario.initialQuoteAmount.toString()}/${rankedState.scenario.borrowAmount.toString()} updates=${lookaheadUpdates}: passive=${passivePath.currentRateBps} baselineNext=${rankedState.baselinePrediction.predictedNextRateBps}`
@@ -1394,57 +1397,54 @@ export function createBaseFactoryBorrowerPreWindowHelpers(
           for (const limitIndex of EXPERIMENTAL_BOUNDARY_DERIVED_PREWINDOW_BORROW_LIMIT_INDEXES) {
             const collateralAmount = pureCandidate.collateralAmount;
             const amount = pureCandidate.amount;
-            const branchId = await testClient.snapshot();
+            const probe = await executeRateProbeBranch({
+              testClient,
+              targetRateBps: rankedState.config.targetRateBps,
+              observations,
+              passivePath,
+              label: `scenario=${rankedState.scenario.initialQuoteAmount.toString()}/${rankedState.scenario.borrowAmount.toString()} updates=${lookaheadUpdates} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()} pureNext=${pureCandidate.predictedRateBps}/${pureCandidate.predictedOutcome}`,
+              runBranch: async () => {
+                const drawDebtHash = await walletClient.writeContract({
+                  account,
+                  chain: undefined,
+                  address: rankedState.poolAddress,
+                  abi: ajnaPoolAbi,
+                  functionName: "drawDebt",
+                  args: [account.address, amount, BigInt(limitIndex), collateralAmount]
+                });
+                await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
 
-            try {
-              const drawDebtHash = await walletClient.writeContract({
-                account,
-                chain: undefined,
-                address: rankedState.poolAddress,
-                abi: ajnaPoolAbi,
-                functionName: "drawDebt",
-                args: [account.address, amount, BigInt(limitIndex), collateralAmount]
-              });
-              await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
-
-              const activePath = await advanceAndApplyEligibleUpdates(
-                account,
-                publicClient,
-                walletClient,
-                testClient,
-                rankedState.config,
-                lookaheadUpdates
-              );
-              observations.push(
-                `scenario=${rankedState.scenario.initialQuoteAmount.toString()}/${rankedState.scenario.borrowAmount.toString()} updates=${lookaheadUpdates} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()} passive=${passivePath.currentRateBps} active=${activePath.currentRateBps}`
-              );
-
-              if (
-                activePath.currentRateBps > passivePath.currentRateBps &&
-                Math.abs(activePath.currentRateBps - rankedState.config.targetRateBps) <
-                  Math.abs(passivePath.currentRateBps - rankedState.config.targetRateBps)
-              ) {
-                return {
-                  observations,
-                  positiveMatch: {
-                    poolAddress: rankedState.poolAddress,
-                    chainNow: rankedState.chainNow,
-                    scenario: rankedState.scenario,
-                    config: rankedState.config,
-                    amount,
-                    limitIndex,
-                    collateralAmount,
-                    passiveRateBps: passivePath.currentRateBps,
-                    activeRateBps: activePath.currentRateBps
-                  }
-                };
+                return advanceAndApplyEligibleUpdates(
+                  account,
+                  publicClient,
+                  walletClient,
+                  testClient,
+                  rankedState.config,
+                  lookaheadUpdates
+                );
               }
-            } catch (error) {
-              observations.push(
-                `scenario=${rankedState.scenario.initialQuoteAmount.toString()}/${rankedState.scenario.borrowAmount.toString()} updates=${lookaheadUpdates} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()} pureNext=${pureCandidate.predictedRateBps}/${pureCandidate.predictedOutcome} error=${error instanceof Error ? error.message : String(error)}`
-              );
-            } finally {
-              await testClient.revert({ id: branchId });
+            });
+
+            if (
+              probe.activePath !== undefined &&
+              probe.activePath.currentRateBps > passivePath.currentRateBps &&
+              (probe.activeDistanceToTargetBps ?? Number.POSITIVE_INFINITY) <
+                passiveDistanceToTargetBps
+            ) {
+              return {
+                observations,
+                positiveMatch: {
+                  poolAddress: rankedState.poolAddress,
+                  chainNow: rankedState.chainNow,
+                  scenario: rankedState.scenario,
+                  config: rankedState.config,
+                  amount,
+                  limitIndex,
+                  collateralAmount,
+                  passiveRateBps: passivePath.currentRateBps,
+                  activeRateBps: probe.activePath.currentRateBps
+                }
+              };
             }
           }
         }
@@ -1565,16 +1565,19 @@ export function createBaseFactoryBorrowerPreWindowHelpers(
           continue;
         }
 
-        const passiveBranchId = await testClient.snapshot();
-        const passivePath = await advanceAndApplyEligibleUpdates(
-          account,
-          publicClient,
-          walletClient,
+        const { passivePath, passiveDistanceToTargetBps } = await capturePassiveRateBranch(
           testClient,
-          config,
-          2
+          targetRateBps,
+          () =>
+            advanceAndApplyEligibleUpdates(
+              account,
+              publicClient,
+              walletClient,
+              testClient,
+              config,
+              2
+            )
         );
-        await testClient.revert({ id: passiveBranchId });
 
         const [
           [currentDebtWad, , , t0Debt2ToCollateralWad],
@@ -1688,57 +1691,54 @@ export function createBaseFactoryBorrowerPreWindowHelpers(
 
         for (const candidate of approximateCandidates.slice(0, 6)) {
           const { limitIndex, collateralAmount, amount } = candidate;
-          const branchId = await testClient.snapshot();
+          const probe = await executeRateProbeBranch({
+            testClient,
+            targetRateBps,
+            observations,
+            passivePath,
+            label: `multi-bucket scenario=${scenario.borrowAmount.toString()} target=${targetRateBps} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()} approxNext=${candidate.forecast.nextRateBps} approxTerminal=${candidate.forecast.terminalRateBps}`,
+            runBranch: async () => {
+              const drawDebtHash = await walletClient.writeContract({
+                account,
+                chain: undefined,
+                address: poolAddress,
+                abi: ajnaPoolAbi,
+                functionName: "drawDebt",
+                args: [account.address, amount, BigInt(limitIndex), collateralAmount]
+              });
+              await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
 
-          try {
-            const drawDebtHash = await walletClient.writeContract({
-              account,
-              chain: undefined,
-              address: poolAddress,
-              abi: ajnaPoolAbi,
-              functionName: "drawDebt",
-              args: [account.address, amount, BigInt(limitIndex), collateralAmount]
-            });
-            await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
-
-            const activePath = await advanceAndApplyEligibleUpdates(
-              account,
-              publicClient,
-              walletClient,
-              testClient,
-              config,
-              2
-            );
-            observations.push(
-              `multi-bucket scenario=${scenario.borrowAmount.toString()} target=${targetRateBps} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()} passive=${passivePath.currentRateBps} active=${activePath.currentRateBps} approxNext=${candidate.forecast.nextRateBps} approxTerminal=${candidate.forecast.terminalRateBps}`
-            );
-
-            if (
-              activePath.currentRateBps > passivePath.currentRateBps &&
-              Math.abs(activePath.currentRateBps - config.targetRateBps) <
-                Math.abs(passivePath.currentRateBps - config.targetRateBps)
-            ) {
-              return {
-                observations,
-                positiveMatch: {
-                  poolAddress,
-                  chainNow,
-                  scenario,
-                  config,
-                  amount,
-                  limitIndex,
-                  collateralAmount,
-                  passiveRateBps: passivePath.currentRateBps,
-                  activeRateBps: activePath.currentRateBps
-                }
-              };
+              return advanceAndApplyEligibleUpdates(
+                account,
+                publicClient,
+                walletClient,
+                testClient,
+                config,
+                2
+              );
             }
-          } catch (error) {
-            observations.push(
-              `multi-bucket scenario=${scenario.borrowAmount.toString()} target=${targetRateBps} limit=${limitIndex} collateral=${collateralAmount.toString()} amount=${amount.toString()} approxNext=${candidate.forecast.nextRateBps} approxTerminal=${candidate.forecast.terminalRateBps} error=${error instanceof Error ? error.message : String(error)}`
-            );
-          } finally {
-            await testClient.revert({ id: branchId });
+          });
+
+          if (
+            probe.activePath !== undefined &&
+            probe.activePath.currentRateBps > passivePath.currentRateBps &&
+            (probe.activeDistanceToTargetBps ?? Number.POSITIVE_INFINITY) <
+              passiveDistanceToTargetBps
+          ) {
+            return {
+              observations,
+              positiveMatch: {
+                poolAddress,
+                chainNow,
+                scenario,
+                config,
+                amount,
+                limitIndex,
+                collateralAmount,
+                passiveRateBps: passivePath.currentRateBps,
+                activeRateBps: probe.activePath.currentRateBps
+              }
+            };
           }
         }
       }

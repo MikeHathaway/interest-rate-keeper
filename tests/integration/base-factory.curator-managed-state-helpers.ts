@@ -5,6 +5,7 @@ import {
   type PlanCandidate,
   type RateMoveOutcome
 } from "../../src/index.js";
+import { readPoolSnapshotMetadata } from "../../src/snapshot-metadata.js";
 import { withTemporaryAnvilFork } from "../../src/ajna/anvil-fork.js";
 import {
   buildMultiCycleBorrowSearchAmounts,
@@ -15,7 +16,10 @@ import { calculateMaxWithdrawableQuoteAmountFromLp } from "../../src/ajna/snapsh
 import { fenwickIndexToPriceWad } from "./base-factory.protocol.js";
 import { EXPERIMENTAL_AJNA_INFO_MANAGED_USED_POOL_ARCHETYPES } from "./base-factory.fixtures.js";
 import {
+  capturePassiveRateBranch,
   DEFAULT_ANVIL_PRIVATE_KEY,
+  distanceToTargetRateBps,
+  executeRateProbeBranch,
   formatTokenAmount,
   LOCAL_RPC_URL
 } from "./base-factory.shared.js";
@@ -418,6 +422,7 @@ export function createBaseFactoryCuratorManagedStateHelpers(_deps: CuratorHelper
           publicClient,
           now: () => chainNow
         }).getSnapshot();
+        const metadata = readPoolSnapshotMetadata(snapshot);
         const candidate = snapshot.candidates.find(
           (currentCandidate): currentCandidate is PlanCandidate =>
             currentCandidate.candidateSource === "simulation" &&
@@ -437,11 +442,11 @@ export function createBaseFactoryCuratorManagedStateHelpers(_deps: CuratorHelper
             `target=${targetRateBps}`,
             `secondsUntil=${snapshot.secondsUntilNextRateUpdate}`,
             `next=${snapshot.predictedNextOutcome}`,
-            `noOfLoans=${String(snapshot.metadata?.noOfLoans ?? "unknown")}`,
-            `debtEma=${String(snapshot.metadata?.debtEmaWad ?? "unknown")}`,
-            `depositEma=${String(snapshot.metadata?.depositEmaWad ?? "unknown")}`,
-            `debtColEma=${String(snapshot.metadata?.debtColEmaWad ?? "unknown")}`,
-            `lupt0DebtEma=${String(snapshot.metadata?.lupt0DebtEmaWad ?? "unknown")}`,
+            `noOfLoans=${String(metadata.noOfLoans ?? "unknown")}`,
+            `debtEma=${String(metadata.debtEmaWad ?? "unknown")}`,
+            `depositEma=${String(metadata.depositEmaWad ?? "unknown")}`,
+            `debtColEma=${String(metadata.debtColEmaWad ?? "unknown")}`,
+            `lupt0DebtEma=${String(metadata.lupt0DebtEmaWad ?? "unknown")}`,
             `resolvedLimits=${resolvedLimitIndexes.join(",") || "none"}`,
             `lenderLp=${formatTokenAmount(lenderLpBalance)}`,
             `bucketDeposit=${formatTokenAmount(bucketInfo[3])}`,
@@ -646,75 +651,65 @@ export function createBaseFactoryCuratorManagedStateHelpers(_deps: CuratorHelper
             return;
           }
 
-          const passiveBranchId = await testClient.snapshot();
-          const passivePath = await _deps.advanceAndApplyEligibleUpdatesDirect(
-            archetype.senderAddress,
-            publicClient,
-            walletClient,
-            testClient,
-            archetype.poolAddress,
-            2
-          );
-          await testClient.revert({ id: passiveBranchId });
-
-          const passiveDistanceToTarget = Math.abs(passivePath.currentRateBps - targetRateBps);
-          let bestActiveRateBps: number | undefined;
-          let bestRemoveQuoteAmount: bigint | undefined;
-
-          for (const removeQuoteAmount of amountCandidates) {
-            const branchId = await testClient.snapshot();
-
-            try {
-              const removeQuoteHash = await walletClient.writeContract({
-                account: archetype.senderAddress,
-                chain: undefined,
-                address: archetype.poolAddress,
-                abi: ajnaPoolAbi,
-                functionName: "removeQuoteToken",
-                args: [removeQuoteAmount, lenderBucketIndex]
-              });
-              await publicClient.waitForTransactionReceipt({ hash: removeQuoteHash });
-
-              const activePath = await _deps.advanceAndApplyEligibleUpdatesDirect(
+          const { passivePath, passiveDistanceToTargetBps: passiveDistanceToTarget } =
+            await capturePassiveRateBranch(testClient, targetRateBps, () =>
+              _deps.advanceAndApplyEligibleUpdatesDirect(
                 archetype.senderAddress,
                 publicClient,
                 walletClient,
                 testClient,
                 archetype.poolAddress,
                 2
-              );
-              const activeDistanceToTarget = Math.abs(activePath.currentRateBps - targetRateBps);
+              )
+            );
+          let bestActiveRateBps: number | undefined;
+          let bestRemoveQuoteAmount: bigint | undefined;
 
-              observations.push(
-                [
-                  `manual-remove archetype=${archetype.id}`,
-                  `amount=${removeQuoteAmount.toString()}`,
-                  `passive=${passivePath.currentRateBps}`,
-                  `active=${activePath.currentRateBps}`,
-                  `passiveDistance=${passiveDistanceToTarget}`,
-                  `activeDistance=${activeDistanceToTarget}`
-                ].join(" ")
-              );
+          for (const removeQuoteAmount of amountCandidates) {
+            const probe = await executeRateProbeBranch({
+              testClient,
+              targetRateBps,
+              observations,
+              passivePath,
+              label: `manual-remove archetype=${archetype.id} amount=${removeQuoteAmount.toString()}`,
+              runBranch: async () => {
+                const removeQuoteHash = await walletClient.writeContract({
+                  account: archetype.senderAddress,
+                  chain: undefined,
+                  address: archetype.poolAddress,
+                  abi: ajnaPoolAbi,
+                  functionName: "removeQuoteToken",
+                  args: [removeQuoteAmount, lenderBucketIndex]
+                });
+                await publicClient.waitForTransactionReceipt({ hash: removeQuoteHash });
 
+                return _deps.advanceAndApplyEligibleUpdatesDirect(
+                  archetype.senderAddress,
+                  publicClient,
+                  walletClient,
+                  testClient,
+                  archetype.poolAddress,
+                  2
+                );
+              }
+            });
+
+            if (probe.activePath !== undefined) {
               const bestDistanceToTarget =
                 bestActiveRateBps === undefined
                   ? Number.POSITIVE_INFINITY
-                  : Math.abs(bestActiveRateBps - targetRateBps);
+                  : distanceToTargetRateBps(bestActiveRateBps, targetRateBps);
               if (
-                bestActiveRateBps === undefined ||
-                activeDistanceToTarget < bestDistanceToTarget ||
-                (activeDistanceToTarget === bestDistanceToTarget &&
-                  activePath.currentRateBps > bestActiveRateBps)
+                (probe.activeDistanceToTargetBps ?? Number.POSITIVE_INFINITY) <
+                  bestDistanceToTarget ||
+                ((probe.activeDistanceToTargetBps ?? Number.POSITIVE_INFINITY) ===
+                  bestDistanceToTarget &&
+                  (bestActiveRateBps === undefined ||
+                    probe.activePath.currentRateBps > bestActiveRateBps))
               ) {
-                bestActiveRateBps = activePath.currentRateBps;
+                bestActiveRateBps = probe.activePath.currentRateBps;
                 bestRemoveQuoteAmount = removeQuoteAmount;
               }
-            } catch (error) {
-              observations.push(
-                `manual-remove archetype=${archetype.id} amount=${removeQuoteAmount.toString()} error=${error instanceof Error ? error.message : String(error)}`
-              );
-            } finally {
-              await testClient.revert({ id: branchId });
             }
           }
 
@@ -941,18 +936,17 @@ export function createBaseFactoryCuratorManagedStateHelpers(_deps: CuratorHelper
             return;
           }
 
-          const passiveBranchId = await testClient.snapshot();
-          const passivePath = await _deps.advanceAndApplyEligibleUpdatesDirect(
-            archetype.senderAddress,
-            publicClient,
-            walletClient,
-            testClient,
-            archetype.poolAddress,
-            2
-          );
-          await testClient.revert({ id: passiveBranchId });
-
-          const passiveDistanceToTarget = Math.abs(passivePath.currentRateBps - targetRateBps);
+          const { passivePath, passiveDistanceToTargetBps: passiveDistanceToTarget } =
+            await capturePassiveRateBranch(testClient, targetRateBps, () =>
+              _deps.advanceAndApplyEligibleUpdatesDirect(
+                archetype.senderAddress,
+                publicClient,
+                walletClient,
+                testClient,
+                archetype.poolAddress,
+                2
+              )
+            );
           const removeOnlyPathsByAmount = new Map<
             string,
             {
@@ -962,50 +956,39 @@ export function createBaseFactoryCuratorManagedStateHelpers(_deps: CuratorHelper
           >();
 
           for (const removeQuoteAmount of sampledRemoveQuoteAmounts) {
-            const branchId = await testClient.snapshot();
+            const probe = await executeRateProbeBranch({
+              testClient,
+              targetRateBps,
+              observations,
+              passivePath,
+              label: `manual-dual-remove-only archetype=${archetype.id} remove=${removeQuoteAmount.toString()}`,
+              runBranch: async () => {
+                const removeQuoteHash = await walletClient.writeContract({
+                  account: archetype.senderAddress,
+                  chain: undefined,
+                  address: archetype.poolAddress,
+                  abi: ajnaPoolAbi,
+                  functionName: "removeQuoteToken",
+                  args: [removeQuoteAmount, lenderBucketIndex]
+                });
+                await publicClient.waitForTransactionReceipt({ hash: removeQuoteHash });
 
-            try {
-              const removeQuoteHash = await walletClient.writeContract({
-                account: archetype.senderAddress,
-                chain: undefined,
-                address: archetype.poolAddress,
-                abi: ajnaPoolAbi,
-                functionName: "removeQuoteToken",
-                args: [removeQuoteAmount, lenderBucketIndex]
-              });
-              await publicClient.waitForTransactionReceipt({ hash: removeQuoteHash });
+                return _deps.advanceAndApplyEligibleUpdatesDirect(
+                  archetype.senderAddress,
+                  publicClient,
+                  walletClient,
+                  testClient,
+                  archetype.poolAddress,
+                  2
+                );
+              }
+            });
 
-              const removeOnlyPath = await _deps.advanceAndApplyEligibleUpdatesDirect(
-                archetype.senderAddress,
-                publicClient,
-                walletClient,
-                testClient,
-                archetype.poolAddress,
-                2
-              );
-              const removeOnlyDistanceToTarget = Math.abs(
-                removeOnlyPath.currentRateBps - targetRateBps
-              );
-
+            if (probe.activePath !== undefined && probe.activeDistanceToTargetBps !== undefined) {
               removeOnlyPathsByAmount.set(removeQuoteAmount.toString(), {
-                currentRateBps: removeOnlyPath.currentRateBps,
-                distanceToTargetBps: removeOnlyDistanceToTarget
+                currentRateBps: probe.activePath.currentRateBps,
+                distanceToTargetBps: probe.activeDistanceToTargetBps
               });
-
-              observations.push(
-                [
-                  `manual-dual-remove-only archetype=${archetype.id}`,
-                  `remove=${removeQuoteAmount.toString()}`,
-                  `passive=${passivePath.currentRateBps}`,
-                  `removeOnly=${removeOnlyPath.currentRateBps}`
-                ].join(" ")
-              );
-            } catch (error) {
-              observations.push(
-                `manual-dual-remove-only archetype=${archetype.id} amount=${removeQuoteAmount.toString()} error=${error instanceof Error ? error.message : String(error)}`
-              );
-            } finally {
-              await testClient.revert({ id: branchId });
             }
           }
 
@@ -1019,82 +1002,79 @@ export function createBaseFactoryCuratorManagedStateHelpers(_deps: CuratorHelper
 
             for (const removeQuoteAmount of sampledRemoveQuoteAmounts) {
               for (const drawDebtAmount of sampledBorrowAmounts) {
-                const branchId = await testClient.snapshot();
+                const probe = await executeRateProbeBranch({
+                  testClient,
+                  targetRateBps,
+                  observations,
+                  passivePath,
+                  label: `manual-dual archetype=${archetype.id} limit=${limitIndex} remove=${removeQuoteAmount.toString()} draw=${drawDebtAmount.toString()}`,
+                  runBranch: async () => {
+                    const removeQuoteHash = await walletClient.writeContract({
+                      account: archetype.senderAddress,
+                      chain: undefined,
+                      address: archetype.poolAddress,
+                      abi: ajnaPoolAbi,
+                      functionName: "removeQuoteToken",
+                      args: [removeQuoteAmount, lenderBucketIndex]
+                    });
+                    await publicClient.waitForTransactionReceipt({ hash: removeQuoteHash });
 
-                try {
-                  const removeQuoteHash = await walletClient.writeContract({
-                    account: archetype.senderAddress,
-                    chain: undefined,
-                    address: archetype.poolAddress,
-                    abi: ajnaPoolAbi,
-                    functionName: "removeQuoteToken",
-                    args: [removeQuoteAmount, lenderBucketIndex]
-                  });
-                  await publicClient.waitForTransactionReceipt({ hash: removeQuoteHash });
+                    const drawDebtHash = await walletClient.writeContract({
+                      account: archetype.senderAddress,
+                      chain: undefined,
+                      address: archetype.poolAddress,
+                      abi: ajnaPoolAbi,
+                      functionName: "drawDebt",
+                      args: [archetype.borrowerAddress, drawDebtAmount, BigInt(limitIndex), 0n]
+                    });
+                    await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
 
-                  const drawDebtHash = await walletClient.writeContract({
-                    account: archetype.senderAddress,
-                    chain: undefined,
-                    address: archetype.poolAddress,
-                    abi: ajnaPoolAbi,
-                    functionName: "drawDebt",
-                    args: [archetype.borrowerAddress, drawDebtAmount, BigInt(limitIndex), 0n]
-                  });
-                  await publicClient.waitForTransactionReceipt({ hash: drawDebtHash });
-
-                  const activePath = await _deps.advanceAndApplyEligibleUpdatesDirect(
-                    archetype.senderAddress,
-                    publicClient,
-                    walletClient,
-                    testClient,
-                    archetype.poolAddress,
-                    2
-                  );
-                  const distanceToTargetBps = Math.abs(activePath.currentRateBps - targetRateBps);
-                  const removeOnlyPath = removeOnlyPathsByAmount.get(removeQuoteAmount.toString());
-                  const removeOnlyDistanceToTarget =
-                    removeOnlyPath?.distanceToTargetBps ?? Number.POSITIVE_INFINITY;
-
-                  observations.push(
-                    [
-                      `manual-dual archetype=${archetype.id}`,
-                      `limit=${limitIndex}`,
-                      `remove=${removeQuoteAmount.toString()}`,
-                      `draw=${drawDebtAmount.toString()}`,
-                      `passive=${passivePath.currentRateBps}`,
-                      `removeOnly=${removeOnlyPath?.currentRateBps ?? "-"}`,
-                      `active=${activePath.currentRateBps}`
-                    ].join(" ")
-                  );
-
-                  if (
-                    activePath.currentRateBps <= passivePath.currentRateBps ||
-                    distanceToTargetBps >= passiveDistanceToTarget ||
-                    distanceToTargetBps >= removeOnlyDistanceToTarget
-                  ) {
-                    continue;
+                    return _deps.advanceAndApplyEligibleUpdatesDirect(
+                      archetype.senderAddress,
+                      publicClient,
+                      walletClient,
+                      testClient,
+                      archetype.poolAddress,
+                      2
+                    );
                   }
+                });
 
-                  limitImproved = true;
-                  const currentBestDistance =
-                    bestActiveRateBps === undefined
-                      ? Number.POSITIVE_INFINITY
-                      : Math.abs(bestActiveRateBps - targetRateBps);
-                  if (
-                    bestActiveRateBps === undefined ||
-                    distanceToTargetBps < currentBestDistance ||
-                    (distanceToTargetBps === currentBestDistance &&
-                      activePath.currentRateBps > bestActiveRateBps)
-                  ) {
-                    bestActiveRateBps = activePath.currentRateBps;
-                    bestRemoveQuoteAmount = removeQuoteAmount;
-                    bestDrawDebtAmount = drawDebtAmount;
-                    bestLimitIndex = limitIndex;
-                  }
-                } catch {
-                  // ignore non-viable exact branches in the bounded manual probe
-                } finally {
-                  await testClient.revert({ id: branchId });
+                if (
+                  probe.activePath === undefined ||
+                  probe.activeDistanceToTargetBps === undefined
+                ) {
+                  continue;
+                }
+
+                const distanceToTargetBps = probe.activeDistanceToTargetBps;
+                const removeOnlyPath = removeOnlyPathsByAmount.get(removeQuoteAmount.toString());
+                const removeOnlyDistanceToTarget =
+                  removeOnlyPath?.distanceToTargetBps ?? Number.POSITIVE_INFINITY;
+
+                if (
+                  probe.activePath.currentRateBps <= passivePath.currentRateBps ||
+                  distanceToTargetBps >= passiveDistanceToTarget ||
+                  distanceToTargetBps >= removeOnlyDistanceToTarget
+                ) {
+                  continue;
+                }
+
+                limitImproved = true;
+                const currentBestDistance =
+                  bestActiveRateBps === undefined
+                    ? Number.POSITIVE_INFINITY
+                    : distanceToTargetRateBps(bestActiveRateBps, targetRateBps);
+                if (
+                  bestActiveRateBps === undefined ||
+                  distanceToTargetBps < currentBestDistance ||
+                  (distanceToTargetBps === currentBestDistance &&
+                    probe.activePath.currentRateBps > bestActiveRateBps)
+                ) {
+                  bestActiveRateBps = probe.activePath.currentRateBps;
+                  bestRemoveQuoteAmount = removeQuoteAmount;
+                  bestDrawDebtAmount = drawDebtAmount;
+                  bestLimitIndex = limitIndex;
                 }
               }
             }

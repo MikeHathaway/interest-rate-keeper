@@ -3,11 +3,14 @@ import {
   managedImprovementBps,
   maximumManagedReleasedQuoteAmount,
   normalizedManagedSensitivityBpsPer10PctRelease,
-  readManagedControlSnapshotMetadata,
   releasedQuoteInventoryAmount,
   stepsUseManagedDual,
   stepsUseManagedRemoveQuote
 } from "./managed-controls.js";
+import {
+  readManagedControlSnapshotMetadata,
+  semanticSnapshotMetadataSignature
+} from "./snapshot-metadata.js";
 import {
   type CyclePlan,
   type ExecutionStep,
@@ -15,17 +18,6 @@ import {
   type KeeperConfig,
   type PoolSnapshot
 } from "./types.js";
-
-const SEMANTIC_SNAPSHOT_METADATA_KEYS = [
-  "poolAddress",
-  "currentRateWad",
-  "currentDebtWad",
-  "debtEmaWad",
-  "depositEmaWad",
-  "debtColEmaWad",
-  "lupt0DebtEmaWad",
-  "lastInterestRateUpdateTimestamp"
-] as const;
 
 function stepAmount(step: ExecutionStep): bigint {
   switch (step.type) {
@@ -73,24 +65,6 @@ function borrowExposureForStep(step: ExecutionStep): bigint {
     default:
       return 0n;
   }
-}
-
-function semanticSnapshotMetadataSignature(snapshot: PoolSnapshot): string | undefined {
-  const metadata = snapshot.metadata;
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
-    return undefined;
-  }
-
-  const parts: string[] = [];
-  for (const key of SEMANTIC_SNAPSHOT_METADATA_KEYS) {
-    const value = metadata[key];
-    if (typeof value !== "string" && typeof value !== "number") {
-      return undefined;
-    }
-    parts.push(String(value));
-  }
-
-  return parts.join(":");
 }
 
 function findCandidate(snapshot: PoolSnapshot, candidateId: string) {

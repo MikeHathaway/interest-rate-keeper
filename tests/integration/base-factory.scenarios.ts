@@ -23,9 +23,11 @@ import {
   approveToken,
   advanceAndApplyEligibleUpdates,
   buildRepresentativeBorrowLookaheadConfig,
+  capturePassiveRateBranch,
   createRpcWalletClient,
   deployMockToken,
   deployPoolThroughFactory,
+  executeRateProbeBranch,
   formatTokenAmount,
   formatWeiAsEth,
   listUnlockedRpcAccounts,
@@ -125,16 +127,19 @@ export async function findManualPreWindowLendMatch(
     | undefined;
 }> {
   const thresholdIndex = await readDwatpThresholdFenwickIndex(publicClient, matched.poolAddress);
-  const passiveBranchId = await testClient.snapshot();
-  const passivePath = await advanceAndApplyEligibleUpdates(
-    account,
-    publicClient,
-    walletClient,
+  const { passivePath } = await capturePassiveRateBranch(
     testClient,
-    matched.config,
-    options.updateCount
+    matched.config.targetRateBps,
+    () =>
+      advanceAndApplyEligibleUpdates(
+        account,
+        publicClient,
+        walletClient,
+        testClient,
+        matched.config,
+        options.updateCount
+      )
   );
-  await testClient.revert({ id: passiveBranchId });
 
   const observations: string[] = [];
   let positiveMatch:
@@ -150,46 +155,45 @@ export async function findManualPreWindowLendMatch(
 
     for (const quoteAmount of options.quoteAmounts) {
       const quoteAmountWad = quoteAmount * 10n ** 18n;
-      const branchId = await testClient.snapshot();
+      const probe = await executeRateProbeBranch({
+        testClient,
+        targetRateBps: matched.config.targetRateBps,
+        observations,
+        passivePath,
+        label: `bucket=${bucketIndex} amount=${quoteAmount.toString()}`,
+        runBranch: async () => {
+          const latestBlock = await publicClient.getBlock();
+          const hash = await walletClient.writeContract({
+            account,
+            chain: undefined,
+            address: matched.poolAddress,
+            abi: ajnaPoolAbi,
+            functionName: "addQuoteToken",
+            args: [quoteAmountWad, BigInt(bucketIndex), latestBlock.timestamp + 3600n]
+          });
+          await publicClient.waitForTransactionReceipt({ hash });
 
-      try {
-        const latestBlock = await publicClient.getBlock();
-        const hash = await walletClient.writeContract({
-          account,
-          chain: undefined,
-          address: matched.poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "addQuoteToken",
-          args: [quoteAmountWad, BigInt(bucketIndex), latestBlock.timestamp + 3600n]
-        });
-        await publicClient.waitForTransactionReceipt({ hash });
-
-        const activePath = await advanceAndApplyEligibleUpdates(
-          account,
-          publicClient,
-          walletClient,
-          testClient,
-          matched.config,
-          options.updateCount
-        );
-        observations.push(
-          `bucket=${bucketIndex} amount=${quoteAmount.toString()} rate=${activePath.currentRateBps}`
-        );
-
-        if (activePath.currentRateBps < passivePath.currentRateBps) {
-          positiveMatch = {
-            bucketIndex,
-            amount: quoteAmountWad,
-            resultingRateBps: activePath.currentRateBps
-          };
-          break;
+          return advanceAndApplyEligibleUpdates(
+            account,
+            publicClient,
+            walletClient,
+            testClient,
+            matched.config,
+            options.updateCount
+          );
         }
-      } catch (error) {
-        observations.push(
-          `bucket=${bucketIndex} amount=${quoteAmount.toString()} error=${error instanceof Error ? error.message : String(error)}`
-        );
-      } finally {
-        await testClient.revert({ id: branchId });
+      });
+
+      if (
+        probe.activePath !== undefined &&
+        probe.activePath.currentRateBps < passivePath.currentRateBps
+      ) {
+        positiveMatch = {
+          bucketIndex,
+          amount: quoteAmountWad,
+          resultingRateBps: probe.activePath.currentRateBps
+        };
+        break;
       }
     }
 

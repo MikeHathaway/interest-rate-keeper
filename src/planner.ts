@@ -9,10 +9,14 @@ import {
   managedImprovementBps,
   maximumManagedReleasedQuoteAmount,
   normalizedManagedSensitivityBpsPer10PctRelease,
-  readManagedControlSnapshotMetadata,
   stepsUseManagedDual,
   stepsUseManagedRemoveQuote
 } from "./managed-controls.js";
+import {
+  readManagedControlSnapshotMetadata,
+  readSnapshotMetadataBoolean,
+  simulationExecutionCompatibilityReason
+} from "./snapshot-metadata.js";
 import {
   type CyclePlan,
   type ExecutionStep,
@@ -108,11 +112,6 @@ function currentAndProjectedRatesAreInBand(snapshot: PoolSnapshot, band: TargetB
     isRateInBand(snapshot.currentRateBps, band) &&
     isRateInBand(snapshot.planningRateBps ?? snapshot.predictedNextRateBps, band)
   );
-}
-
-function snapshotMetadataBoolean(snapshot: PoolSnapshot, key: string): boolean | undefined {
-  const value = snapshot.metadata?.[key];
-  return typeof value === "boolean" ? value : undefined;
 }
 
 function candidateUsesRemoveQuote(candidate: PlanCandidate): boolean {
@@ -352,11 +351,11 @@ function naturalConvergenceReason(snapshot: PoolSnapshot): string {
 }
 
 function advisoryOnlyReason(snapshot: PoolSnapshot): string {
-  const simulationEnabled = snapshotMetadataBoolean(
+  const simulationEnabled = readSnapshotMetadataBoolean(
     snapshot,
     "simulationBackedSynthesisEnabled"
   );
-  const simulationPrerequisitesAvailable = snapshotMetadataBoolean(
+  const simulationPrerequisitesAvailable = readSnapshotMetadataBoolean(
     snapshot,
     "simulationPrerequisitesAvailable"
   );
@@ -373,8 +372,8 @@ function advisoryOnlyReason(snapshot: PoolSnapshot): string {
 }
 
 function unsupportedCandidateReason(snapshot: PoolSnapshot): string {
-  const compatibilityReason = snapshot.metadata?.simulationExecutionCompatibilityReason;
-  if (typeof compatibilityReason === "string" && compatibilityReason.length > 0) {
+  const compatibilityReason = simulationExecutionCompatibilityReason(snapshot);
+  if (compatibilityReason !== undefined) {
     return `only unsupported exact candidates improved convergence, because ${compatibilityReason}`;
   }
 

@@ -20,6 +20,7 @@ import {
   type PlanCandidate,
   type PoolSnapshot
 } from "../../src/index.js";
+import { requireSnapshotMetadataString } from "../../src/snapshot-metadata.js";
 import {
   AJNA_COLLATERALIZATION_FACTOR_WAD,
   AJNA_FLOAT_STEP,
@@ -976,9 +977,10 @@ describeIf("Base factory fork integration", () => {
       expect(plan.intent).toBe("BORROW");
       expect(plan.selectedCandidateId).toBeDefined();
 
-      const { quoteTokenAddress } = planningSnapshot.metadata as {
-        quoteTokenAddress: `0x${string}`;
-      };
+      const quoteTokenAddress = requireSnapshotMetadataString(
+        planningSnapshot,
+        "quoteTokenAddress"
+      ) as `0x${string}`;
 
       const result = await runCycle(snapshotOnlyConfig, {
         snapshotSource: {

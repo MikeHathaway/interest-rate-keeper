@@ -104,6 +104,54 @@ export interface PlanCandidate {
   validationSignature?: string;
 }
 
+export interface PoolSnapshotMetadata {
+  poolAddress?: HexAddress;
+  quoteTokenAddress?: HexAddress;
+  collateralAddress?: HexAddress;
+  quoteTokenScale?: string;
+  poolType?: number;
+  maxBorrower?: HexAddress;
+  maxT0DebtToCollateral?: string;
+  noOfLoans?: string;
+  borrowerAddress?: HexAddress;
+  borrowerT0Debt?: string;
+  borrowerCollateral?: string;
+  borrowerNpTpRatio?: string;
+  currentRateWad?: string;
+  predictedNextRateWad?: string;
+  immediatePredictedNextRateWad?: string;
+  immediatePredictedNextOutcome?: RateMoveOutcome;
+  lastInterestRateUpdateTimestamp?: number;
+  currentDebtWad?: string;
+  debtEmaWad?: string;
+  depositEmaWad?: string;
+  debtColEmaWad?: string;
+  lupt0DebtEmaWad?: string;
+  autoCandidateCount?: number;
+  autoCandidateSource?: CandidateSource;
+  planningRateBps?: number;
+  planningLookaheadUpdates?: number;
+  simulationBackedSynthesisEnabled?: boolean;
+  simulationPrerequisitesAvailable?: boolean;
+  simulationExecutionCompatible?: boolean;
+  simulationExecutionCompatibilityReason?: string;
+  simulationSenderAddress?: HexAddress;
+  liveSignerAddress?: HexAddress;
+  managedInventoryUpwardControlEnabled?: boolean;
+  managedDualUpwardControlEnabled?: boolean;
+  managedUpwardControlNeeded?: boolean;
+  managedInventoryUpwardEligible?: boolean;
+  managedInventoryIneligibilityReason?: string;
+  managedDualUpwardEligible?: boolean;
+  managedDualIneligibilityReason?: string;
+  managedInventoryBucketCount?: number;
+  managedConfiguredBucketCount?: number;
+  managedMaxWithdrawableQuoteAmount?: string;
+  managedTotalWithdrawableQuoteAmount?: string;
+  managedRemoveQuoteCandidateCount?: number;
+  managedDualCandidateCount?: number;
+}
+
 export interface PoolSnapshot {
   snapshotFingerprint: string;
   poolId: string;
@@ -118,7 +166,7 @@ export interface PoolSnapshot {
   planningRateBps?: number;
   planningLookaheadUpdates?: number;
   candidates: PlanCandidate[];
-  metadata?: Record<string, unknown>;
+  metadata?: PoolSnapshotMetadata;
 }
 
 export interface KeeperConfig {

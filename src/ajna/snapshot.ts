@@ -17,6 +17,7 @@ import {
   finalizeCandidate,
   serializeExecutionStepForValidation
 } from "./snapshot-internal.js";
+import { type PoolSnapshotMetadata } from "../types.js";
 import { synthesizeAjnaHeuristicCandidates } from "./snapshot-dual.js";
 import {
   clearAjnaLendSimulationPathCache,
@@ -573,13 +574,29 @@ function buildPoolSnapshot(
       collateralAddress: readState.collateralAddress,
       quoteTokenScale: readState.quoteTokenScale.toString(),
       poolType: readState.poolType,
-      maxBorrower: readState.loansState?.maxBorrower,
-      maxT0DebtToCollateral: readState.loansState?.maxT0DebtToCollateral.toString(),
-      noOfLoans: readState.loansState?.noOfLoans.toString(),
-      borrowerAddress: readState.borrowerState?.borrowerAddress,
-      borrowerT0Debt: readState.borrowerState?.t0Debt.toString(),
-      borrowerCollateral: readState.borrowerState?.collateral.toString(),
-      borrowerNpTpRatio: readState.borrowerState?.npTpRatio.toString(),
+      ...(readState.loansState?.maxBorrower === undefined
+        ? {}
+        : { maxBorrower: readState.loansState.maxBorrower }),
+      ...(readState.loansState?.maxT0DebtToCollateral === undefined
+        ? {}
+        : {
+            maxT0DebtToCollateral: readState.loansState.maxT0DebtToCollateral.toString()
+          }),
+      ...(readState.loansState?.noOfLoans === undefined
+        ? {}
+        : { noOfLoans: readState.loansState.noOfLoans.toString() }),
+      ...(readState.borrowerState?.borrowerAddress === undefined
+        ? {}
+        : { borrowerAddress: readState.borrowerState.borrowerAddress }),
+      ...(readState.borrowerState?.t0Debt === undefined
+        ? {}
+        : { borrowerT0Debt: readState.borrowerState.t0Debt.toString() }),
+      ...(readState.borrowerState?.collateral === undefined
+        ? {}
+        : { borrowerCollateral: readState.borrowerState.collateral.toString() }),
+      ...(readState.borrowerState?.npTpRatio === undefined
+        ? {}
+        : { borrowerNpTpRatio: readState.borrowerState.npTpRatio.toString() }),
       currentRateWad: readState.rateState.currentRateWad.toString(),
       predictedNextRateWad: readState.prediction.predictedNextRateWad.toString(),
       immediatePredictedNextRateWad: readState.immediatePrediction.predictedNextRateWad.toString(),
@@ -591,7 +608,7 @@ function buildPoolSnapshot(
       debtColEmaWad: readState.rateState.debtColEmaWad.toString(),
       lupt0DebtEmaWad: readState.rateState.lupt0DebtEmaWad.toString(),
       autoCandidateCount: autoCandidates.length,
-      autoCandidateSource,
+      ...(autoCandidateSource === undefined ? {} : { autoCandidateSource }),
       ...(planning?.rateBps === undefined ? {} : { planningRateBps: planning.rateBps }),
       ...(planning?.lookaheadUpdates === undefined
         ? {}
@@ -675,7 +692,7 @@ function buildPoolSnapshot(
       ...(diagnostics?.managedDualCandidateCount === undefined
         ? {}
         : { managedDualCandidateCount: diagnostics.managedDualCandidateCount })
-    }
+    } satisfies PoolSnapshotMetadata
   };
 }
 

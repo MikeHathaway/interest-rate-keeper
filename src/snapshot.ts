@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import { withPlanCandidateCapitalMetrics } from "./candidate-metrics.js";
+import { resolvePoolSnapshotMetadata } from "./snapshot-metadata.js";
 import {
   type AddCollateralStep,
   type AddQuoteStep,
@@ -388,7 +389,7 @@ export function resolvePoolSnapshot(input: unknown): PoolSnapshot {
     typeof record.metadata === "object" &&
     !Array.isArray(record.metadata)
   ) {
-    snapshot.metadata = record.metadata as Record<string, unknown>;
+    snapshot.metadata = resolvePoolSnapshotMetadata(record.metadata);
   }
 
   return snapshot;
