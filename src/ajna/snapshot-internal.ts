@@ -71,6 +71,11 @@ export interface AjnaPoolStateRead {
   };
 }
 
+export type AjnaPoolRateSnapshot = Pick<
+  AjnaPoolStateRead,
+  "blockNumber" | "blockTimestamp" | "rateState" | "prediction" | "immediatePrediction"
+>;
+
 export interface LendSimulationPathResult {
   firstRateWadAfterNextUpdate: bigint;
   firstRateBpsAfterNextUpdate: number;

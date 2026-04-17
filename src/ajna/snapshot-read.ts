@@ -2,6 +2,7 @@ import { type PublicClient } from "viem";
 
 import { ajnaPoolAbi, erc20Abi } from "./abi.js";
 import {
+  type AjnaPoolRateSnapshot,
   type AjnaPoolStateRead,
   type SimulationAccountState,
   type SimulationLenderBucketState,
@@ -23,6 +24,75 @@ import { type HexAddress, type KeeperConfig } from "../types.js";
 const MAX_SIMULATION_ACCOUNT_STATE_CACHE_ENTRIES = 256;
 
 const simulationAccountStateCache = new Map<string, SimulationAccountState>();
+
+interface AjnaPoolImmutableMetadata {
+  quoteTokenAddress: HexAddress;
+  collateralAddress: HexAddress;
+  poolType: number;
+  quoteTokenScale: bigint;
+}
+
+const poolImmutableMetadataCache = new Map<
+  string,
+  Promise<AjnaPoolImmutableMetadata>
+>();
+
+function poolMetadataCacheKey(publicClient: PublicClient, poolAddress: HexAddress): string {
+  // Include chainId if available so test-forks with pool-address reuse do not collide
+  const chainId = publicClient.chain?.id ?? "no-chain";
+  return `${String(chainId)}:${poolAddress.toLowerCase()}`;
+}
+
+async function readAjnaPoolImmutableMetadata(
+  publicClient: PublicClient,
+  poolAddress: HexAddress
+): Promise<AjnaPoolImmutableMetadata> {
+  const cacheKey = poolMetadataCacheKey(publicClient, poolAddress);
+  const cached = poolImmutableMetadataCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const promise = (async () => {
+    const [quoteTokenAddress, collateralAddress, quoteTokenScale, poolType] =
+      await Promise.all([
+        publicClient.readContract({
+          address: poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "quoteTokenAddress"
+        }),
+        publicClient.readContract({
+          address: poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "collateralAddress"
+        }),
+        publicClient.readContract({
+          address: poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "quoteTokenScale"
+        }),
+        publicClient.readContract({
+          address: poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "poolType"
+        })
+      ]);
+    return { quoteTokenAddress, collateralAddress, quoteTokenScale, poolType };
+  })();
+
+  poolImmutableMetadataCache.set(cacheKey, promise);
+  try {
+    return await promise;
+  } catch (error) {
+    // Evict failed fetches so later calls can retry
+    poolImmutableMetadataCache.delete(cacheKey);
+    throw error;
+  }
+}
+
+export function clearAjnaPoolImmutableMetadataCache(): void {
+  poolImmutableMetadataCache.clear();
+}
 
 export function clearAjnaSimulationAccountStateCache(): void {
   simulationAccountStateCache.clear();
@@ -89,19 +159,17 @@ export async function readAjnaPoolState(
   const effectiveNowSeconds = nowSeconds ?? Number(block.timestamp);
 
   const [
+    immutableMetadata,
     [currentRateWad, interestRateUpdateTimestamp],
     [currentDebtWad, , , t0Debt2ToCollateralWad],
     [debtColEmaWad, lupt0DebtEmaWad, debtEmaWad, depositEmaWad],
     [inflatorWad],
     totalT0Debt,
     totalT0DebtInAuction,
-    quoteTokenAddress,
-    collateralAddress,
-    quoteTokenScale,
-    poolType,
     loansInfo,
     borrowerInfo
   ] = await Promise.all([
+    readAjnaPoolImmutableMetadata(publicClient, poolAddress),
     publicClient.readContract({
       address: poolAddress,
       abi: ajnaPoolAbi,
@@ -141,30 +209,6 @@ export async function readAjnaPoolState(
     publicClient.readContract({
       address: poolAddress,
       abi: ajnaPoolAbi,
-      functionName: "quoteTokenAddress",
-      blockNumber: effectiveBlockNumber
-    }),
-    publicClient.readContract({
-      address: poolAddress,
-      abi: ajnaPoolAbi,
-      functionName: "collateralAddress",
-      blockNumber: effectiveBlockNumber
-    }),
-    publicClient.readContract({
-      address: poolAddress,
-      abi: ajnaPoolAbi,
-      functionName: "quoteTokenScale",
-      blockNumber: effectiveBlockNumber
-    }),
-    publicClient.readContract({
-      address: poolAddress,
-      abi: ajnaPoolAbi,
-      functionName: "poolType",
-      blockNumber: effectiveBlockNumber
-    }),
-    publicClient.readContract({
-      address: poolAddress,
-      abi: ajnaPoolAbi,
       functionName: "loansInfo",
       blockNumber: effectiveBlockNumber
     }),
@@ -178,6 +222,8 @@ export async function readAjnaPoolState(
           blockNumber: effectiveBlockNumber
         })
   ]);
+  const { quoteTokenAddress, collateralAddress, quoteTokenScale, poolType } =
+    immutableMetadata;
 
   const rateState: AjnaRateState = {
     currentRateWad,
@@ -228,6 +274,71 @@ export async function readAjnaPoolState(
       maxT0DebtToCollateral: loansInfo[1],
       noOfLoans: loansInfo[2]
     }
+  };
+}
+
+/**
+ * Lightweight pool read for simulation replay loops.
+ * Returns only the fields needed to classify the next rate move and observe rate
+ * transitions after a mutating action. Costs 3 readContract calls (interestRateInfo,
+ * debtInfo, emasInfo) + 1 getBlock, vs 12 readContract + 1 getBlock for the full
+ * readAjnaPoolState. Safe for any caller that only reads `rateState`,
+ * `immediatePrediction`, `prediction`, `blockNumber`, or `blockTimestamp`.
+ */
+export async function readAjnaPoolRateStateOnly(
+  publicClient: PublicClient,
+  poolAddress: HexAddress,
+  nowSeconds?: number,
+  blockNumber?: bigint
+): Promise<AjnaPoolRateSnapshot> {
+  const block = await publicClient.getBlock(
+    blockNumber === undefined ? { blockTag: "latest" } : { blockNumber }
+  );
+  const effectiveBlockNumber = block.number;
+  const effectiveNowSeconds = nowSeconds ?? Number(block.timestamp);
+
+  const [
+    [currentRateWad, interestRateUpdateTimestamp],
+    [currentDebtWad],
+    [debtColEmaWad, lupt0DebtEmaWad, debtEmaWad, depositEmaWad]
+  ] = await Promise.all([
+    publicClient.readContract({
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "interestRateInfo",
+      blockNumber: effectiveBlockNumber
+    }),
+    publicClient.readContract({
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "debtInfo",
+      blockNumber: effectiveBlockNumber
+    }),
+    publicClient.readContract({
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "emasInfo",
+      blockNumber: effectiveBlockNumber
+    })
+  ]);
+
+  const rateState: AjnaRateState = {
+    currentRateWad,
+    currentDebtWad,
+    debtEmaWad,
+    depositEmaWad,
+    debtColEmaWad,
+    lupt0DebtEmaWad,
+    lastInterestRateUpdateTimestamp: Number(interestRateUpdateTimestamp),
+    nowTimestamp: effectiveNowSeconds
+  };
+
+  return {
+    blockNumber: effectiveBlockNumber,
+    blockTimestamp: Number(block.timestamp),
+    rateState,
+    prediction: forecastAjnaNextEligibleRate(rateState),
+    immediatePrediction: classifyAjnaNextRate(rateState)
   };
 }
 

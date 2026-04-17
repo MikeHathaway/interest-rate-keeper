@@ -6,6 +6,7 @@ import {
 } from "./anvil-fork.js";
 import { ajnaPoolAbi } from "./abi.js";
 import {
+  type AjnaPoolRateSnapshot,
   type AjnaPoolStateRead,
   type LendSimulationPathResult,
   deriveRateMoveOutcome
@@ -77,8 +78,8 @@ export async function withPreparedSimulationFork<T>(
 }
 
 export interface AjnaSimulationReplayActionContext extends TemporaryAnvilForkContext {
-  readPoolState: () => Promise<AjnaPoolStateRead>;
-  observeState: (stateAfterAction: AjnaPoolStateRead) => void;
+  readPoolState: () => Promise<AjnaPoolRateSnapshot>;
+  observeState: (stateAfterAction: AjnaPoolRateSnapshot) => void;
 }
 
 export async function replayAjnaSimulationPath(
@@ -89,7 +90,7 @@ export async function replayAjnaSimulationPath(
     initialReadState: AjnaPoolStateRead;
     lookaheadUpdates: number;
     terminalDistanceFromRateBps: (rateBps: number) => number;
-    readPoolState: () => Promise<AjnaPoolStateRead>;
+    readPoolState: () => Promise<AjnaPoolRateSnapshot>;
     applyActions?: (context: AjnaSimulationReplayActionContext) => Promise<void>;
   }
 ): Promise<LendSimulationPathResult> {
@@ -103,9 +104,9 @@ export async function replayAjnaSimulationPath(
     let firstOutcome: RateMoveOutcome = "NO_CHANGE";
     let terminalRateWad = options.initialReadState.rateState.currentRateWad;
     let completedLookaheadUpdates = 0;
-    let simulatedReadState = options.initialReadState;
+    let simulatedReadState: AjnaPoolRateSnapshot = options.initialReadState;
 
-    const observeState = (stateAfterAction: AjnaPoolStateRead): void => {
+    const observeState = (stateAfterAction: AjnaPoolRateSnapshot): void => {
       simulatedReadState = stateAfterAction;
       terminalRateWad = stateAfterAction.rateState.currentRateWad;
       if (
@@ -124,7 +125,7 @@ export async function replayAjnaSimulationPath(
       );
     };
 
-    const readPoolState = async (): Promise<AjnaPoolStateRead> => {
+    const readPoolState = async (): Promise<AjnaPoolRateSnapshot> => {
       const state = await options.readPoolState();
       simulatedReadState = state;
       terminalRateWad = state.rateState.currentRateWad;

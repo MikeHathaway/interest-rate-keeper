@@ -1057,7 +1057,7 @@ async function main() {
 
   const publicClient = createPublicClient({
     chain: base,
-    transport: http(RPC_URL)
+    transport: http(RPC_URL, { batch: true })
   });
   const latestBlock = await publicClient.getBlockNumber();
   const pools = await listRecentPools(publicClient);

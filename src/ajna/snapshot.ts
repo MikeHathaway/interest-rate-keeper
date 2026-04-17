@@ -42,6 +42,7 @@ import {
 } from "./search-space.js";
 import { buildSimulationCacheKey, setBoundedCacheEntry } from "./snapshot-cache.js";
 import {
+  clearAjnaPoolImmutableMetadataCache,
   clearAjnaSimulationAccountStateCache,
   readAjnaPoolState,
   readSimulationAccountState
@@ -111,6 +112,7 @@ export function clearAjnaSnapshotCaches(): void {
   clearAjnaSimulationAccountStateCache();
   clearAjnaLendSimulationPathCache();
   clearAjnaBorrowSimulationPathCache();
+  clearAjnaPoolImmutableMetadataCache();
 }
 
 function buildSimulationCandidateCacheKey(
@@ -739,7 +741,7 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
     this.publicClient =
       dependencies.publicClient ??
       createPublicClient({
-        transport: http(runtime.rpcUrl)
+        transport: http(runtime.rpcUrl, { batch: true })
       });
     this.now = dependencies.now ?? (() => Math.floor(Date.now() / 1000));
   }

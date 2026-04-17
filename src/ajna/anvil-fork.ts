@@ -142,15 +142,15 @@ async function startTemporaryAnvilFork(
       }
     });
     const publicClient = createPublicClient({
-      transport: http(rpcUrl)
+      transport: http(rpcUrl, { batch: true })
     });
     const testClient = createTestClient({
       mode: "anvil",
-      transport: http(rpcUrl)
+      transport: http(rpcUrl, { batch: true })
     });
     const walletClient = createWalletClient({
       chain: forkChain,
-      transport: http(rpcUrl)
+      transport: http(rpcUrl, { batch: true })
     });
 
     return {

@@ -14,7 +14,11 @@ import {
   smallestBigInt
 } from "./snapshot-internal.js";
 import { synthesizeAjnaLendCandidate } from "./snapshot-lend.js";
-import { readAjnaPoolState, readSimulationAccountState } from "./snapshot-read.js";
+import {
+  readAjnaPoolRateStateOnly,
+  readAjnaPoolState,
+  readSimulationAccountState
+} from "./snapshot-read.js";
 import {
   replayAjnaSimulationPath,
   withPreparedLazySimulationFork
@@ -179,7 +183,7 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
               lookaheadUpdates,
               terminalDistanceFromRateBps: (rateBps) =>
                 distanceToTargetBand(rateBps, targetBand),
-              readPoolState: () => readAjnaPoolState(publicClient, options.poolAddress),
+              readPoolState: () => readAjnaPoolRateStateOnly(publicClient, options.poolAddress),
               applyActions: async ({
                 publicClient,
                 walletClient,

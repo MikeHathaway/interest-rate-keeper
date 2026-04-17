@@ -330,17 +330,17 @@ export function createClients() {
     account,
     publicClient: createPublicClient({
       chain: base,
-      transport: http(LOCAL_RPC_URL)
+      transport: http(LOCAL_RPC_URL, { batch: true })
     }) as any,
     walletClient: createWalletClient({
       account,
       chain: base,
-      transport: http(LOCAL_RPC_URL)
+      transport: http(LOCAL_RPC_URL, { batch: true })
     }) as any,
     testClient: createTestClient({
       chain: base,
       mode: "anvil",
-      transport: http(LOCAL_RPC_URL)
+      transport: http(LOCAL_RPC_URL, { batch: true })
     }) as any
   };
 }
@@ -352,17 +352,17 @@ export function createClientsForPrivateKey(privateKey: `0x${string}`) {
     account,
     publicClient: createPublicClient({
       chain: base,
-      transport: http(LOCAL_RPC_URL)
+      transport: http(LOCAL_RPC_URL, { batch: true })
     }) as any,
     walletClient: createWalletClient({
       account,
       chain: base,
-      transport: http(LOCAL_RPC_URL)
+      transport: http(LOCAL_RPC_URL, { batch: true })
     }) as any,
     testClient: createTestClient({
       chain: base,
       mode: "anvil",
-      transport: http(LOCAL_RPC_URL)
+      transport: http(LOCAL_RPC_URL, { batch: true })
     }) as any
   };
 }
@@ -370,7 +370,7 @@ export function createClientsForPrivateKey(privateKey: `0x${string}`) {
 export function createRpcWalletClient() {
   return createWalletClient({
     chain: base,
-    transport: http(LOCAL_RPC_URL)
+    transport: http(LOCAL_RPC_URL, { batch: true })
   }) as any;
 }
 

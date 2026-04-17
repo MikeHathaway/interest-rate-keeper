@@ -144,11 +144,11 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
   const runtime = assertLiveAjnaConfig(config);
   const account = privateKeyToAccount(requireAjnaPrivateKey());
   const publicClient = createPublicClient({
-    transport: http(runtime.rpcUrl)
+    transport: http(runtime.rpcUrl, { batch: true })
   });
   const walletClient = createWalletClient({
     account,
-    transport: http(runtime.rpcUrl)
+    transport: http(runtime.rpcUrl, { batch: true })
   });
 
   let tokenAddressesPromise:
@@ -181,18 +181,20 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
   const defaultRecipientAddress = runtime.recipientAddress ?? account.address;
 
   async function submitContractCall(spec: ContractWriteSpec): Promise<{ transactionHash: Hex }> {
-    const estimatedGas = await publicClient.estimateContractGas({
-      account,
-      address: spec.address,
-      abi: spec.abi,
-      functionName: spec.functionName as never,
-      args: spec.args as never
-    });
-    const fees = await publicClient.estimateFeesPerGas({
-      chain: undefined
-    }).catch(async () => ({
-      gasPrice: await publicClient.getGasPrice()
-    }));
+    const [estimatedGas, fees] = await Promise.all([
+      publicClient.estimateContractGas({
+        account,
+        address: spec.address,
+        abi: spec.abi,
+        functionName: spec.functionName as never,
+        args: spec.args as never
+      }),
+      publicClient
+        .estimateFeesPerGas({ chain: undefined })
+        .catch(async () => ({
+          gasPrice: await publicClient.getGasPrice()
+        }))
+    ]);
     const feeCapWei =
       resolveFeeCapWei(fees) ?? (await publicClient.getGasPrice());
     assertGasCostWithinCap(

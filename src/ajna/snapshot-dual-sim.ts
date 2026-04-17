@@ -24,7 +24,11 @@ import {
   type ProtocolShapedDualQuoteAnchorStep
 } from "./snapshot-dual-prefilter.js";
 import { synthesizeAjnaLendAndBorrowCandidate } from "./snapshot-dual.js";
-import { readAjnaPoolState, readSimulationAccountState } from "./snapshot-read.js";
+import {
+  readAjnaPoolRateStateOnly,
+  readAjnaPoolState,
+  readSimulationAccountState
+} from "./snapshot-read.js";
 import {
   replayAjnaSimulationPath,
   withPreparedSimulationFork
@@ -318,7 +322,7 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
             lookaheadUpdates,
             terminalDistanceFromRateBps: (rateBps) =>
               distanceToTargetBand(rateBps, targetBand),
-            readPoolState: () => readAjnaPoolState(publicClient, options.poolAddress),
+            readPoolState: () => readAjnaPoolRateStateOnly(publicClient, options.poolAddress),
             applyActions: async ({
               walletClient,
               publicClient,
