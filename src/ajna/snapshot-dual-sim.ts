@@ -12,8 +12,6 @@ import {
   resolveBorrowSimulationLookaheadUpdates,
   resolveMinimumBorrowActionAmount,
   resolveMinimumQuoteActionAmount,
-  resolveSimulationBorrowerAddress,
-  resolveSimulationSenderAddress,
   smallestBigInt
 } from "./snapshot-internal.js";
 import { synthesizeAjnaBorrowCandidate } from "./snapshot-borrow.js";
@@ -24,11 +22,11 @@ import {
   type ProtocolShapedDualQuoteAnchorStep
 } from "./snapshot-dual-prefilter.js";
 import { synthesizeAjnaLendAndBorrowCandidate } from "./snapshot-dual.js";
+import { readAjnaPoolRateStateOnly } from "./snapshot-read.js";
 import {
-  readAjnaPoolRateStateOnly,
-  readAjnaPoolState,
-  readSimulationAccountState
-} from "./snapshot-read.js";
+  buildSimulationPreamble,
+  resolveEffectiveAccountState
+} from "./snapshot-sim-context.js";
 import {
   replayAjnaSimulationPath,
   withPreparedSimulationFork
@@ -44,7 +42,7 @@ import {
   resolveProtocolShapedPreWindowDualBucketIndexes,
   searchCoarseToFineDualSpace
 } from "./search-space.js";
-import { buildTargetBand, distanceToTargetBand } from "../planner.js";
+import { distanceToTargetBand } from "../planner.js";
 import {
   type AddQuoteStep,
   type DrawDebtStep,
@@ -52,8 +50,12 @@ import {
   type KeeperConfig,
   type PlanCandidate,
   type RemoveQuoteStep,
-  type RateMoveOutcome
+  type RateMoveOutcome,
+  type TargetBand
 } from "../types.js";
+import { type PublicClient } from "viem";
+import { type TemporaryAnvilForkContext } from "./anvil-fork.js";
+import { type SimulationLenderBucketState } from "./snapshot-internal.js";
 
 const EXACT_DUAL_MAX_BUCKETS = 3;
 const EXACT_DUAL_MAX_BRANCHES = 6;
@@ -61,6 +63,261 @@ const EXACT_DUAL_MAX_QUOTE_SAMPLES = 6;
 const EXACT_DUAL_MAX_BORROW_SAMPLES = 6;
 const EXACT_DUAL_MAX_PROMISING_BASINS = 3;
 const EXACT_DUAL_MAX_LIMIT_INDEXES = 8;
+
+interface DualSimulationContext {
+  fork: TemporaryAnvilForkContext;
+  poolAddress: HexAddress;
+  simulationSenderAddress: HexAddress;
+  borrowerAddress: HexAddress;
+  readState: AjnaPoolStateRead;
+  lookaheadUpdates: number;
+  targetBand: TargetBand;
+}
+
+interface DualSimulationActions {
+  addQuoteAmount?: bigint;
+  addQuoteBucketIndex?: number;
+  removeQuoteAmount?: bigint;
+  removeQuoteBucketIndex?: number;
+  drawDebtAmount?: bigint;
+  limitIndex?: number;
+  collateralAmount?: bigint;
+  expiry?: number;
+}
+
+/**
+ * Replays a dual-side (LEND + BORROW or REMOVE_QUOTE + DRAW_DEBT) simulation
+ * path on a prepared anvil fork. Returns the rate transition and terminal
+ * distance observed. `actions === null` runs the baseline (no mutations,
+ * just the lookahead replay).
+ */
+async function simulateDualPath(
+  context: DualSimulationContext,
+  actions: DualSimulationActions | null
+): Promise<DualSimulationPathResult> {
+  const {
+    fork,
+    poolAddress,
+    simulationSenderAddress,
+    borrowerAddress,
+    readState,
+    lookaheadUpdates,
+    targetBand
+  } = context;
+
+  return replayAjnaSimulationPath(fork, {
+    poolAddress,
+    simulationSenderAddress,
+    initialReadState: readState,
+    lookaheadUpdates,
+    terminalDistanceFromRateBps: (rateBps) => distanceToTargetBand(rateBps, targetBand),
+    readPoolState: () => readAjnaPoolRateStateOnly(fork.publicClient, poolAddress),
+    applyActions: async ({ walletClient, publicClient, readPoolState, observeState }) => {
+      if (actions?.addQuoteAmount !== undefined && actions.addQuoteAmount > 0n) {
+        if (actions.addQuoteBucketIndex === undefined) {
+          throw new Error("dual-side simulation requires an addQuote bucket index");
+        }
+        const addQuoteHash = await walletClient.writeContract({
+          account: simulationSenderAddress,
+          chain: undefined,
+          address: poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "addQuoteToken",
+          args: [
+            actions.addQuoteAmount,
+            BigInt(actions.addQuoteBucketIndex),
+            BigInt(actions.expiry ?? readState.rateState.nowTimestamp)
+          ]
+        });
+        const addQuoteReceipt = await publicClient.waitForTransactionReceipt({
+          hash: addQuoteHash
+        });
+        if (addQuoteReceipt.status !== "success") {
+          throw new Error("addQuoteToken simulation reverted");
+        }
+
+        observeState(await readPoolState());
+      }
+
+      if (actions?.removeQuoteAmount !== undefined && actions.removeQuoteAmount > 0n) {
+        if (actions.removeQuoteBucketIndex === undefined) {
+          throw new Error("dual-side simulation requires a removeQuote bucket index");
+        }
+        const removeQuoteHash = await walletClient.writeContract({
+          account: simulationSenderAddress,
+          chain: undefined,
+          address: poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "removeQuoteToken",
+          args: [actions.removeQuoteAmount, BigInt(actions.removeQuoteBucketIndex)]
+        });
+        const removeQuoteReceipt = await publicClient.waitForTransactionReceipt({
+          hash: removeQuoteHash
+        });
+        if (removeQuoteReceipt.status !== "success") {
+          throw new Error("removeQuoteToken simulation reverted");
+        }
+
+        observeState(await readPoolState());
+      }
+
+      if (actions?.drawDebtAmount !== undefined && actions.drawDebtAmount > 0n) {
+        if (actions.limitIndex === undefined) {
+          throw new Error("dual-side simulation requires a drawDebt limit index");
+        }
+        const drawDebtHash = await walletClient.writeContract({
+          account: simulationSenderAddress,
+          chain: undefined,
+          address: poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "drawDebt",
+          args: [
+            borrowerAddress,
+            actions.drawDebtAmount,
+            BigInt(actions.limitIndex),
+            actions.collateralAmount ?? 0n
+          ]
+        });
+        const drawDebtReceipt = await publicClient.waitForTransactionReceipt({
+          hash: drawDebtHash
+        });
+        if (drawDebtReceipt.status !== "success") {
+          throw new Error("drawDebt simulation reverted");
+        }
+
+        observeState(await readPoolState());
+      }
+    }
+  });
+}
+
+/**
+ * Fetches the deposit amounts for each bucket index via a single multicall and
+ * packages them with the readState snapshot fields into the shape the prefilter
+ * expects. Returns undefined when the caller opts out (protocolShapedDualSearch
+ * is false) or when the readState is missing borrower context.
+ */
+async function buildDualProtocolApproximation(
+  publicClient: PublicClient,
+  readState: AjnaPoolStateRead,
+  poolAddress: HexAddress,
+  protocolShapedDualSearch: boolean,
+  protocolApproximationBucketIndexes: number[]
+): Promise<
+  | {
+      state: {
+        currentRateWad: bigint;
+        currentDebtWad: bigint;
+        debtEmaWad: bigint;
+        depositEmaWad: bigint;
+        debtColEmaWad: bigint;
+        lupt0DebtEmaWad: bigint;
+        inflatorWad: bigint;
+        totalT0Debt: bigint;
+        totalT0DebtInAuction: bigint;
+        t0Debt2ToCollateralWad: bigint;
+        borrowerT0Debt: bigint;
+        borrowerCollateral: bigint;
+        secondsUntilNextRateUpdate: number;
+      };
+      deposits: Array<{ bucketIndex: number; amountWad: bigint }>;
+    }
+  | undefined
+> {
+  if (!protocolShapedDualSearch || !readState.borrowerState) {
+    return undefined;
+  }
+
+  const depositResults =
+    protocolApproximationBucketIndexes.length === 0
+      ? []
+      : (
+          await publicClient.multicall({
+            allowFailure: true,
+            contracts: protocolApproximationBucketIndexes.map((bucketIndex) => ({
+              address: poolAddress,
+              abi: ajnaPoolAbi,
+              functionName: "bucketInfo",
+              args: [BigInt(bucketIndex)]
+            }))
+          })
+        ).map((result, index) => {
+          if (result.status !== "success") {
+            return undefined;
+          }
+          const [, , bankruptcyTime, bucketDeposit] = result.result as unknown as readonly [
+            bigint,
+            bigint,
+            bigint,
+            bigint,
+            bigint
+          ];
+          if (bankruptcyTime !== 0n || bucketDeposit === 0n) {
+            return undefined;
+          }
+          return {
+            bucketIndex: protocolApproximationBucketIndexes[index]!,
+            amountWad: bucketDeposit * readState.quoteTokenScale
+          };
+        });
+
+  return {
+    state: {
+      currentRateWad: readState.rateState.currentRateWad,
+      currentDebtWad: readState.rateState.currentDebtWad,
+      debtEmaWad: readState.rateState.debtEmaWad,
+      depositEmaWad: readState.rateState.depositEmaWad,
+      debtColEmaWad: readState.rateState.debtColEmaWad,
+      lupt0DebtEmaWad: readState.rateState.lupt0DebtEmaWad,
+      inflatorWad: readState.inflatorWad,
+      totalT0Debt: readState.totalT0Debt,
+      totalT0DebtInAuction: readState.totalT0DebtInAuction,
+      t0Debt2ToCollateralWad: readState.t0Debt2ToCollateralWad,
+      borrowerT0Debt: readState.borrowerState.t0Debt,
+      borrowerCollateral: readState.borrowerState.collateral,
+      secondsUntilNextRateUpdate: readState.immediatePrediction.secondsUntilNextRateUpdate
+    },
+    deposits: depositResults.filter(
+      (deposit): deposit is { bucketIndex: number; amountWad: bigint } =>
+        deposit !== undefined
+    )
+  };
+}
+
+/**
+ * Filters and ranks lender-quote buckets for the remove-quote side of a dual
+ * search. Sorts by proximity to the meaningful-deposit threshold, then by
+ * withdrawable amount (descending), then by bucket index (ascending) for
+ * determinism. Capped at EXACT_DUAL_MAX_BUCKETS.
+ */
+function resolveRemoveQuoteLenderBuckets(
+  effectiveAccountState: SimulationAccountState,
+  readState: AjnaPoolStateRead,
+  minimumQuoteAmount: bigint,
+  allowRemoveQuoteDualSearch: boolean
+): SimulationLenderBucketState[] {
+  if (!allowRemoveQuoteDualSearch) {
+    return [];
+  }
+
+  return (effectiveAccountState.lenderBucketStates ?? [])
+    .filter((state) => state.maxWithdrawableQuoteAmount >= minimumQuoteAmount)
+    .sort((left, right) => {
+      const thresholdIndex = readState.meaningfulDepositThresholdFenwickIndex;
+      const leftThresholdDistance =
+        thresholdIndex === undefined ? 0 : Math.abs(left.bucketIndex - thresholdIndex);
+      const rightThresholdDistance =
+        thresholdIndex === undefined ? 0 : Math.abs(right.bucketIndex - thresholdIndex);
+      if (leftThresholdDistance !== rightThresholdDistance) {
+        return leftThresholdDistance - rightThresholdDistance;
+      }
+      if (left.maxWithdrawableQuoteAmount !== right.maxWithdrawableQuoteAmount) {
+        return left.maxWithdrawableQuoteAmount > right.maxWithdrawableQuoteAmount ? -1 : 1;
+      }
+      return left.bucketIndex - right.bucketIndex;
+    })
+    .slice(0, EXACT_DUAL_MAX_BUCKETS);
+}
 
 export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
   readState: AjnaPoolStateRead,
@@ -80,16 +337,18 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
     return undefined;
   }
 
-  const targetBand = buildTargetBand(config);
-  const baselinePrediction = options.baselinePrediction ?? readState.prediction;
-  if (distanceToTargetBand(baselinePrediction.predictedNextRateBps, targetBand) === 0) {
+  const preamble = buildSimulationPreamble(readState, config, {
+    poolAddress: options.poolAddress,
+    ...(options.accountState === undefined ? {} : { accountState: options.accountState }),
+    ...(options.baselinePrediction === undefined
+      ? {}
+      : { baselinePrediction: options.baselinePrediction })
+  });
+  if (preamble.baselineInBand) {
     return undefined;
   }
-  const simulationSenderAddress =
-    options.accountState?.simulationSenderAddress ?? resolveSimulationSenderAddress(config);
-  const borrowerAddress =
-    options.accountState?.borrowerAddress ??
-    resolveSimulationBorrowerAddress(config, simulationSenderAddress);
+  const { targetBand, baselinePrediction, simulationSenderAddress, borrowerAddress } =
+    preamble;
   const heuristicDualCandidate = synthesizeAjnaLendAndBorrowCandidate(
     readState.rateState,
     config,
@@ -190,21 +449,22 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
       const exactDualBucketIndexes = protocolShapedDualSearch
         ? resolvedDualBucketIndexes
         : resolvedDualBucketIndexes.slice(0, EXACT_DUAL_MAX_BUCKETS);
-      const effectiveAccountState =
-        options.accountState ??
-        (await readSimulationAccountState(
-          publicClient,
-          options.poolAddress,
-          readState,
-          config,
-          {
-            needsQuoteState: true,
-            needsCollateralState: true,
-            lenderQuoteBucketIndexes: Array.from(
-              new Set([...addQuoteBucketIndexes, ...removeQuoteBucketIndexes])
-            )
-          }
-        ));
+      const effectiveAccountState = await resolveEffectiveAccountState(
+        publicClient,
+        readState,
+        config,
+        {
+          poolAddress: options.poolAddress,
+          ...(options.accountState === undefined
+            ? {}
+            : { accountState: options.accountState }),
+          needsQuoteState: true,
+          needsCollateralState: true,
+          lenderQuoteBucketIndexes: Array.from(
+            new Set([...addQuoteBucketIndexes, ...removeQuoteBucketIndexes])
+          )
+        }
+      );
 
       const maxAvailableQuote = smallestBigInt(
         config.maxQuoteTokenExposure,
@@ -225,200 +485,31 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
       if (candidateCollateralAmounts.length === 0) {
         return undefined;
       }
-      const removeQuoteLenderBuckets = allowRemoveQuoteDualSearch
-        ? (effectiveAccountState.lenderBucketStates ?? [])
-            .filter(
-              (state) =>
-                state.maxWithdrawableQuoteAmount >= minimumQuoteAmount
-            )
-            .sort((left, right) => {
-              const thresholdIndex = readState.meaningfulDepositThresholdFenwickIndex;
-              const leftThresholdDistance =
-                thresholdIndex === undefined ? 0 : Math.abs(left.bucketIndex - thresholdIndex);
-              const rightThresholdDistance =
-                thresholdIndex === undefined ? 0 : Math.abs(right.bucketIndex - thresholdIndex);
-              if (leftThresholdDistance !== rightThresholdDistance) {
-                return leftThresholdDistance - rightThresholdDistance;
-              }
-              if (left.maxWithdrawableQuoteAmount !== right.maxWithdrawableQuoteAmount) {
-                return left.maxWithdrawableQuoteAmount > right.maxWithdrawableQuoteAmount ? -1 : 1;
-              }
-              return left.bucketIndex - right.bucketIndex;
-            })
-            .slice(0, EXACT_DUAL_MAX_BUCKETS)
-        : [];
-      const protocolApproximation =
-        protocolShapedDualSearch && readState.borrowerState
-          ? {
-              state: {
-                currentRateWad: readState.rateState.currentRateWad,
-                currentDebtWad: readState.rateState.currentDebtWad,
-                debtEmaWad: readState.rateState.debtEmaWad,
-                depositEmaWad: readState.rateState.depositEmaWad,
-                debtColEmaWad: readState.rateState.debtColEmaWad,
-                lupt0DebtEmaWad: readState.rateState.lupt0DebtEmaWad,
-                inflatorWad: readState.inflatorWad,
-                totalT0Debt: readState.totalT0Debt,
-                totalT0DebtInAuction: readState.totalT0DebtInAuction,
-                t0Debt2ToCollateralWad: readState.t0Debt2ToCollateralWad,
-                borrowerT0Debt: readState.borrowerState.t0Debt,
-                borrowerCollateral: readState.borrowerState.collateral,
-                secondsUntilNextRateUpdate: readState.immediatePrediction.secondsUntilNextRateUpdate
-              },
-              deposits: (
-                protocolApproximationBucketIndexes.length === 0
-                  ? []
-                  : (
-                      await publicClient.multicall({
-                        allowFailure: true,
-                        contracts: protocolApproximationBucketIndexes.map(
-                          (bucketIndex) => ({
-                            address: options.poolAddress,
-                            abi: ajnaPoolAbi,
-                            functionName: "bucketInfo",
-                            args: [BigInt(bucketIndex)]
-                          })
-                        )
-                      })
-                    ).map((result, index) => {
-                      if (result.status !== "success") {
-                        return undefined;
-                      }
-                      const [, , bankruptcyTime, bucketDeposit] =
-                        result.result as unknown as readonly [
-                          bigint,
-                          bigint,
-                          bigint,
-                          bigint,
-                          bigint
-                        ];
-                      if (bankruptcyTime !== 0n || bucketDeposit === 0n) {
-                        return undefined;
-                      }
-                      return {
-                        bucketIndex: protocolApproximationBucketIndexes[index]!,
-                        amountWad: bucketDeposit * readState.quoteTokenScale
-                      };
-                    })
-              ).filter(
-                (
-                  deposit
-                ): deposit is {
-                  bucketIndex: number;
-                  amountWad: bigint;
-                } => deposit !== undefined
-              )
-            }
-          : undefined;
+      const removeQuoteLenderBuckets = resolveRemoveQuoteLenderBuckets(
+        effectiveAccountState,
+        readState,
+        minimumQuoteAmount,
+        allowRemoveQuoteDualSearch
+      );
+      const protocolApproximation = await buildDualProtocolApproximation(
+        publicClient,
+        readState,
+        options.poolAddress,
+        protocolShapedDualSearch,
+        protocolApproximationBucketIndexes
+      );
 
-      async function simulatePath(
-        actions:
-          | {
-              addQuoteAmount?: bigint;
-              addQuoteBucketIndex?: number;
-              removeQuoteAmount?: bigint;
-              removeQuoteBucketIndex?: number;
-              drawDebtAmount?: bigint;
-              limitIndex?: number;
-              collateralAmount?: bigint;
-              expiry?: number;
-            }
-          | null
-      ): Promise<DualSimulationPathResult> {
-        return replayAjnaSimulationPath(
-          { publicClient, testClient, walletClient },
-          {
-            poolAddress: options.poolAddress,
-            simulationSenderAddress,
-            initialReadState: readState,
-            lookaheadUpdates,
-            terminalDistanceFromRateBps: (rateBps) =>
-              distanceToTargetBand(rateBps, targetBand),
-            readPoolState: () => readAjnaPoolRateStateOnly(publicClient, options.poolAddress),
-            applyActions: async ({
-              walletClient,
-              publicClient,
-              readPoolState,
-              observeState
-            }) => {
-              if (actions?.addQuoteAmount !== undefined && actions.addQuoteAmount > 0n) {
-                if (actions.addQuoteBucketIndex === undefined) {
-                  throw new Error("dual-side simulation requires an addQuote bucket index");
-                }
-                const addQuoteHash = await walletClient.writeContract({
-                  account: simulationSenderAddress,
-                  chain: undefined,
-                  address: options.poolAddress,
-                  abi: ajnaPoolAbi,
-                  functionName: "addQuoteToken",
-                  args: [
-                    actions.addQuoteAmount,
-                    BigInt(actions.addQuoteBucketIndex),
-                    BigInt(actions.expiry ?? readState.rateState.nowTimestamp)
-                  ]
-                });
-                const addQuoteReceipt = await publicClient.waitForTransactionReceipt({
-                  hash: addQuoteHash
-                });
-                if (addQuoteReceipt.status !== "success") {
-                  throw new Error("addQuoteToken simulation reverted");
-                }
-
-                observeState(await readPoolState());
-              }
-
-              if (actions?.removeQuoteAmount !== undefined && actions.removeQuoteAmount > 0n) {
-                if (actions.removeQuoteBucketIndex === undefined) {
-                  throw new Error("dual-side simulation requires a removeQuote bucket index");
-                }
-                const removeQuoteHash = await walletClient.writeContract({
-                  account: simulationSenderAddress,
-                  chain: undefined,
-                  address: options.poolAddress,
-                  abi: ajnaPoolAbi,
-                  functionName: "removeQuoteToken",
-                  args: [actions.removeQuoteAmount, BigInt(actions.removeQuoteBucketIndex)]
-                });
-                const removeQuoteReceipt = await publicClient.waitForTransactionReceipt({
-                  hash: removeQuoteHash
-                });
-                if (removeQuoteReceipt.status !== "success") {
-                  throw new Error("removeQuoteToken simulation reverted");
-                }
-
-                observeState(await readPoolState());
-              }
-
-              if (actions?.drawDebtAmount !== undefined && actions.drawDebtAmount > 0n) {
-                if (actions.limitIndex === undefined) {
-                  throw new Error("dual-side simulation requires a drawDebt limit index");
-                }
-                const drawDebtHash = await walletClient.writeContract({
-                  account: simulationSenderAddress,
-                  chain: undefined,
-                  address: options.poolAddress,
-                  abi: ajnaPoolAbi,
-                  functionName: "drawDebt",
-                  args: [
-                    borrowerAddress,
-                    actions.drawDebtAmount,
-                    BigInt(actions.limitIndex),
-                    actions.collateralAmount ?? 0n
-                  ]
-                });
-                const drawDebtReceipt = await publicClient.waitForTransactionReceipt({
-                  hash: drawDebtHash
-                });
-                if (drawDebtReceipt.status !== "success") {
-                  throw new Error("drawDebt simulation reverted");
-                }
-
-                observeState(await readPoolState());
-              }
-            }
-          }
-        );
-      }
+      const simulationContext: DualSimulationContext = {
+        fork: { publicClient, testClient, walletClient },
+        poolAddress: options.poolAddress,
+        simulationSenderAddress,
+        borrowerAddress,
+        readState,
+        lookaheadUpdates,
+        targetBand
+      };
+      const simulatePath = (actions: DualSimulationActions | null) =>
+        simulateDualPath(simulationContext, actions);
 
       const baselinePath = await simulatePath(null);
       const baselineNextDistance = distanceToTargetBand(

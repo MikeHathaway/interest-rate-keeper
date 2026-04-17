@@ -1,8 +1,8 @@
 import {
   AJNA_COLLATERALIZATION_FACTOR_WAD,
-  AJNA_FENWICK_ZERO_INDEX,
-  AJNA_FLOAT_STEP,
-  MAX_AJNA_LIMIT_INDEX
+  MAX_AJNA_LIMIT_INDEX,
+  fenwickIndexToPriceWad,
+  priceToFenwickIndex
 } from "./protocol-constants.js";
 import { forecastAjnaNextEligibleRate, type AjnaRateState, WAD, wdiv, wmul } from "./rate-state.js";
 import { type RateMoveOutcome } from "../types.js";
@@ -81,24 +81,6 @@ function blendEmaApproxWad(
   return floatToWad(weight * wadToFloat(previousWad) + (1 - weight) * wadToFloat(cachedWad));
 }
 
-function priceToFenwickIndex(priceWad: bigint): number {
-  const price = Number(priceWad) / 1e18;
-  const rawIndex = Math.log(price) / Math.log(AJNA_FLOAT_STEP);
-  const ceilIndex = Math.ceil(rawIndex);
-  const fenwickIndex =
-    rawIndex < 0 && ceilIndex - rawIndex > 0.5
-      ? AJNA_FENWICK_ZERO_INDEX + 1 - ceilIndex
-      : AJNA_FENWICK_ZERO_INDEX - ceilIndex;
-
-  return Math.max(0, Math.min(MAX_AJNA_LIMIT_INDEX, fenwickIndex));
-}
-
-function fenwickIndexToPriceWad(index: number): bigint {
-  const bucketIndex = AJNA_FENWICK_ZERO_INDEX - index;
-  const price = AJNA_FLOAT_STEP ** bucketIndex;
-  return BigInt(Math.round(price * 1e18));
-}
-
 function treeSumDepositsWad(deposits: readonly ApproximateDepositWadEntry[]): bigint {
   return deposits.reduce((sum, deposit) => sum + deposit.amountWad, 0n);
 }
@@ -150,7 +132,10 @@ function computeMeaningfulDepositForDepositsWad(
     if (dwatpWad >= maxPriceWad) {
       meaningfulDeposit = 0n;
     } else if (dwatpWad >= minPriceWad) {
-      meaningfulDeposit = prefixSumDepositsWad(deposits, priceToFenwickIndex(dwatpWad));
+      meaningfulDeposit = prefixSumDepositsWad(
+        deposits,
+        priceToFenwickIndex(dwatpWad) ?? MAX_AJNA_LIMIT_INDEX
+      );
     }
   }
 

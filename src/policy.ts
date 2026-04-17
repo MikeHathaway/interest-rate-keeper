@@ -1,4 +1,8 @@
-import { distanceToTargetBand, withExecutionBuffer } from "./planner.js";
+import {
+  currentAndProjectedRatesAreInBand,
+  distanceToTargetBand,
+  withExecutionBuffer
+} from "./planner.js";
 import {
   managedDistanceImprovementBps,
   maximumManagedReleasedQuoteAmount,
@@ -72,7 +76,7 @@ function findCandidate(snapshot: PoolSnapshot, candidateId: string) {
   return snapshot.candidates.find((candidate) => candidate.id === candidateId);
 }
 
-function normalizeStepForComparison(step: ExecutionStep): string {
+export function normalizeStepForComparison(step: ExecutionStep): string {
   switch (step.type) {
     case "ADD_QUOTE":
       return `ADD_QUOTE:${step.amount.toString()}:${step.bucketIndex}:${step.expiry}`;
@@ -139,20 +143,6 @@ function coarseSnapshotSignature(snapshot: PoolSnapshot): string {
       ? "-"
       : String(snapshot.planningLookaheadUpdates)
   ].join(":");
-}
-
-function projectedRateBps(snapshot: PoolSnapshot): number {
-  return snapshot.planningRateBps ?? snapshot.predictedNextRateBps;
-}
-
-function currentAndProjectedRatesAreInBand(
-  snapshot: PoolSnapshot,
-  plan: CyclePlan
-): boolean {
-  return (
-    distanceToTargetBand(snapshot.currentRateBps, plan.targetBand) === 0 &&
-    distanceToTargetBand(projectedRateBps(snapshot), plan.targetBand) === 0
-  );
 }
 
 function managedPlanImprovementBps(plan: CyclePlan, snapshot: PoolSnapshot): number {
@@ -433,7 +423,10 @@ export function preSubmitRecheck(
     }
   }
 
-  if (plan.intent !== "NO_OP" && currentAndProjectedRatesAreInBand(freshSnapshot, plan)) {
+  if (
+    plan.intent !== "NO_OP" &&
+    currentAndProjectedRatesAreInBand(freshSnapshot, plan.targetBand)
+  ) {
     return {
       code: "POOL_STATE_CHANGED",
       reason: "pool is already safely inside the target band before execution"

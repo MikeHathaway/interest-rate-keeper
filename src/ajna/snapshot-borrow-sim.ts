@@ -1,25 +1,26 @@
 import { ajnaPoolAbi } from "./abi.js";
 import { synthesizeAjnaBorrowCandidate, findPureBorrowImprovementThresholdForCollateral } from "./snapshot-borrow.js";
-import { buildSimulationCacheKey, setBoundedCacheEntry } from "./snapshot-cache.js";
+import {
+  buildSimulationCacheKey,
+  registerAjnaCacheClearable,
+  setBoundedCacheEntry
+} from "./snapshot-cache.js";
 import {
   type AjnaPoolStateRead,
   type BorrowSimulationPathResult,
   type BorrowSimulationSynthesisResult,
   type SimulationAccountState,
-  buildSnapshotFingerprint,
   extractDrawDebtStep,
   finalizeCandidate,
   resolveBorrowSimulationLookaheadUpdates,
   resolveMinimumBorrowActionAmount,
-  resolveSimulationBorrowerAddress,
-  resolveSimulationSenderAddress,
   smallestBigInt
 } from "./snapshot-internal.js";
+import { readAjnaPoolRateStateOnly } from "./snapshot-read.js";
 import {
-  readAjnaPoolRateStateOnly,
-  readAjnaPoolState,
-  readSimulationAccountState
-} from "./snapshot-read.js";
+  buildSimulationPreamble,
+  resolveEffectiveAccountState
+} from "./snapshot-sim-context.js";
 import {
   replayAjnaSimulationPath,
   withPreparedLazySimulationFork
@@ -38,7 +39,7 @@ import {
   resolvePoolAwareBorrowLimitIndexes,
   resolveSimulationBorrowCollateralAmounts
 } from "./search-space.js";
-import { buildTargetBand, distanceToTargetBand } from "../planner.js";
+import { distanceToTargetBand } from "../planner.js";
 import {
   type HexAddress,
   type KeeperConfig,
@@ -56,10 +57,7 @@ const EXACT_MULTI_CYCLE_BORROW_MAX_COLLATERAL_SAMPLES = 8;
 const EXACT_MULTI_CYCLE_BORROW_MAX_IMPROVING_MATCHES = 6;
 
 const borrowSimulationPathCache = new Map<string, BorrowSimulationPathResult | null>();
-
-export function clearAjnaBorrowSimulationPathCache(): void {
-  borrowSimulationPathCache.clear();
-}
+registerAjnaCacheClearable(() => borrowSimulationPathCache.clear());
 
 export async function synthesizeAjnaBorrowCandidateViaSimulation(
   readState: AjnaPoolStateRead,
@@ -71,19 +69,21 @@ export async function synthesizeAjnaBorrowCandidateViaSimulation(
     accountState?: SimulationAccountState;
   }
 ): Promise<BorrowSimulationSynthesisResult | undefined> {
-  const targetBand = buildTargetBand(config);
-  const baselinePrediction = options.baselinePrediction ?? readState.prediction;
   const minimumAmount = resolveMinimumBorrowActionAmount(config);
   const maxAmount = config.maxBorrowExposure;
   if (minimumAmount > maxAmount) {
     return undefined;
   }
 
-  const simulationSenderAddress =
-    options.accountState?.simulationSenderAddress ?? resolveSimulationSenderAddress(config);
-  const borrowerAddress =
-    options.accountState?.borrowerAddress ??
-    resolveSimulationBorrowerAddress(config, simulationSenderAddress);
+  const preamble = buildSimulationPreamble(readState, config, {
+    poolAddress: options.poolAddress,
+    ...(options.accountState === undefined ? {} : { accountState: options.accountState }),
+    ...(options.baselinePrediction === undefined
+      ? {}
+      : { baselinePrediction: options.baselinePrediction })
+  });
+  const { targetBand, baselinePrediction, simulationSenderAddress, borrowerAddress, snapshotFingerprint } =
+    preamble;
   const lookaheadUpdates = resolveBorrowSimulationLookaheadUpdates(config);
   const isPreWindowBorrowSearch =
     lookaheadUpdates === 1 && readState.immediatePrediction.secondsUntilNextRateUpdate > 0;
@@ -94,15 +94,7 @@ export async function synthesizeAjnaBorrowCandidateViaSimulation(
         })
       : undefined;
   const heuristicDrawDebtStep = extractDrawDebtStep(heuristicBorrowAnchor);
-  const snapshotFingerprint = buildSnapshotFingerprint(
-    options.poolAddress,
-    readState.blockNumber,
-    readState.rateState
-  );
-  if (
-    lookaheadUpdates === 1 &&
-    distanceToTargetBand(baselinePrediction.predictedNextRateBps, targetBand) === 0
-  ) {
+  if (lookaheadUpdates === 1 && preamble.baselineInBand) {
     return undefined;
   }
 
@@ -115,18 +107,19 @@ export async function synthesizeAjnaBorrowCandidateViaSimulation(
     simulationSenderAddress,
     async (getPreparedSimulationContext) => {
       const { publicClient } = await getPreparedSimulationContext();
-      const effectiveAccountState =
-        options.accountState ??
-        (await readSimulationAccountState(
-          publicClient,
-          options.poolAddress,
-          readState,
-          config,
-          {
-            needsQuoteState: false,
-            needsCollateralState: true
-          }
-        ));
+      const effectiveAccountState = await resolveEffectiveAccountState(
+        publicClient,
+        readState,
+        config,
+        {
+          poolAddress: options.poolAddress,
+          ...(options.accountState === undefined
+            ? {}
+            : { accountState: options.accountState }),
+          needsQuoteState: false,
+          needsCollateralState: true
+        }
+      );
       const maxAvailableCollateral = smallestBigInt(
         effectiveAccountState.collateralBalance ?? 0n,
         effectiveAccountState.collateralAllowance ?? 0n

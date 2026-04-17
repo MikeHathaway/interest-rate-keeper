@@ -2,6 +2,7 @@ import {
   parseBoolean,
   parseHexAddress,
   parseNumber,
+  parseObject,
   parseString
 } from "./config-parse.js";
 import {
@@ -73,14 +74,6 @@ export type SnapshotMetadataBigIntKey =
   | "managedTotalWithdrawableQuoteAmount";
 
 const EMPTY_POOL_SNAPSHOT_METADATA: PoolSnapshotMetadata = {};
-
-function parseObject(input: unknown, label: string): Record<string, unknown> {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw new Error(`${label} must be an object`);
-  }
-
-  return input as Record<string, unknown>;
-}
 
 function parseRateMoveOutcome(
   value: unknown,

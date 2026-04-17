@@ -2,7 +2,11 @@ import { appendJsonlLog } from "./log.js";
 import { stepsUseManagedDual } from "./managed-controls.js";
 import { derivePlanCandidateCapitalMetrics } from "./candidate-metrics.js";
 import { planCycle } from "./planner.js";
-import { preSubmitRecheck, validatePlan } from "./policy.js";
+import {
+  normalizeStepForComparison,
+  preSubmitRecheck,
+  validatePlan
+} from "./policy.js";
 import { type ExecutionBackend } from "./execute.js";
 import {
   type CyclePlan,
@@ -20,55 +24,7 @@ export interface RunCycleDependencies {
 }
 
 function stepsEquivalent(left: ExecutionStep, right: ExecutionStep): boolean {
-  if (left.type !== right.type) {
-    return false;
-  }
-
-  switch (left.type) {
-    case "ADD_QUOTE":
-      return (
-        right.type === "ADD_QUOTE" &&
-        left.amount === right.amount &&
-        left.bucketIndex === right.bucketIndex &&
-        left.expiry === right.expiry
-      );
-    case "REMOVE_QUOTE":
-      return (
-        right.type === "REMOVE_QUOTE" &&
-        left.amount === right.amount &&
-        left.bucketIndex === right.bucketIndex
-      );
-    case "DRAW_DEBT":
-      return (
-        right.type === "DRAW_DEBT" &&
-        left.amount === right.amount &&
-        left.limitIndex === right.limitIndex &&
-        (left.collateralAmount ?? 0n) === (right.collateralAmount ?? 0n)
-      );
-    case "REPAY_DEBT":
-      return (
-        right.type === "REPAY_DEBT" &&
-        left.amount === right.amount &&
-        (left.collateralAmountToPull ?? 0n) === (right.collateralAmountToPull ?? 0n) &&
-        (left.limitIndex ?? 0) === (right.limitIndex ?? 0) &&
-        (left.recipient ?? "") === (right.recipient ?? "")
-      );
-    case "ADD_COLLATERAL":
-      return (
-        right.type === "ADD_COLLATERAL" &&
-        left.amount === right.amount &&
-        left.bucketIndex === right.bucketIndex &&
-        (left.expiry ?? 0) === (right.expiry ?? 0)
-      );
-    case "REMOVE_COLLATERAL":
-      return (
-        right.type === "REMOVE_COLLATERAL" &&
-        left.amount === right.amount &&
-        (left.bucketIndex ?? 0) === (right.bucketIndex ?? 0)
-      );
-    case "UPDATE_INTEREST":
-      return right.type === "UPDATE_INTEREST";
-  }
+  return normalizeStepForComparison(left) === normalizeStepForComparison(right);
 }
 
 function buildSingleStepPlan(plan: CyclePlan, step: ExecutionStep): CyclePlan {

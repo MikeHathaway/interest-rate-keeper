@@ -1,3 +1,25 @@
+const registeredClearables = new Set<() => void>();
+
+/**
+ * Register a cache-clearing callback. All callbacks fire when
+ * `clearAllRegisteredAjnaCaches` is invoked. Typically each module calls this
+ * once at module load with a one-line `() => myCache.clear()` closure.
+ */
+export function registerAjnaCacheClearable(clear: () => void): void {
+  registeredClearables.add(clear);
+}
+
+/**
+ * Invoke every registered clear callback. Used by `clearAjnaSnapshotCaches`
+ * so caller modules do not need to import and coordinate each cache clearer
+ * individually.
+ */
+export function clearAllRegisteredAjnaCaches(): void {
+  for (const clear of registeredClearables) {
+    clear();
+  }
+}
+
 export function setBoundedCacheEntry<K, V>(
   cache: Map<K, V>,
   key: K,

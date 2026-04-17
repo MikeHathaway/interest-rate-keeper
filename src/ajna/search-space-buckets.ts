@@ -3,9 +3,8 @@ import { type PublicClient } from "viem";
 import { ajnaPoolAbi } from "./abi.js";
 import {
   AJNA_COLLATERALIZATION_FACTOR_WAD,
-  AJNA_FENWICK_ZERO_INDEX,
-  AJNA_FLOAT_STEP,
-  MAX_AJNA_LIMIT_INDEX
+  MAX_AJNA_LIMIT_INDEX,
+  priceToFenwickIndex
 } from "./protocol-constants.js";
 import { wdiv, wmul } from "./rate-state.js";
 import { type HexAddress, type KeeperConfig } from "../types.js";
@@ -84,25 +83,6 @@ export function resolveRemoveQuoteBucketIndexes(config: KeeperConfig): number[] 
   return Array.from(new Set(configured)).sort((left, right) => left - right);
 }
 
-export function priceToFenwickIndex(priceWad: bigint): number | undefined {
-  const price = Number(priceWad) / 1e18;
-  if (!Number.isFinite(price) || price <= 0) {
-    return undefined;
-  }
-
-  const rawIndex = Math.log(price) / Math.log(AJNA_FLOAT_STEP);
-  const ceilIndex = Math.ceil(rawIndex);
-  const fenwickIndex =
-    rawIndex < 0 && ceilIndex - rawIndex > 0.5
-      ? AJNA_FENWICK_ZERO_INDEX + 1 - ceilIndex
-      : AJNA_FENWICK_ZERO_INDEX - ceilIndex;
-
-  if (!Number.isFinite(fenwickIndex)) {
-    return undefined;
-  }
-
-  return Math.max(0, Math.min(MAX_AJNA_LIMIT_INDEX, fenwickIndex));
-}
 
 export function deriveMeaningfulDepositThresholdFenwickIndex(
   inflatorWad: bigint,

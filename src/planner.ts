@@ -109,7 +109,10 @@ function naturallyImprovesConvergence(snapshot: PoolSnapshot, band: TargetBand):
   return projectedDistance < currentDistance || isRateInBand(projectedRateBps, band);
 }
 
-function currentAndProjectedRatesAreInBand(snapshot: PoolSnapshot, band: TargetBand): boolean {
+export function currentAndProjectedRatesAreInBand(
+  snapshot: PoolSnapshot,
+  band: TargetBand
+): boolean {
   return (
     isRateInBand(snapshot.currentRateBps, band) &&
     isRateInBand(snapshot.planningRateBps ?? snapshot.predictedNextRateBps, band)

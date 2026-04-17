@@ -1,24 +1,26 @@
 import { ajnaPoolAbi } from "./abi.js";
-import { buildSimulationCacheKey, setBoundedCacheEntry } from "./snapshot-cache.js";
+import {
+  buildSimulationCacheKey,
+  registerAjnaCacheClearable,
+  setBoundedCacheEntry
+} from "./snapshot-cache.js";
 import {
   type AjnaPoolStateRead,
   type LendSimulationPathResult,
   type LendSimulationSynthesisResult,
   type SimulationAccountState,
   DEFAULT_ADD_QUOTE_EXPIRY_SECONDS,
-  buildSnapshotFingerprint,
   finalizeCandidate,
   predictionChanged,
   resolveMinimumQuoteActionAmount,
-  resolveSimulationSenderAddress,
   smallestBigInt
 } from "./snapshot-internal.js";
 import { synthesizeAjnaLendCandidate } from "./snapshot-lend.js";
+import { readAjnaPoolRateStateOnly } from "./snapshot-read.js";
 import {
-  readAjnaPoolRateStateOnly,
-  readAjnaPoolState,
-  readSimulationAccountState
-} from "./snapshot-read.js";
+  buildSimulationPreamble,
+  resolveEffectiveAccountState
+} from "./snapshot-sim-context.js";
 import {
   replayAjnaSimulationPath,
   withPreparedLazySimulationFork
@@ -35,7 +37,7 @@ import {
   resolveAddQuoteBucketIndexes,
   resolveRemoveQuoteBucketIndexes
 } from "./search-space.js";
-import { buildTargetBand, distanceToTargetBand } from "../planner.js";
+import { distanceToTargetBand } from "../planner.js";
 import {
   type HexAddress,
   type KeeperConfig,
@@ -48,10 +50,7 @@ const EXACT_MULTI_CYCLE_LEND_MAX_QUOTE_SAMPLES = 12;
 const EXACT_MULTI_CYCLE_LEND_LOW_END_QUOTE_SAMPLES = 8;
 
 const lendSimulationPathCache = new Map<string, LendSimulationPathResult | null>();
-
-export function clearAjnaLendSimulationPathCache(): void {
-  lendSimulationPathCache.clear();
-}
+registerAjnaCacheClearable(() => lendSimulationPathCache.clear());
 
 type SimulatedLendAction =
   | {
@@ -81,11 +80,18 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
     return undefined;
   }
 
-  const targetBand = buildTargetBand(config);
-  const baselinePrediction = options.baselinePrediction ?? readState.prediction;
-  if (distanceToTargetBand(baselinePrediction.predictedNextRateBps, targetBand) === 0) {
+  const preamble = buildSimulationPreamble(readState, config, {
+    poolAddress: options.poolAddress,
+    ...(options.accountState === undefined ? {} : { accountState: options.accountState }),
+    ...(options.baselinePrediction === undefined
+      ? {}
+      : { baselinePrediction: options.baselinePrediction })
+  });
+  if (preamble.baselineInBand) {
     return undefined;
   }
+  const { targetBand, baselinePrediction, simulationSenderAddress, snapshotFingerprint } =
+    preamble;
   const lookaheadUpdates = readState.immediatePrediction.secondsUntilNextRateUpdate > 0 ? 2 : 1;
   const minimumAmount = resolveMinimumQuoteActionAmount(config);
   const minimumManagedImprovementBps = config.minimumManagedImprovementBps ?? 0;
@@ -102,13 +108,6 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
       }
     }
   }
-  const simulationSenderAddress =
-    options.accountState?.simulationSenderAddress ?? resolveSimulationSenderAddress(config);
-  const snapshotFingerprint = buildSnapshotFingerprint(
-    options.poolAddress,
-    readState.blockNumber,
-    readState.rateState
-  );
 
   return withPreparedLazySimulationFork(
     {
@@ -118,21 +117,22 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
     },
     simulationSenderAddress,
     async (getPreparedSimulationContext) => {
-      const effectiveAccountState =
-        options.accountState ??
-        (await readSimulationAccountState(
-          (await getPreparedSimulationContext()).publicClient,
-          options.poolAddress,
-          readState,
-          config,
-          {
-            needsQuoteState: true,
-            needsCollateralState: false,
-            lenderQuoteBucketIndexes: Array.from(
-              new Set([...addQuoteBucketIndexes, ...removeQuoteBucketIndexes])
-            )
-          }
-        ));
+      const effectiveAccountState = await resolveEffectiveAccountState(
+        (await getPreparedSimulationContext()).publicClient,
+        readState,
+        config,
+        {
+          poolAddress: options.poolAddress,
+          ...(options.accountState === undefined
+            ? {}
+            : { accountState: options.accountState }),
+          needsQuoteState: true,
+          needsCollateralState: false,
+          lenderQuoteBucketIndexes: Array.from(
+            new Set([...addQuoteBucketIndexes, ...removeQuoteBucketIndexes])
+          )
+        }
+      );
 
       const maxAddQuoteAmount = smallestBigInt(
         config.maxQuoteTokenExposure,

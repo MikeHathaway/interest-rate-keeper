@@ -1,4 +1,5 @@
 import { resolveKeeperConfig } from "./config.js";
+import { parseObject } from "./config-parse.js";
 import { runCycle, type RunCycleDependencies } from "./run-cycle.js";
 import {
   resolvePoolSnapshot,
@@ -7,14 +8,6 @@ import {
 } from "./snapshot.js";
 import { AjnaRpcSnapshotSource } from "./ajna/snapshot.js";
 import { safeJsonStringify } from "./json.js";
-
-function parseObject(input: unknown, label: string): Record<string, unknown> {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw new Error(`${label} must be an object`);
-  }
-
-  return input as Record<string, unknown>;
-}
 
 export function resolveKeeperHubPayload(input: unknown): {
   config: ReturnType<typeof resolveKeeperConfig>;

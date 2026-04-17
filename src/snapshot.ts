@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import { withPlanCandidateCapitalMetrics } from "./candidate-metrics.js";
+import { parseObject } from "./config-parse.js";
 import { resolvePoolSnapshotMetadata } from "./snapshot-metadata.js";
 import {
   type AddCollateralStep,
@@ -16,14 +17,6 @@ import {
   type RepayDebtStep,
   type UpdateInterestStep
 } from "./types.js";
-
-function parseObject(input: unknown, label: string): Record<string, unknown> {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw new Error(`${label} must be an object`);
-  }
-
-  return input as Record<string, unknown>;
-}
 
 function parseString(value: unknown, label: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
