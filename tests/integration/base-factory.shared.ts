@@ -105,6 +105,22 @@ export function describeForkHost(forkUrl: string): string {
   }
 }
 
+export function formatTokenAmount(amountWad: bigint): string {
+  const sign = amountWad < 0n ? "-" : "";
+  const absolute = amountWad < 0n ? -amountWad : amountWad;
+  const whole = absolute / 10n ** 18n;
+  const fractional = absolute % 10n ** 18n;
+  const trimmedFractional = fractional.toString().padStart(18, "0").slice(0, 4).replace(/0+$/, "");
+
+  return trimmedFractional.length > 0
+    ? `${sign}${whole.toString()}.${trimmedFractional}`
+    : `${sign}${whole.toString()}`;
+}
+
+export function formatWeiAsEth(amountWei: bigint): string {
+  return formatTokenAmount(amountWei);
+}
+
 export function repoRoot(): string {
   return dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 }

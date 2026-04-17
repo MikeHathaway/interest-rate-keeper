@@ -1009,7 +1009,7 @@ export function registerBaseFactoryLendTests(context: BaseFactoryLendTestContext
   );
 
   itBaseExperimental(
-    "does not yet surface an exact multi-cycle pre-window lend plan from the deterministic fixture when only the previously known-good bucket is pinned",
+    "surfaces an exact multi-cycle pre-window lend plan from the deterministic fixture when only the previously known-good bucket is pinned",
     async () => {
       const { account, publicClient, walletClient, testClient } = createClients();
       const artifact = await ensureMockArtifact();
@@ -1061,7 +1061,17 @@ export function registerBaseFactoryLendTests(context: BaseFactoryLendTestContext
       }).getSnapshot();
       const lendCandidate = exactSnapshot.candidates.find((candidate: any) => candidate.intent === "LEND");
 
-      expect(lendCandidate).toBeUndefined();
+      expect(lendCandidate).toBeDefined();
+      expect(lendCandidate?.planningLookaheadUpdates).toBe(2);
+      expect(planCycle(exactSnapshot, bucketPinnedConfig).intent).toBe("LEND");
+      const surfacedAddQuoteStep = lendCandidate?.minimumExecutionSteps.find(
+        (step: any) => step.type === "ADD_QUOTE"
+      );
+      expect(surfacedAddQuoteStep?.bucketIndex).toBe(positiveMatch!.bucketIndex);
+      expect(surfacedAddQuoteStep?.amount).toBeGreaterThan(0n);
+      expect(surfacedAddQuoteStep?.amount).toBeLessThanOrEqual(
+        bucketPinnedConfig.maxQuoteTokenExposure
+      );
     },
     240_000
   );

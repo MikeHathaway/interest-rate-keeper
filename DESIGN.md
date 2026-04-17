@@ -81,7 +81,7 @@ Practical product conclusion:
 - exact block-pinned real used-pool upward archetypes now exist in the experimental suite, and they still do not surface a generic exact upward simulation candidate
 - even when those pinned real used-pool states are paired with recent real lender addresses from quote-token transfers into the pool, the generic exact paired `LEND_AND_BORROW` search still does not surface an upward candidate
 - the only currently credible used-pool upward path is managed inventory-backed control; see [docs/curator-mode.md](./docs/curator-mode.md)
-- the managed remove-only path is now an explicit config-gated mode through `enableManagedInventoryUpwardControl`, `minimumManagedImprovementBps`, `maxManagedInventoryReleaseBps`, `minimumManagedSensitivityBpsPer10PctRelease`, and optional `removeQuoteBucketIndex(es)`
+- the managed remove-only path is now an explicit config-gated mode through `enableManagedInventoryUpwardControl`, `enableManagedDualUpwardControl`, `minimumManagedImprovementBps`, `maxManagedInventoryReleaseBps`, `minimumManagedSensitivityBpsPer10PctRelease`, and optional `removeQuoteBucketIndex` / `removeQuoteBucketIndexes`
 - abandoned-pool reset/recovery is modeled correctly, but still should not be marketed as a separately proven end-to-end mode
 
 ### Current Product Conclusion For Borrower Steering

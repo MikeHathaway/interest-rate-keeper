@@ -161,6 +161,7 @@ Good future guard rails:
 
 The managed remove-only path is now explicit in keeper config:
 
+- `enableManagedDualUpwardControl`
 - `enableManagedInventoryUpwardControl`
 - `minimumManagedImprovementBps`
 - `maxManagedInventoryReleaseBps`
@@ -183,6 +184,7 @@ Representative config:
 Operational meaning:
 
 - the keeper only considers exact managed `REMOVE_QUOTE` when upward control is needed in a used / EMA-initialized pool and it can see real withdrawable lender inventory
+- `enableManagedDualUpwardControl` exists for managed dual research, but exact surfaced `REMOVE_QUOTE + DRAW_DEBT` is still not a supported product path
 - `minimumManagedImprovementBps` keeps the keeper from releasing inventory for trivial gains
 - `maxManagedInventoryReleaseBps` caps one-cycle inventory release as a fraction of total withdrawable managed inventory
 - `minimumManagedSensitivityBpsPer10PctRelease` is the controllability gate for managed upward actions
