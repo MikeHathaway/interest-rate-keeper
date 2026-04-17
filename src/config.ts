@@ -144,7 +144,6 @@ export function resolveKeeperConfig(input: unknown): KeeperConfig {
 
   applyManagedConfigFields(record, config, {
     parseBoolean,
-    parseIntegerArray,
     parseNonNegativeInteger
   });
 

@@ -1,4 +1,9 @@
-import { type ConfigPrimitiveParsers } from "./config-parse.js";
+import {
+  type ConfigPrimitiveParsers,
+  parseDistinctNonEmptyIntegerArray,
+  parseSortedDistinctNonEmptyBigIntArray,
+  parseSortedDistinctNonEmptyIntegerArray
+} from "./config-parse.js";
 import { type KeeperConfig } from "./types.js";
 
 type SynthesisConfigRecord = Record<string, unknown>;
@@ -13,50 +18,6 @@ type SynthesisConfigParsers = Pick<
   | "parseBigIntArray"
   | "parseHexAddress"
 >;
-
-function parseSortedDistinctNonEmptyIntegerArray(
-  value: unknown,
-  label: string,
-  parsers: SynthesisConfigParsers
-): number[] {
-  const parsed = parsers.parseIntegerArray(value, label);
-  if (parsed.length === 0) {
-    throw new Error(`${label} must not be empty`);
-  }
-
-  return Array.from(new Set(parsed)).sort((left, right) => left - right);
-}
-
-function parseDistinctNonEmptyIntegerArray(
-  value: unknown,
-  label: string,
-  parsers: SynthesisConfigParsers
-): number[] {
-  const parsed = parsers.parseIntegerArray(value, label);
-  if (parsed.length === 0) {
-    throw new Error(`${label} must not be empty`);
-  }
-
-  return Array.from(new Set(parsed));
-}
-
-function parseSortedDistinctNonEmptyBigIntArray(
-  value: unknown,
-  label: string,
-  parsers: SynthesisConfigParsers
-): bigint[] {
-  const parsed = parsers.parseBigIntArray(value, label);
-  if (parsed.length === 0) {
-    throw new Error(`${label} must not be empty`);
-  }
-  if (parsed.some((amount) => amount < 0n)) {
-    throw new Error(`${label} must not contain negative values`);
-  }
-
-  return Array.from(new Set(parsed)).sort((left, right) =>
-    left < right ? -1 : left > right ? 1 : 0
-  );
-}
 
 export function applySynthesisConfigFields(
   record: SynthesisConfigRecord,
@@ -73,8 +34,7 @@ export function applySynthesisConfigFields(
   if (record.addQuoteBucketIndexes !== undefined) {
     config.addQuoteBucketIndexes = parseSortedDistinctNonEmptyIntegerArray(
       record.addQuoteBucketIndexes,
-      "addQuoteBucketIndexes",
-      parsers
+      "addQuoteBucketIndexes"
     );
   }
 
@@ -116,8 +76,7 @@ export function applySynthesisConfigFields(
   if (record.drawDebtLimitIndexes !== undefined) {
     config.drawDebtLimitIndexes = parseDistinctNonEmptyIntegerArray(
       record.drawDebtLimitIndexes,
-      "drawDebtLimitIndexes",
-      parsers
+      "drawDebtLimitIndexes"
     );
   }
 
@@ -142,8 +101,7 @@ export function applySynthesisConfigFields(
   if (record.drawDebtCollateralAmounts !== undefined) {
     config.drawDebtCollateralAmounts = parseSortedDistinctNonEmptyBigIntArray(
       record.drawDebtCollateralAmounts,
-      "drawDebtCollateralAmounts",
-      parsers
+      "drawDebtCollateralAmounts"
     );
   }
 

@@ -167,12 +167,19 @@ async function startTemporaryAnvilFork(
 
     if (stderrBuffer.trim().length > 0) {
       throw new Error(
-        `${error instanceof Error ? error.message : String(error)}\n${stderrBuffer.trim()}`
+        `${error instanceof Error ? error.message : String(error)}\n${redactRpcUrl(stderrBuffer.trim(), options.rpcUrl)}`
       );
     }
 
     throw error;
   }
+}
+
+function redactRpcUrl(message: string, rpcUrl: string): string {
+  const redacted = "<rpc-url-redacted>";
+  let sanitized = rpcUrl.length > 0 ? message.split(rpcUrl).join(redacted) : message;
+  sanitized = sanitized.replace(/https?:\/\/\S+/g, redacted);
+  return sanitized;
 }
 
 export async function withTemporaryAnvilFork<T>(

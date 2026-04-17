@@ -1,5 +1,9 @@
-import { type ConfigPrimitiveParsers } from "./config-parse.js";
+import {
+  type ConfigPrimitiveParsers,
+  parseSortedDistinctNonEmptyIntegerArray
+} from "./config-parse.js";
 import { type KeeperConfig } from "./types.js";
+import { BPS_DENOMINATOR } from "./units.js";
 
 export const MANAGED_CONFIG_OPTIONS = [
   {
@@ -52,21 +56,8 @@ type ManagedConfigRecord = Partial<
 
 type ManagedConfigParsers = Pick<
   ConfigPrimitiveParsers,
-  "parseBoolean" | "parseIntegerArray" | "parseNonNegativeInteger"
+  "parseBoolean" | "parseNonNegativeInteger"
 >;
-
-function parseSortedDistinctNonEmptyIntegerArray(
-  value: unknown,
-  label: string,
-  parsers: ManagedConfigParsers
-): number[] {
-  const parsed = parsers.parseIntegerArray(value, label);
-  if (parsed.length === 0) {
-    throw new Error(`${label} must not be empty`);
-  }
-
-  return Array.from(new Set(parsed)).sort((left, right) => left - right);
-}
 
 export function applyManagedConfigFields(
   record: ManagedConfigRecord,
@@ -83,8 +74,7 @@ export function applyManagedConfigFields(
   if (record.removeQuoteBucketIndexes !== undefined) {
     config.removeQuoteBucketIndexes = parseSortedDistinctNonEmptyIntegerArray(
       record.removeQuoteBucketIndexes,
-      "removeQuoteBucketIndexes",
-      parsers
+      "removeQuoteBucketIndexes"
     );
   }
 
@@ -100,6 +90,14 @@ export function applyManagedConfigFields(
       record.enableManagedDualUpwardControl,
       "enableManagedDualUpwardControl"
     );
+    if (
+      config.enableManagedDualUpwardControl === true &&
+      config.enableManagedInventoryUpwardControl !== true
+    ) {
+      throw new Error(
+        "enableManagedDualUpwardControl requires enableManagedInventoryUpwardControl to also be true"
+      );
+    }
   }
 
   if (record.minimumManagedImprovementBps !== undefined) {
@@ -114,8 +112,15 @@ export function applyManagedConfigFields(
       record.maxManagedInventoryReleaseBps,
       "maxManagedInventoryReleaseBps"
     );
-    if (parsedMaxManagedInventoryReleaseBps > 10_000) {
-      throw new Error("maxManagedInventoryReleaseBps must not exceed 10000");
+    if (parsedMaxManagedInventoryReleaseBps === 0) {
+      throw new Error(
+        "maxManagedInventoryReleaseBps must be greater than zero (0 would deny every managed plan)"
+      );
+    }
+    if (parsedMaxManagedInventoryReleaseBps > BPS_DENOMINATOR) {
+      throw new Error(
+        `maxManagedInventoryReleaseBps must not exceed ${BPS_DENOMINATOR}`
+      );
     }
     config.maxManagedInventoryReleaseBps = parsedMaxManagedInventoryReleaseBps;
   }

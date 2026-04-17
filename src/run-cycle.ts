@@ -1,4 +1,6 @@
 import { appendJsonlLog } from "./log.js";
+import { stepsUseManagedDual } from "./managed-controls.js";
+import { derivePlanCandidateCapitalMetrics } from "./candidate-metrics.js";
 import { planCycle } from "./planner.js";
 import { preSubmitRecheck, validatePlan } from "./policy.js";
 import { type ExecutionBackend } from "./execute.js";
@@ -73,6 +75,29 @@ function buildSingleStepPlan(plan: CyclePlan, step: ExecutionStep): CyclePlan {
   return {
     ...plan,
     requiredSteps: [step]
+  };
+}
+
+function buildPrefixPlan(
+  plan: CyclePlan,
+  executedSteps: ExecutionStep[],
+  freshSnapshot: PoolSnapshot
+): CyclePlan {
+  const capital = derivePlanCandidateCapitalMetrics(executedSteps);
+  return {
+    ...plan,
+    requiredSteps: executedSteps.slice(),
+    predictedRateBpsAfterNextUpdate: freshSnapshot.predictedNextRateBps,
+    ...(freshSnapshot.planningRateBps === undefined
+      ? {}
+      : { planningRateBps: freshSnapshot.planningRateBps }),
+    quoteTokenDelta: capital.quoteTokenDelta,
+    quoteInventoryDeployed: capital.quoteInventoryDeployed,
+    quoteInventoryReleased: capital.quoteInventoryReleased,
+    additionalCollateralRequired: capital.additionalCollateralRequired,
+    netQuoteBorrowed: capital.netQuoteBorrowed,
+    operatorCapitalRequired: capital.operatorCapitalRequired,
+    operatorCapitalAtRisk: capital.operatorCapitalAtRisk
   };
 }
 
@@ -168,6 +193,24 @@ async function executePlan(
     }
 
     const freshSnapshot = await dependencies.snapshotSource.getSnapshot();
+
+    if (stepsUseManagedDual(plan.requiredSteps)) {
+      const prefixPlan = buildPrefixPlan(plan, executedSteps, freshSnapshot);
+      const prefixFailure = validatePlan(prefixPlan, freshSnapshot, config);
+      if (prefixFailure) {
+        return {
+          execution: buildExecutionFailure(
+            nextExpectedStep,
+            stepIndex + 1,
+            transactionHashes,
+            executedSteps,
+            `dual prefix would not satisfy managed guards on its own: ${prefixFailure.reason}`
+          ),
+          finalSnapshot: freshSnapshot
+        };
+      }
+    }
+
     const replanned = planCycle(freshSnapshot, config);
     const revalidationFailure = validatePlan(replanned, freshSnapshot, config);
     if (revalidationFailure) {

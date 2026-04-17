@@ -1,12 +1,14 @@
 import { type PublicClient } from "viem";
 
 import { ajnaPoolAbi } from "./abi.js";
+import {
+  AJNA_COLLATERALIZATION_FACTOR_WAD,
+  AJNA_FENWICK_ZERO_INDEX,
+  AJNA_FLOAT_STEP,
+  MAX_AJNA_LIMIT_INDEX
+} from "./protocol-constants.js";
 import { wdiv, wmul } from "./rate-state.js";
 import { type HexAddress, type KeeperConfig } from "../types.js";
-
-const AJNA_COLLATERALIZATION_FACTOR_WAD = 1_040_000_000_000_000_000n;
-const AJNA_FLOAT_STEP = 1.005;
-const MAX_AJNA_LIMIT_INDEX = 7_388;
 const EXACT_BORROW_LIMIT_INDEX_OFFSETS = [-500, -250, 0, 250, 500] as const;
 const EXACT_BORROW_PROTOCOL_SAMPLE_POINTS = [
   500,
@@ -91,7 +93,9 @@ export function priceToFenwickIndex(priceWad: bigint): number | undefined {
   const rawIndex = Math.log(price) / Math.log(AJNA_FLOAT_STEP);
   const ceilIndex = Math.ceil(rawIndex);
   const fenwickIndex =
-    rawIndex < 0 && ceilIndex - rawIndex > 0.5 ? 4157 - ceilIndex : 4156 - ceilIndex;
+    rawIndex < 0 && ceilIndex - rawIndex > 0.5
+      ? AJNA_FENWICK_ZERO_INDEX + 1 - ceilIndex
+      : AJNA_FENWICK_ZERO_INDEX - ceilIndex;
 
   if (!Number.isFinite(fenwickIndex)) {
     return undefined;

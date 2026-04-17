@@ -1,4 +1,5 @@
 import { type ExecutionStep } from "./types.js";
+import { BPS_DENOMINATOR_BIG } from "./units.js";
 
 export function stepsUseManagedRemoveQuote(steps: readonly ExecutionStep[]): boolean {
   return steps.some((step) => step.type === "REMOVE_QUOTE");
@@ -42,13 +43,31 @@ export function managedImprovementBps(
   return baselineDistanceToTargetBps - candidateDistanceToTargetBps;
 }
 
+export interface ManagedImprovementRateInputs {
+  snapshotPlanningRateBps: number | undefined;
+  snapshotPredictedNextRateBps: number;
+  afterPlanningRateBps: number | undefined;
+  afterPredictedRateBpsAfterNextUpdate: number;
+}
+
+export function managedDistanceImprovementBps(
+  inputs: ManagedImprovementRateInputs,
+  distanceFn: (rateBps: number) => number
+): number {
+  const baselineRate =
+    inputs.snapshotPlanningRateBps ?? inputs.snapshotPredictedNextRateBps;
+  const afterRate =
+    inputs.afterPlanningRateBps ?? inputs.afterPredictedRateBpsAfterNextUpdate;
+  return managedImprovementBps(distanceFn(baselineRate), distanceFn(afterRate));
+}
+
 export function maximumManagedReleasedQuoteAmount(
   totalWithdrawableQuoteAmount: bigint,
   maxManagedInventoryReleaseBps: number
 ): bigint {
   return (
     totalWithdrawableQuoteAmount * BigInt(maxManagedInventoryReleaseBps)
-  ) / 10_000n;
+  ) / BPS_DENOMINATOR_BIG;
 }
 
 export function normalizedManagedSensitivityBpsPer10PctRelease(
@@ -65,7 +84,7 @@ export function normalizedManagedSensitivityBpsPer10PctRelease(
   }
 
   const releaseFractionBps = ceilDiv(
-    releasedQuoteAmount * 10_000n,
+    releasedQuoteAmount * BPS_DENOMINATOR_BIG,
     totalWithdrawableQuoteAmount
   );
   if (releaseFractionBps <= 0n) {

@@ -105,6 +105,47 @@ export function parseBigIntArray(value: unknown, label: string): bigint[] {
   return value.map((item, index) => parseBigIntValue(item, `${label}[${index}]`));
 }
 
+export function parseSortedDistinctNonEmptyIntegerArray(
+  value: unknown,
+  label: string
+): number[] {
+  const parsed = parseIntegerArray(value, label);
+  if (parsed.length === 0) {
+    throw new Error(`${label} must not be empty`);
+  }
+
+  return Array.from(new Set(parsed)).sort((left, right) => left - right);
+}
+
+export function parseDistinctNonEmptyIntegerArray(
+  value: unknown,
+  label: string
+): number[] {
+  const parsed = parseIntegerArray(value, label);
+  if (parsed.length === 0) {
+    throw new Error(`${label} must not be empty`);
+  }
+
+  return Array.from(new Set(parsed));
+}
+
+export function parseSortedDistinctNonEmptyBigIntArray(
+  value: unknown,
+  label: string
+): bigint[] {
+  const parsed = parseBigIntArray(value, label);
+  if (parsed.length === 0) {
+    throw new Error(`${label} must not be empty`);
+  }
+  if (parsed.some((amount) => amount < 0n)) {
+    throw new Error(`${label} must not contain negative values`);
+  }
+
+  return Array.from(new Set(parsed)).sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0
+  );
+}
+
 export function parseOptionalBigInt(
   value: unknown,
   label: string

@@ -6,6 +6,7 @@ import {
   buildManagedReleaseCapReason,
   buildManagedSensitivityReason,
   buildManagedUnavailableReason,
+  managedDistanceImprovementBps,
   managedImprovementBps,
   maximumManagedReleasedQuoteAmount,
   normalizedManagedSensitivityBpsPer10PctRelease,
@@ -26,6 +27,7 @@ import {
   type TargetBand,
   type UpdateInterestStep
 } from "./types.js";
+import { BPS_DENOMINATOR, BPS_DENOMINATOR_BIG } from "./units.js";
 
 const UPDATE_INTEREST_STEP: UpdateInterestStep = {
   type: "UPDATE_INTEREST",
@@ -51,7 +53,7 @@ function resolvePlanCapital(steps: ExecutionStep[]) {
 }
 
 function calculateRelativeTolerance(targetRateBps: number, toleranceBps: number): number {
-  return Math.ceil((targetRateBps * toleranceBps) / 10_000);
+  return Math.ceil((targetRateBps * toleranceBps) / BPS_DENOMINATOR);
 }
 
 export function buildTargetBand(config: KeeperConfig): TargetBand {
@@ -114,14 +116,6 @@ function currentAndProjectedRatesAreInBand(snapshot: PoolSnapshot, band: TargetB
   );
 }
 
-function candidateUsesRemoveQuote(candidate: PlanCandidate): boolean {
-  return stepsUseManagedRemoveQuote(candidate.minimumExecutionSteps);
-}
-
-function candidateUsesManagedDual(candidate: PlanCandidate): boolean {
-  return stepsUseManagedDual(candidate.minimumExecutionSteps);
-}
-
 function candidateExecutionAllowed(candidate: PlanCandidate, config: KeeperConfig): boolean {
   if (candidate.executionMode === "unsupported") {
     return false;
@@ -148,11 +142,11 @@ function applyBuffer(amount: bigint, bufferBps: number): bigint {
     return amount;
   }
 
-  const delta = (amount * BigInt(bufferBps) + 9_999n) / 10_000n;
+  const delta = (amount * BigInt(bufferBps) + BPS_DENOMINATOR_BIG - 1n) / BPS_DENOMINATOR_BIG;
   return amount + (delta > 0n ? delta : 1n);
 }
 
-function withExecutionBuffer(step: ExecutionStep, config: KeeperConfig): ExecutionStep {
+export function withExecutionBuffer(step: ExecutionStep, config: KeeperConfig): ExecutionStep {
   const policy = step.bufferPolicy ?? defaultBufferPolicy(step);
   if (policy === "none") {
     return step;
@@ -208,7 +202,7 @@ function candidateClearsManagedImprovementThreshold(
   band: TargetBand,
   config: KeeperConfig
 ): boolean {
-  if (!candidateUsesRemoveQuote(candidate)) {
+  if (!stepsUseManagedRemoveQuote(candidate.minimumExecutionSteps)) {
     return true;
   }
 
@@ -237,11 +231,11 @@ function candidateClearsManagedEligibility(
   snapshot: PoolSnapshot
 ): boolean {
   const managedMetadata = readManagedControlSnapshotMetadata(snapshot);
-  if (!candidateUsesRemoveQuote(candidate)) {
+  if (!stepsUseManagedRemoveQuote(candidate.minimumExecutionSteps)) {
     return true;
   }
 
-  if (candidateUsesManagedDual(candidate) && managedMetadata.managedDualUpwardEligible !== true) {
+  if (stepsUseManagedDual(candidate.minimumExecutionSteps) && managedMetadata.managedDualUpwardEligible !== true) {
     return false;
   }
 
@@ -253,7 +247,7 @@ function candidateClearsManagedReleaseCap(
   snapshot: PoolSnapshot,
   config: KeeperConfig
 ): boolean {
-  if (!candidateUsesRemoveQuote(candidate)) {
+  if (!stepsUseManagedRemoveQuote(candidate.minimumExecutionSteps)) {
     return true;
   }
 
@@ -261,7 +255,7 @@ function candidateClearsManagedReleaseCap(
   const maxManagedInventoryReleaseBps = config.maxManagedInventoryReleaseBps;
   if (
     maxManagedInventoryReleaseBps === undefined ||
-    maxManagedInventoryReleaseBps >= 10_000
+    maxManagedInventoryReleaseBps >= BPS_DENOMINATOR
   ) {
     return true;
   }
@@ -280,30 +274,13 @@ function candidateClearsManagedReleaseCap(
   return released <= maximumReleased;
 }
 
-function managedCandidateImprovementBps(
-  candidate: PlanCandidate,
-  snapshot: PoolSnapshot,
-  band: TargetBand
-): number {
-  const baselineDistance = distanceToTargetBand(
-    snapshot.planningRateBps ?? snapshot.predictedNextRateBps,
-    band
-  );
-  const candidateDistance = distanceToTargetBand(
-    candidate.planningRateBps ?? candidate.predictedRateBpsAfterNextUpdate,
-    band
-  );
-
-  return managedImprovementBps(baselineDistance, candidateDistance);
-}
-
 function candidateClearsManagedSensitivityThreshold(
   candidate: PlanCandidate,
   snapshot: PoolSnapshot,
   band: TargetBand,
   config: KeeperConfig
 ): boolean {
-  if (!candidateUsesRemoveQuote(candidate)) {
+  if (!stepsUseManagedRemoveQuote(candidate.minimumExecutionSteps)) {
     return true;
   }
 
@@ -321,7 +298,15 @@ function candidateClearsManagedSensitivityThreshold(
 
   const released = resolveCandidateCapital(candidate).quoteInventoryReleased;
 
-  const improvementBps = managedCandidateImprovementBps(candidate, snapshot, band);
+  const improvementBps = managedDistanceImprovementBps(
+    {
+      snapshotPlanningRateBps: snapshot.planningRateBps,
+      snapshotPredictedNextRateBps: snapshot.predictedNextRateBps,
+      afterPlanningRateBps: candidate.planningRateBps,
+      afterPredictedRateBpsAfterNextUpdate: candidate.predictedRateBpsAfterNextUpdate
+    },
+    (rateBps) => distanceToTargetBand(rateBps, band)
+  );
   const normalizedSensitivityBpsPer10PctRelease =
     normalizedManagedSensitivityBpsPer10PctRelease(
       improvementBps,
@@ -401,6 +386,14 @@ function managedInventoryNoCandidateReason(
   const ineligibilityReason = managedMetadata.managedInventoryIneligibilityReason;
   if (eligible === false) {
     return buildManagedUnavailableReason(ineligibilityReason);
+  }
+
+  const totalWithdrawableQuoteAmount = managedMetadata.managedTotalWithdrawableQuoteAmount;
+  if (
+    managedRejectedByReleaseCap &&
+    (totalWithdrawableQuoteAmount === undefined || totalWithdrawableQuoteAmount <= 0n)
+  ) {
+    return "managed inventory upward control was eligible, but the snapshot no longer exposes withdrawable managed inventory totals";
   }
 
   if (managedRejectedByReleaseCap) {
@@ -555,11 +548,11 @@ export function planCycle(snapshot: PoolSnapshot, config: KeeperConfig): CyclePl
   }
 
   const managedRejectedByReleaseCap =
-    managedEligibleCandidates.some((candidate) => candidateUsesRemoveQuote(candidate)) &&
-    !managedReleaseCapCandidates.some((candidate) => candidateUsesRemoveQuote(candidate));
+    managedEligibleCandidates.some((candidate) => stepsUseManagedRemoveQuote(candidate.minimumExecutionSteps)) &&
+    !managedReleaseCapCandidates.some((candidate) => stepsUseManagedRemoveQuote(candidate.minimumExecutionSteps));
   const managedRejectedBySensitivityThreshold =
-    managedReleaseCapCandidates.some((candidate) => candidateUsesRemoveQuote(candidate)) &&
-    !managedSensitivityCandidates.some((candidate) => candidateUsesRemoveQuote(candidate));
+    managedReleaseCapCandidates.some((candidate) => stepsUseManagedRemoveQuote(candidate.minimumExecutionSteps)) &&
+    !managedSensitivityCandidates.some((candidate) => stepsUseManagedRemoveQuote(candidate.minimumExecutionSteps));
 
   if (viableCandidates.some((candidate) => candidate.executionMode === "unsupported")) {
     return {

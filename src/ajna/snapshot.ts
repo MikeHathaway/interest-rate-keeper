@@ -48,6 +48,7 @@ import {
 } from "./snapshot-read.js";
 import { type SnapshotSource } from "../snapshot.js";
 import { buildTargetBand } from "../planner.js";
+import { type ManagedMetadataKey } from "../snapshot-metadata.js";
 import {
   type HexAddress,
   type KeeperConfig,
@@ -141,6 +142,8 @@ function buildSimulationCandidateCacheKey(
     config.enableManagedInventoryUpwardControl ? "managed-upward" : "no-managed-upward",
     config.enableManagedDualUpwardControl ? "managed-dual" : "no-managed-dual",
     config.minimumManagedImprovementBps ?? 0,
+    config.maxManagedInventoryReleaseBps ?? 0,
+    config.minimumManagedSensitivityBpsPer10PctRelease ?? 0,
     accountState.simulationSenderAddress,
     accountState.borrowerAddress,
     accountState.quoteTokenBalance,
@@ -279,12 +282,7 @@ function candidateHasStep(candidate: PlanCandidate, stepType: string): boolean {
   return candidate.minimumExecutionSteps.some((step) => step.type === stepType);
 }
 
-function deriveManagedInventoryDiagnostics(
-  readState: AjnaPoolStateRead,
-  config: KeeperConfig,
-  simulationPrerequisitesAvailable: boolean,
-  accountState?: SimulationAccountState
-): {
+type ManagedInventoryDiagnosticsWrite = Partial<Record<ManagedMetadataKey, unknown>> & {
   managedInventoryUpwardControlEnabled?: boolean;
   managedDualUpwardControlEnabled?: boolean;
   managedUpwardControlNeeded?: boolean;
@@ -296,7 +294,14 @@ function deriveManagedInventoryDiagnostics(
   managedConfiguredBucketCount?: number;
   managedMaxWithdrawableQuoteAmount?: string;
   managedTotalWithdrawableQuoteAmount?: string;
-} {
+};
+
+function deriveManagedInventoryDiagnostics(
+  readState: AjnaPoolStateRead,
+  config: KeeperConfig,
+  simulationPrerequisitesAvailable: boolean,
+  accountState?: SimulationAccountState
+): ManagedInventoryDiagnosticsWrite {
   const managedInventoryUpwardControlEnabled =
     config.enableManagedInventoryUpwardControl === true;
   const managedDualUpwardControlEnabled = config.enableManagedDualUpwardControl === true;

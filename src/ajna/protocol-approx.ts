@@ -1,8 +1,12 @@
+import {
+  AJNA_COLLATERALIZATION_FACTOR_WAD,
+  AJNA_FENWICK_ZERO_INDEX,
+  AJNA_FLOAT_STEP,
+  MAX_AJNA_LIMIT_INDEX
+} from "./protocol-constants.js";
 import { forecastAjnaNextEligibleRate, type AjnaRateState, WAD, wdiv, wmul } from "./rate-state.js";
 import { type RateMoveOutcome } from "../types.js";
 
-const AJNA_COLLATERALIZATION_FACTOR_WAD = 1_040_000_000_000_000_000n;
-const AJNA_FLOAT_STEP = 1.005;
 const TWELVE_HOURS_SECONDS = 12 * 60 * 60;
 const FORK_TIME_SKIP_SECONDS = 12 * 60 * 60 + 5;
 
@@ -82,13 +86,15 @@ function priceToFenwickIndex(priceWad: bigint): number {
   const rawIndex = Math.log(price) / Math.log(AJNA_FLOAT_STEP);
   const ceilIndex = Math.ceil(rawIndex);
   const fenwickIndex =
-    rawIndex < 0 && ceilIndex - rawIndex > 0.5 ? 4157 - ceilIndex : 4156 - ceilIndex;
+    rawIndex < 0 && ceilIndex - rawIndex > 0.5
+      ? AJNA_FENWICK_ZERO_INDEX + 1 - ceilIndex
+      : AJNA_FENWICK_ZERO_INDEX - ceilIndex;
 
-  return Math.max(0, Math.min(7388, fenwickIndex));
+  return Math.max(0, Math.min(MAX_AJNA_LIMIT_INDEX, fenwickIndex));
 }
 
 function fenwickIndexToPriceWad(index: number): bigint {
-  const bucketIndex = 4156 - index;
+  const bucketIndex = AJNA_FENWICK_ZERO_INDEX - index;
   const price = AJNA_FLOAT_STEP ** bucketIndex;
   return BigInt(Math.round(price * 1e18));
 }
@@ -121,7 +127,7 @@ function findLupFenwickIndexForDebtWad(
     }
   }
 
-  return sortedDeposits.at(-1)?.bucketIndex ?? 7388;
+  return sortedDeposits.at(-1)?.bucketIndex ?? MAX_AJNA_LIMIT_INDEX;
 }
 
 function computeMeaningfulDepositForDepositsWad(
@@ -132,7 +138,7 @@ function computeMeaningfulDepositForDepositsWad(
   t0Debt2ToCollateralWad: bigint
 ): bigint {
   const maxPriceWad = fenwickIndexToPriceWad(0);
-  const minPriceWad = fenwickIndexToPriceWad(7388);
+  const minPriceWad = fenwickIndexToPriceWad(MAX_AJNA_LIMIT_INDEX);
   let meaningfulDeposit = treeSumDepositsWad(deposits);
 
   if (nonAuctionedT0Debt !== 0n) {

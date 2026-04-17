@@ -720,4 +720,132 @@ describe("planCycle", () => {
     expect(plan.intent).toBe("LEND");
     expect(plan.reason).toMatch(/less operator capital|lend path reaches the band/);
   });
+
+  it("surfaces a 'no exact managed candidate beat the passive path' reason when eligibility holds but no candidate clears the improvement threshold", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 900,
+        predictedNextOutcome: "NO_CHANGE",
+        predictedNextRateBps: 900,
+        metadata: {
+          managedInventoryUpwardControlEnabled: true,
+          managedInventoryUpwardEligible: true,
+          managedTotalWithdrawableQuoteAmount: "1000",
+          managedRemoveQuoteCandidateCount: 1
+        },
+        candidates: [
+          {
+            id: "too-small-improvement",
+            intent: "LEND",
+            minimumExecutionSteps: [
+              {
+                type: "REMOVE_QUOTE",
+                amount: 100n,
+                bucketIndex: 3000
+              }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 905,
+            resultingDistanceToTargetBps: 95,
+            quoteTokenDelta: 100n,
+            explanation: "marginal improvement"
+          }
+        ]
+      }),
+      {
+        ...baseConfig,
+        targetRateBps: 1000,
+        toleranceMode: "absolute",
+        toleranceBps: 25,
+        enableManagedInventoryUpwardControl: true,
+        minimumManagedImprovementBps: 50
+      }
+    );
+
+    expect(plan.intent).toBe("NO_OP");
+    expect(plan.reason).toMatch(/no candidate changes the next-rate outcome|managed inventory upward control/i);
+  });
+
+  it("surfaces a distinct reason when managed totals are missing rather than release-cap blaming", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 900,
+        predictedNextOutcome: "NO_CHANGE",
+        predictedNextRateBps: 900,
+        metadata: {
+          managedInventoryUpwardControlEnabled: true,
+          managedInventoryUpwardEligible: true,
+          managedRemoveQuoteCandidateCount: 1
+        },
+        candidates: [
+          {
+            id: "any-remove",
+            intent: "LEND",
+            minimumExecutionSteps: [
+              { type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 3000 }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 1000,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 100n,
+            explanation: "remove"
+          }
+        ]
+      }),
+      {
+        ...baseConfig,
+        targetRateBps: 1000,
+        toleranceMode: "absolute",
+        toleranceBps: 25,
+        enableManagedInventoryUpwardControl: true,
+        maxManagedInventoryReleaseBps: 2000
+      }
+    );
+
+    expect(plan.intent).toBe("NO_OP");
+    expect(plan.reason).toMatch(/withdrawable managed inventory totals/i);
+  });
+
+  it("filters out managed dual candidates when dual eligibility is false even if inventory is eligible", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 900,
+        predictedNextOutcome: "NO_CHANGE",
+        predictedNextRateBps: 900,
+        metadata: {
+          managedInventoryUpwardControlEnabled: true,
+          managedDualUpwardControlEnabled: true,
+          managedInventoryUpwardEligible: true,
+          managedDualUpwardEligible: false,
+          managedTotalWithdrawableQuoteAmount: "1000",
+          managedDualCandidateCount: 1
+        },
+        candidates: [
+          {
+            id: "dual-gated",
+            intent: "LEND_AND_BORROW",
+            minimumExecutionSteps: [
+              { type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 3000 },
+              { type: "DRAW_DEBT", amount: 50n, limitIndex: 3200, collateralAmount: 25n }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 1000,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 150n,
+            explanation: "dual path"
+          }
+        ]
+      }),
+      {
+        ...baseConfig,
+        targetRateBps: 1000,
+        toleranceMode: "absolute",
+        toleranceBps: 25,
+        enableManagedInventoryUpwardControl: true,
+        enableManagedDualUpwardControl: true
+      }
+    );
+
+    expect(plan.intent).toBe("NO_OP");
+  });
 });

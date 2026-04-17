@@ -30,6 +30,24 @@ export interface ManagedControlSnapshotMetadata {
   managedDualCandidateCount?: number;
 }
 
+export const MANAGED_METADATA_KEYS = {
+  managedInventoryUpwardControlEnabled: "managedInventoryUpwardControlEnabled",
+  managedDualUpwardControlEnabled: "managedDualUpwardControlEnabled",
+  managedUpwardControlNeeded: "managedUpwardControlNeeded",
+  managedInventoryUpwardEligible: "managedInventoryUpwardEligible",
+  managedInventoryIneligibilityReason: "managedInventoryIneligibilityReason",
+  managedDualUpwardEligible: "managedDualUpwardEligible",
+  managedDualIneligibilityReason: "managedDualIneligibilityReason",
+  managedInventoryBucketCount: "managedInventoryBucketCount",
+  managedConfiguredBucketCount: "managedConfiguredBucketCount",
+  managedMaxWithdrawableQuoteAmount: "managedMaxWithdrawableQuoteAmount",
+  managedTotalWithdrawableQuoteAmount: "managedTotalWithdrawableQuoteAmount",
+  managedRemoveQuoteCandidateCount: "managedRemoveQuoteCandidateCount",
+  managedDualCandidateCount: "managedDualCandidateCount"
+} as const;
+
+export type ManagedMetadataKey = keyof typeof MANAGED_METADATA_KEYS;
+
 export type SnapshotMetadataStringKey = KeysOfType<PoolSnapshotMetadata, string>;
 export type SnapshotMetadataNumberKey = KeysOfType<PoolSnapshotMetadata, number>;
 export type SnapshotMetadataBooleanKey = KeysOfType<PoolSnapshotMetadata, boolean>;
@@ -337,51 +355,51 @@ export function readManagedControlSnapshotMetadata(
 ): ManagedControlSnapshotMetadata {
   const managedInventoryUpwardControlEnabled = readSnapshotMetadataBoolean(
     snapshot,
-    "managedInventoryUpwardControlEnabled"
+    MANAGED_METADATA_KEYS.managedInventoryUpwardControlEnabled
   );
   const managedDualUpwardControlEnabled = readSnapshotMetadataBoolean(
     snapshot,
-    "managedDualUpwardControlEnabled"
+    MANAGED_METADATA_KEYS.managedDualUpwardControlEnabled
   );
   const managedInventoryUpwardEligible = readSnapshotMetadataBoolean(
     snapshot,
-    "managedInventoryUpwardEligible"
+    MANAGED_METADATA_KEYS.managedInventoryUpwardEligible
   );
   const managedInventoryIneligibilityReason = readSnapshotMetadataString(
     snapshot,
-    "managedInventoryIneligibilityReason"
+    MANAGED_METADATA_KEYS.managedInventoryIneligibilityReason
   );
   const managedDualUpwardEligible = readSnapshotMetadataBoolean(
     snapshot,
-    "managedDualUpwardEligible"
+    MANAGED_METADATA_KEYS.managedDualUpwardEligible
   );
   const managedDualIneligibilityReason = readSnapshotMetadataString(
     snapshot,
-    "managedDualIneligibilityReason"
+    MANAGED_METADATA_KEYS.managedDualIneligibilityReason
   );
   const managedInventoryBucketCount = readSnapshotMetadataNumber(
     snapshot,
-    "managedInventoryBucketCount"
+    MANAGED_METADATA_KEYS.managedInventoryBucketCount
   );
   const managedConfiguredBucketCount = readSnapshotMetadataNumber(
     snapshot,
-    "managedConfiguredBucketCount"
+    MANAGED_METADATA_KEYS.managedConfiguredBucketCount
   );
   const managedMaxWithdrawableQuoteAmount = readSnapshotMetadataBigInt(
     snapshot,
-    "managedMaxWithdrawableQuoteAmount"
+    MANAGED_METADATA_KEYS.managedMaxWithdrawableQuoteAmount
   );
   const managedTotalWithdrawableQuoteAmount = readSnapshotMetadataBigInt(
     snapshot,
-    "managedTotalWithdrawableQuoteAmount"
+    MANAGED_METADATA_KEYS.managedTotalWithdrawableQuoteAmount
   );
   const managedRemoveQuoteCandidateCount = readSnapshotMetadataNumber(
     snapshot,
-    "managedRemoveQuoteCandidateCount"
+    MANAGED_METADATA_KEYS.managedRemoveQuoteCandidateCount
   );
   const managedDualCandidateCount = readSnapshotMetadataNumber(
     snapshot,
-    "managedDualCandidateCount"
+    MANAGED_METADATA_KEYS.managedDualCandidateCount
   );
 
   return {
@@ -450,6 +468,24 @@ export function semanticSnapshotMetadataSignature(
     return undefined;
   }
 
+  const managed = readManagedControlSnapshotMetadata(snapshot);
+  const managedInventoryUpwardEligible =
+    managed.managedInventoryUpwardEligible === undefined
+      ? "-"
+      : managed.managedInventoryUpwardEligible
+        ? "1"
+        : "0";
+  const managedDualUpwardEligible =
+    managed.managedDualUpwardEligible === undefined
+      ? "-"
+      : managed.managedDualUpwardEligible
+        ? "1"
+        : "0";
+  const managedTotalWithdrawableQuoteAmount =
+    managed.managedTotalWithdrawableQuoteAmount === undefined
+      ? "-"
+      : managed.managedTotalWithdrawableQuoteAmount.toString();
+
   return [
     poolAddress,
     currentRateWad,
@@ -458,6 +494,9 @@ export function semanticSnapshotMetadataSignature(
     depositEmaWad,
     debtColEmaWad,
     lupt0DebtEmaWad,
-    String(lastInterestRateUpdateTimestamp)
+    String(lastInterestRateUpdateTimestamp),
+    managedInventoryUpwardEligible,
+    managedDualUpwardEligible,
+    managedTotalWithdrawableQuoteAmount
   ].join(":");
 }

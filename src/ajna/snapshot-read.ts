@@ -15,12 +15,12 @@ import {
   forecastAjnaNextEligibleRate,
   WAD
 } from "./rate-state.js";
+import { AJNA_FENWICK_ZERO_INDEX, AJNA_FLOAT_STEP } from "./protocol-constants.js";
 import { deriveMeaningfulDepositThresholdFenwickIndex } from "./search-space.js";
 import { buildSimulationCacheKey, setBoundedCacheEntry } from "./snapshot-cache.js";
 import { type HexAddress, type KeeperConfig } from "../types.js";
 
 const MAX_SIMULATION_ACCOUNT_STATE_CACHE_ENTRIES = 256;
-const AJNA_FLOAT_STEP = 1.005;
 
 const simulationAccountStateCache = new Map<string, SimulationAccountState>();
 
@@ -29,7 +29,7 @@ export function clearAjnaSimulationAccountStateCache(): void {
 }
 
 function fenwickIndexToPriceWad(index: number): bigint {
-  const bucketIndex = 4156 - index;
+  const bucketIndex = AJNA_FENWICK_ZERO_INDEX - index;
   const price = AJNA_FLOAT_STEP ** bucketIndex;
   return BigInt(Math.round(price * 1e18));
 }

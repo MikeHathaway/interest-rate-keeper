@@ -1,6 +1,6 @@
-import { distanceToTargetBand } from "./planner.js";
+import { distanceToTargetBand, withExecutionBuffer } from "./planner.js";
 import {
-  managedImprovementBps,
+  managedDistanceImprovementBps,
   maximumManagedReleasedQuoteAmount,
   normalizedManagedSensitivityBpsPer10PctRelease,
   releasedQuoteInventoryAmount,
@@ -18,6 +18,7 @@ import {
   type KeeperConfig,
   type PoolSnapshot
 } from "./types.js";
+import { BPS_DENOMINATOR } from "./units.js";
 
 function stepAmount(step: ExecutionStep): bigint {
   switch (step.type) {
@@ -71,6 +72,61 @@ function findCandidate(snapshot: PoolSnapshot, candidateId: string) {
   return snapshot.candidates.find((candidate) => candidate.id === candidateId);
 }
 
+function normalizeStepForComparison(step: ExecutionStep): string {
+  switch (step.type) {
+    case "ADD_QUOTE":
+      return `ADD_QUOTE:${step.amount.toString()}:${step.bucketIndex}:${step.expiry}`;
+    case "REMOVE_QUOTE":
+      return `REMOVE_QUOTE:${step.amount.toString()}:${step.bucketIndex}`;
+    case "DRAW_DEBT":
+      return `DRAW_DEBT:${step.amount.toString()}:${step.limitIndex}:${(step.collateralAmount ?? 0n).toString()}`;
+    case "REPAY_DEBT":
+      return `REPAY_DEBT:${step.amount.toString()}:${(step.collateralAmountToPull ?? 0n).toString()}:${step.limitIndex ?? "-"}:${step.recipient ?? "-"}`;
+    case "ADD_COLLATERAL":
+      return `ADD_COLLATERAL:${step.amount.toString()}:${step.bucketIndex}:${step.expiry ?? "-"}`;
+    case "REMOVE_COLLATERAL":
+      return `REMOVE_COLLATERAL:${step.amount.toString()}:${step.bucketIndex ?? "-"}`;
+    case "UPDATE_INTEREST":
+      return `UPDATE_INTEREST`;
+  }
+}
+
+function planStepsMatchCandidate(
+  plan: CyclePlan,
+  freshCandidate: { minimumExecutionSteps: readonly ExecutionStep[] },
+  config: KeeperConfig
+): boolean {
+  const planMutating = plan.requiredSteps.filter(
+    (step) => step.type !== "UPDATE_INTEREST"
+  );
+  const candidateMutating = freshCandidate.minimumExecutionSteps
+    .filter((step) => step.type !== "UPDATE_INTEREST")
+    .map((step) => withExecutionBuffer(step, config));
+
+  if (planMutating.length !== candidateMutating.length) {
+    return false;
+  }
+
+  for (let index = 0; index < planMutating.length; index += 1) {
+    const planStep = planMutating[index];
+    const candidateStep = candidateMutating[index];
+    if (planStep === undefined || candidateStep === undefined) {
+      return false;
+    }
+    if (planStep.type !== candidateStep.type) {
+      return false;
+    }
+    if (
+      normalizeStepForComparison(planStep) !==
+      normalizeStepForComparison(candidateStep)
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function coarseSnapshotSignature(snapshot: PoolSnapshot): string {
   return [
     snapshot.poolId,
@@ -89,14 +145,6 @@ function projectedRateBps(snapshot: PoolSnapshot): number {
   return snapshot.planningRateBps ?? snapshot.predictedNextRateBps;
 }
 
-function planUsesRemoveQuote(plan: CyclePlan): boolean {
-  return stepsUseManagedRemoveQuote(plan.requiredSteps);
-}
-
-function planUsesManagedDual(plan: CyclePlan): boolean {
-  return stepsUseManagedDual(plan.requiredSteps);
-}
-
 function currentAndProjectedRatesAreInBand(
   snapshot: PoolSnapshot,
   plan: CyclePlan
@@ -108,13 +156,15 @@ function currentAndProjectedRatesAreInBand(
 }
 
 function managedPlanImprovementBps(plan: CyclePlan, snapshot: PoolSnapshot): number {
-  const baselineDistance = distanceToTargetBand(projectedRateBps(snapshot), plan.targetBand);
-  const planDistance = distanceToTargetBand(
-    plan.planningRateBps ?? plan.predictedRateBpsAfterNextUpdate,
-    plan.targetBand
+  return managedDistanceImprovementBps(
+    {
+      snapshotPlanningRateBps: snapshot.planningRateBps,
+      snapshotPredictedNextRateBps: snapshot.predictedNextRateBps,
+      afterPlanningRateBps: plan.planningRateBps,
+      afterPredictedRateBpsAfterNextUpdate: plan.predictedRateBpsAfterNextUpdate
+    },
+    (rateBps) => distanceToTargetBand(rateBps, plan.targetBand)
   );
-
-  return managedImprovementBps(baselineDistance, planDistance);
 }
 
 function sameSemanticPoolState(previousSnapshot: PoolSnapshot, freshSnapshot: PoolSnapshot): boolean {
@@ -168,7 +218,7 @@ function managedInventoryGuards(
   snapshot: PoolSnapshot,
   config: KeeperConfig
 ): GuardFailure | undefined {
-  if (!planUsesRemoveQuote(plan)) {
+  if (!stepsUseManagedRemoveQuote(plan.requiredSteps)) {
     return undefined;
   }
 
@@ -185,7 +235,7 @@ function managedInventoryGuards(
   }
 
   if (
-    planUsesManagedDual(plan) &&
+    stepsUseManagedDual(plan.requiredSteps) &&
     managedMetadata.managedDualUpwardEligible !== true
   ) {
     const ineligibilityReason = managedMetadata.managedDualIneligibilityReason;
@@ -212,7 +262,7 @@ function managedInventoryGuards(
 
   if (
     maxManagedInventoryReleaseBps !== undefined &&
-    maxManagedInventoryReleaseBps < 10_000
+    maxManagedInventoryReleaseBps < BPS_DENOMINATOR
   ) {
     const maximumReleased = maximumManagedReleasedQuoteAmount(
       totalWithdrawableQuoteAmount,
@@ -338,6 +388,11 @@ export function preSubmitRecheck(
     return snapshotFailure;
   }
 
+  const managedFailure = managedInventoryGuards(plan, freshSnapshot, config);
+  if (managedFailure) {
+    return managedFailure;
+  }
+
   if (!sameSemanticPoolState(previousSnapshot, freshSnapshot)) {
     return {
       code: "POOL_STATE_CHANGED",
@@ -368,6 +423,13 @@ export function preSubmitRecheck(
           reason: "selected candidate context changed between planning and execution"
         };
       }
+    }
+
+    if (!planStepsMatchCandidate(plan, freshCandidate, config)) {
+      return {
+        code: "CANDIDATE_INVALIDATED",
+        reason: "plan steps no longer match the fresh candidate's minimum execution steps"
+      };
     }
   }
 

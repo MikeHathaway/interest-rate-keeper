@@ -10,7 +10,7 @@ const config: KeeperConfig = {
   toleranceBps: 1000,
   toleranceMode: "relative",
   completionPolicy: "next_move_would_overshoot",
-  executionBufferBps: 50,
+  executionBufferBps: 0,
   maxQuoteTokenExposure: 1000n,
   maxBorrowExposure: 1000n,
   snapshotAgeMaxSeconds: 90,
@@ -307,5 +307,256 @@ describe("policy", () => {
     );
 
     expect(failure?.code).toBe("MANAGED_CONTROLLABILITY_TOO_LOW");
+  });
+
+  it("rejects managed plans when eligibility flipped to false in the fresh snapshot", () => {
+    const removeQuotePlan: CyclePlan = {
+      ...plan,
+      requiredSteps: [
+        { type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 1 }
+      ],
+      quoteTokenDelta: 100n,
+      quoteInventoryDeployed: 0n,
+      quoteInventoryReleased: 100n,
+      netQuoteBorrowed: 100n,
+      operatorCapitalRequired: 0n,
+      operatorCapitalAtRisk: 0n
+    };
+
+    const failure = validatePlan(
+      removeQuotePlan,
+      {
+        ...snapshot,
+        metadata: {
+          ...snapshot.metadata,
+          managedInventoryUpwardEligible: false,
+          managedInventoryIneligibilityReason: "no withdrawable inventory"
+        }
+      },
+      { ...config, enableManagedInventoryUpwardControl: true }
+    );
+    expect(failure?.code).toBe("MANAGED_CONTROL_UNAVAILABLE");
+    expect(failure?.reason).toMatch(/no withdrawable inventory/);
+  });
+
+  it("rejects managed dual plans when dual eligibility flipped to false", () => {
+    const dualPlan: CyclePlan = {
+      ...plan,
+      requiredSteps: [
+        { type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 1 },
+        { type: "DRAW_DEBT", amount: 50n, limitIndex: 1, collateralAmount: 25n }
+      ],
+      quoteTokenDelta: 100n,
+      quoteInventoryDeployed: 0n,
+      quoteInventoryReleased: 100n,
+      netQuoteBorrowed: 150n,
+      additionalCollateralRequired: 25n,
+      operatorCapitalRequired: 25n,
+      operatorCapitalAtRisk: 25n
+    };
+
+    const failure = validatePlan(
+      dualPlan,
+      {
+        ...snapshot,
+        metadata: {
+          ...snapshot.metadata,
+          managedInventoryUpwardEligible: true,
+          managedDualUpwardEligible: false,
+          managedDualIneligibilityReason: "dual path gated",
+          managedTotalWithdrawableQuoteAmount: "1000"
+        }
+      },
+      {
+        ...config,
+        enableManagedInventoryUpwardControl: true,
+        enableManagedDualUpwardControl: true
+      }
+    );
+    expect(failure?.code).toBe("MANAGED_CONTROL_UNAVAILABLE");
+    expect(failure?.reason).toMatch(/dual path gated/);
+  });
+
+  it("rejects managed plans when the fresh snapshot has no withdrawable inventory totals", () => {
+    const removeQuotePlan: CyclePlan = {
+      ...plan,
+      requiredSteps: [
+        { type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 1 }
+      ],
+      quoteTokenDelta: 100n,
+      quoteInventoryDeployed: 0n,
+      quoteInventoryReleased: 100n,
+      netQuoteBorrowed: 100n,
+      operatorCapitalRequired: 0n,
+      operatorCapitalAtRisk: 0n
+    };
+
+    const failure = validatePlan(
+      removeQuotePlan,
+      {
+        ...snapshot,
+        metadata: {
+          ...snapshot.metadata,
+          managedInventoryUpwardEligible: true
+        }
+      },
+      { ...config, enableManagedInventoryUpwardControl: true }
+    );
+    expect(failure?.code).toBe("MANAGED_CONTROL_UNAVAILABLE");
+    expect(failure?.reason).toMatch(/withdrawable managed inventory/);
+  });
+
+  it("runs managedInventoryGuards during preSubmitRecheck", () => {
+    const removeQuotePlan: CyclePlan = {
+      ...plan,
+      requiredSteps: [
+        { type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 1 }
+      ],
+      quoteTokenDelta: 100n,
+      quoteInventoryDeployed: 0n,
+      quoteInventoryReleased: 100n,
+      netQuoteBorrowed: 100n,
+      operatorCapitalRequired: 0n,
+      operatorCapitalAtRisk: 0n
+    };
+
+    const eligibleMetadata = {
+      ...snapshot.metadata,
+      managedInventoryUpwardEligible: true,
+      managedTotalWithdrawableQuoteAmount: "1000"
+    };
+
+    const previousSnapshot: PoolSnapshot = {
+      ...snapshot,
+      metadata: eligibleMetadata
+    };
+
+    const freshSnapshot: PoolSnapshot = {
+      ...snapshot,
+      snapshotFingerprint: "different",
+      blockNumber: 11n,
+      blockTimestamp: 1_012,
+      snapshotAgeSeconds: 8,
+      metadata: {
+        ...eligibleMetadata,
+        managedInventoryUpwardEligible: false,
+        managedInventoryIneligibilityReason: "inventory depleted by another actor"
+      }
+    };
+
+    const failure = preSubmitRecheck(
+      removeQuotePlan,
+      previousSnapshot,
+      freshSnapshot,
+      { ...config, enableManagedInventoryUpwardControl: true }
+    );
+
+    expect(failure?.code).toBe("MANAGED_CONTROL_UNAVAILABLE");
+    expect(failure?.reason).toMatch(/inventory depleted by another actor/);
+  });
+
+  it("aborts preSubmitRecheck when plan steps no longer match the fresh candidate steps", () => {
+    const tamperedPlan: CyclePlan = {
+      ...plan,
+      requiredSteps: [
+        {
+          type: "ADD_QUOTE",
+          amount: 9_999n,
+          bucketIndex: 1,
+          expiry: 2_000
+        }
+      ],
+      quoteTokenDelta: 9_999n,
+      quoteInventoryDeployed: 9_999n,
+      netQuoteBorrowed: -9_999n,
+      operatorCapitalRequired: 9_999n,
+      operatorCapitalAtRisk: 9_999n
+    };
+
+    const failure = preSubmitRecheck(
+      tamperedPlan,
+      snapshot,
+      {
+        ...snapshot,
+        snapshotFingerprint: "different",
+        blockNumber: 11n,
+        blockTimestamp: 1_012,
+        snapshotAgeSeconds: 8
+      },
+      config
+    );
+
+    expect(failure?.code).toBe("CANDIDATE_INVALIDATED");
+    expect(failure?.reason).toMatch(/no longer match/);
+  });
+
+  it("rejects managed plans whose fresh snapshot no longer shows improvement over baseline", () => {
+    const failure = validatePlan(
+      {
+        ...plan,
+        requiredSteps: [
+          { type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 1 }
+        ],
+        predictedRateBpsAfterNextUpdate: 600,
+        quoteTokenDelta: 100n,
+        quoteInventoryDeployed: 0n,
+        quoteInventoryReleased: 100n,
+        netQuoteBorrowed: 100n,
+        operatorCapitalRequired: 0n,
+        operatorCapitalAtRisk: 0n
+      },
+      {
+        ...snapshot,
+        predictedNextRateBps: 700,
+        metadata: {
+          ...snapshot.metadata,
+          managedInventoryUpwardEligible: true,
+          managedTotalWithdrawableQuoteAmount: "1000"
+        }
+      },
+      {
+        ...config,
+        enableManagedInventoryUpwardControl: true,
+        minimumManagedSensitivityBpsPer10PctRelease: 10
+      }
+    );
+
+    expect(failure?.code).toBe("MANAGED_CONTROLLABILITY_TOO_LOW");
+    expect(failure?.reason).toMatch(/no longer improves the passive path/);
+  });
+
+  it("rejects managed plans whose release fraction rounds to zero under the sensitivity gate", () => {
+    const failure = validatePlan(
+      {
+        ...plan,
+        requiredSteps: [
+          { type: "REMOVE_QUOTE", amount: 2n, bucketIndex: 1 }
+        ],
+        predictedRateBpsAfterNextUpdate: 900,
+        quoteTokenDelta: 2n,
+        quoteInventoryDeployed: 0n,
+        quoteInventoryReleased: 2n,
+        netQuoteBorrowed: 2n,
+        operatorCapitalRequired: 0n,
+        operatorCapitalAtRisk: 0n
+      },
+      {
+        ...snapshot,
+        predictedNextRateBps: 700,
+        metadata: {
+          ...snapshot.metadata,
+          managedInventoryUpwardEligible: true,
+          managedTotalWithdrawableQuoteAmount: "1000000000000000000000"
+        }
+      },
+      {
+        ...config,
+        enableManagedInventoryUpwardControl: true,
+        minimumManagedSensitivityBpsPer10PctRelease: 1_000_000
+      }
+    );
+
+    expect(failure?.code).toBe("MANAGED_CONTROLLABILITY_TOO_LOW");
+    expect(failure?.reason).toMatch(/controllability gate|release fraction/i);
   });
 });

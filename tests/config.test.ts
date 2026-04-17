@@ -103,6 +103,103 @@ describe("resolveKeeperConfig", () => {
     ).toThrow(/maxManagedInventoryReleaseBps/);
   });
 
+  it("rejects maxManagedInventoryReleaseBps = 0", () => {
+    expect(() =>
+      resolveKeeperConfig({
+        chainId: 8453,
+        poolId: "base:pool",
+        targetRateBps: 1200,
+        toleranceBps: 1000,
+        maxQuoteTokenExposure: "1000000",
+        maxBorrowExposure: "500000",
+        maxManagedInventoryReleaseBps: 0
+      })
+    ).toThrow(/greater than zero/);
+  });
+
+  it("rejects enableManagedDualUpwardControl without enableManagedInventoryUpwardControl", () => {
+    expect(() =>
+      resolveKeeperConfig({
+        chainId: 8453,
+        poolId: "base:pool",
+        targetRateBps: 1200,
+        toleranceBps: 1000,
+        maxQuoteTokenExposure: "1000000",
+        maxBorrowExposure: "500000",
+        enableManagedDualUpwardControl: true
+      })
+    ).toThrow(/enableManagedInventoryUpwardControl/);
+  });
+
+  it("rejects empty removeQuoteBucketIndexes", () => {
+    expect(() =>
+      resolveKeeperConfig({
+        chainId: 8453,
+        poolId: "base:pool",
+        targetRateBps: 1200,
+        toleranceBps: 1000,
+        maxQuoteTokenExposure: "1000000",
+        maxBorrowExposure: "500000",
+        removeQuoteBucketIndexes: []
+      })
+    ).toThrow(/must not be empty/);
+  });
+
+  it("de-duplicates and sorts removeQuoteBucketIndexes", () => {
+    const config = resolveKeeperConfig({
+      chainId: 8453,
+      poolId: "base:pool",
+      targetRateBps: 1200,
+      toleranceBps: 1000,
+      maxQuoteTokenExposure: "1000000",
+      maxBorrowExposure: "500000",
+      removeQuoteBucketIndexes: [3000, 2800, 3000, 2900]
+    });
+    expect(config.removeQuoteBucketIndexes).toEqual([2800, 2900, 3000]);
+  });
+
+  it("rejects non-boolean enableManagedInventoryUpwardControl", () => {
+    expect(() =>
+      resolveKeeperConfig({
+        chainId: 8453,
+        poolId: "base:pool",
+        targetRateBps: 1200,
+        toleranceBps: 1000,
+        maxQuoteTokenExposure: "1000000",
+        maxBorrowExposure: "500000",
+        enableManagedInventoryUpwardControl: "yes"
+      })
+    ).toThrow(/enableManagedInventoryUpwardControl/);
+  });
+
+  it("rejects negative minimumManagedImprovementBps", () => {
+    expect(() =>
+      resolveKeeperConfig({
+        chainId: 8453,
+        poolId: "base:pool",
+        targetRateBps: 1200,
+        toleranceBps: 1000,
+        maxQuoteTokenExposure: "1000000",
+        maxBorrowExposure: "500000",
+        minimumManagedImprovementBps: -5
+      })
+    ).toThrow(/minimumManagedImprovementBps/);
+  });
+
+  it("rejects negative minimumManagedSensitivityBpsPer10PctRelease", () => {
+    expect(() =>
+      resolveKeeperConfig({
+        chainId: 8453,
+        poolId: "base:pool",
+        targetRateBps: 1200,
+        toleranceBps: 1000,
+        maxQuoteTokenExposure: "1000000",
+        maxBorrowExposure: "500000",
+        minimumManagedSensitivityBpsPer10PctRelease: -1
+      })
+    ).toThrow(/minimumManagedSensitivityBpsPer10PctRelease/);
+  });
+
   it("maps the legacy minExecutableActionQuoteToken field onto all action floors", () => {
     const config = resolveKeeperConfig({
       chainId: 8453,
