@@ -303,27 +303,34 @@ export async function resolvePoolAwareBorrowLimitIndexes(
     return baseIndexes;
   }
 
-  const bucketResults = await Promise.all(
-    probeIndexes.map(async (bucketIndex) => {
-      try {
-        const [, , bankruptcyTime, bucketDeposit] = await publicClient.readContract({
-          address: poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "bucketInfo",
-          args: [BigInt(bucketIndex)],
-          blockNumber
-        });
-
-        return {
-          bucketIndex,
-          bankruptcyTime,
-          bucketDeposit
-        };
-      } catch {
-        return undefined;
-      }
-    })
-  );
+  const multicallResults = await publicClient.multicall({
+    allowFailure: true,
+    contracts: probeIndexes.map((bucketIndex) => ({
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "bucketInfo",
+      args: [BigInt(bucketIndex)]
+    })),
+    blockNumber
+  });
+  const bucketResults = multicallResults.map((result, index) => {
+    if (result.status !== "success") {
+      return undefined;
+    }
+    const bucketState = result.result as unknown as readonly [
+      bigint,
+      bigint,
+      bigint,
+      bigint,
+      bigint
+    ];
+    const [, , bankruptcyTime, bucketDeposit] = bucketState;
+    return {
+      bucketIndex: probeIndexes[index]!,
+      bankruptcyTime,
+      bucketDeposit
+    };
+  });
 
   const fundedIndexes = bucketResults
     .filter(

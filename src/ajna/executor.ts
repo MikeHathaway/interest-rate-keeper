@@ -10,6 +10,7 @@ import { privateKeyToAccount } from "viem/accounts";
 
 import { ajnaPoolAbi, erc20Abi } from "./abi.js";
 import { requireAjnaPrivateKey } from "./runtime.js";
+import { resolveViemChain } from "./viem-chain.js";
 import { DryRunExecutionBackend, StepwiseExecutionBackend } from "../execute.js";
 import {
     type AddCollateralStep,
@@ -140,14 +141,19 @@ export function assertGasCostWithinCap(
   }
 }
 
+const GAS_FEE_CACHE_TTL_MS = 5_000;
+
 export function createAjnaExecutionBackend(config: KeeperConfig) {
   const runtime = assertLiveAjnaConfig(config);
   const account = privateKeyToAccount(requireAjnaPrivateKey());
+  const chain = resolveViemChain(config.chainId, runtime.rpcUrl);
   const publicClient = createPublicClient({
+    chain,
     transport: http(runtime.rpcUrl, { batch: true })
   });
   const walletClient = createWalletClient({
     account,
+    chain,
     transport: http(runtime.rpcUrl, { batch: true })
   });
 
@@ -180,6 +186,25 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
   const borrowerAddress = runtime.borrowerAddress ?? account.address;
   const defaultRecipientAddress = runtime.recipientAddress ?? account.address;
 
+  let cachedFees:
+    | { fees: EstimateFeesPerGasReturnType; fetchedAtMs: number }
+    | undefined;
+
+  async function fetchGasFees(): Promise<EstimateFeesPerGasReturnType> {
+    const now = Date.now();
+    if (cachedFees && now - cachedFees.fetchedAtMs < GAS_FEE_CACHE_TTL_MS) {
+      return cachedFees.fees;
+    }
+
+    const fees = await publicClient
+      .estimateFeesPerGas({ chain: undefined })
+      .catch(async () => ({
+        gasPrice: await publicClient.getGasPrice()
+      }));
+    cachedFees = { fees, fetchedAtMs: now };
+    return fees;
+  }
+
   async function submitContractCall(spec: ContractWriteSpec): Promise<{ transactionHash: Hex }> {
     const [estimatedGas, fees] = await Promise.all([
       publicClient.estimateContractGas({
@@ -189,11 +214,7 @@ export function createAjnaExecutionBackend(config: KeeperConfig) {
         functionName: spec.functionName as never,
         args: spec.args as never
       }),
-      publicClient
-        .estimateFeesPerGas({ chain: undefined })
-        .catch(async () => ({
-          gasPrice: await publicClient.getGasPrice()
-        }))
+      fetchGasFees()
     ]);
     const feeCapWei =
       resolveFeeCapWei(fees) ?? (await publicClient.getGasPrice());

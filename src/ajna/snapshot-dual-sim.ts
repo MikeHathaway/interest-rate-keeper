@@ -266,28 +266,40 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
                 secondsUntilNextRateUpdate: readState.immediatePrediction.secondsUntilNextRateUpdate
               },
               deposits: (
-                await Promise.all(
-                  protocolApproximationBucketIndexes.map(async (bucketIndex) => {
-                    try {
-                      const [, , bankruptcyTime, bucketDeposit] = await publicClient.readContract({
-                        address: options.poolAddress,
-                        abi: ajnaPoolAbi,
-                        functionName: "bucketInfo",
-                        args: [BigInt(bucketIndex)]
-                      });
+                protocolApproximationBucketIndexes.length === 0
+                  ? []
+                  : (
+                      await publicClient.multicall({
+                        allowFailure: true,
+                        contracts: protocolApproximationBucketIndexes.map(
+                          (bucketIndex) => ({
+                            address: options.poolAddress,
+                            abi: ajnaPoolAbi,
+                            functionName: "bucketInfo",
+                            args: [BigInt(bucketIndex)]
+                          })
+                        )
+                      })
+                    ).map((result, index) => {
+                      if (result.status !== "success") {
+                        return undefined;
+                      }
+                      const [, , bankruptcyTime, bucketDeposit] =
+                        result.result as unknown as readonly [
+                          bigint,
+                          bigint,
+                          bigint,
+                          bigint,
+                          bigint
+                        ];
                       if (bankruptcyTime !== 0n || bucketDeposit === 0n) {
                         return undefined;
                       }
-
                       return {
-                        bucketIndex,
+                        bucketIndex: protocolApproximationBucketIndexes[index]!,
                         amountWad: bucketDeposit * readState.quoteTokenScale
                       };
-                    } catch {
-                      return undefined;
-                    }
-                  })
-                )
+                    })
               ).filter(
                 (
                   deposit

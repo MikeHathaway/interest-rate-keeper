@@ -55,28 +55,31 @@ async function readAjnaPoolImmutableMetadata(
 
   const promise = (async () => {
     const [quoteTokenAddress, collateralAddress, quoteTokenScale, poolType] =
-      await Promise.all([
-        publicClient.readContract({
-          address: poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "quoteTokenAddress"
-        }),
-        publicClient.readContract({
-          address: poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "collateralAddress"
-        }),
-        publicClient.readContract({
-          address: poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "quoteTokenScale"
-        }),
-        publicClient.readContract({
-          address: poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "poolType"
-        })
-      ]);
+      await publicClient.multicall({
+        allowFailure: false,
+        contracts: [
+          {
+            address: poolAddress,
+            abi: ajnaPoolAbi,
+            functionName: "quoteTokenAddress"
+          },
+          {
+            address: poolAddress,
+            abi: ajnaPoolAbi,
+            functionName: "collateralAddress"
+          },
+          {
+            address: poolAddress,
+            abi: ajnaPoolAbi,
+            functionName: "quoteTokenScale"
+          },
+          {
+            address: poolAddress,
+            abi: ajnaPoolAbi,
+            functionName: "poolType"
+          }
+        ]
+      });
     return { quoteTokenAddress, collateralAddress, quoteTokenScale, poolType };
   })();
 
@@ -158,8 +161,64 @@ export async function readAjnaPoolState(
   const effectiveBlockNumber = block.number;
   const effectiveNowSeconds = nowSeconds ?? Number(block.timestamp);
 
+  const baseCalls = [
+    {
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "interestRateInfo"
+    },
+    {
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "debtInfo"
+    },
+    {
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "emasInfo"
+    },
+    {
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "inflatorInfo"
+    },
+    {
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "totalT0Debt"
+    },
+    {
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "totalT0DebtInAuction"
+    },
+    {
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "loansInfo"
+    }
+  ] as const;
+
+  const [immutableMetadata, aggregatedPoolResults] = await Promise.all([
+    readAjnaPoolImmutableMetadata(publicClient, poolAddress),
+    publicClient.multicall({
+      allowFailure: false,
+      contracts: borrowerAddress === undefined
+        ? [...baseCalls]
+        : [
+            ...baseCalls,
+            {
+              address: poolAddress,
+              abi: ajnaPoolAbi,
+              functionName: "borrowerInfo",
+              args: [borrowerAddress]
+            }
+          ],
+      blockNumber: effectiveBlockNumber
+    })
+  ]);
+
   const [
-    immutableMetadata,
     [currentRateWad, interestRateUpdateTimestamp],
     [currentDebtWad, , , t0Debt2ToCollateralWad],
     [debtColEmaWad, lupt0DebtEmaWad, debtEmaWad, depositEmaWad],
@@ -167,61 +226,19 @@ export async function readAjnaPoolState(
     totalT0Debt,
     totalT0DebtInAuction,
     loansInfo,
-    borrowerInfo
-  ] = await Promise.all([
-    readAjnaPoolImmutableMetadata(publicClient, poolAddress),
-    publicClient.readContract({
-      address: poolAddress,
-      abi: ajnaPoolAbi,
-      functionName: "interestRateInfo",
-      blockNumber: effectiveBlockNumber
-    }),
-    publicClient.readContract({
-      address: poolAddress,
-      abi: ajnaPoolAbi,
-      functionName: "debtInfo",
-      blockNumber: effectiveBlockNumber
-    }),
-    publicClient.readContract({
-      address: poolAddress,
-      abi: ajnaPoolAbi,
-      functionName: "emasInfo",
-      blockNumber: effectiveBlockNumber
-    }),
-    publicClient.readContract({
-      address: poolAddress,
-      abi: ajnaPoolAbi,
-      functionName: "inflatorInfo",
-      blockNumber: effectiveBlockNumber
-    }),
-    publicClient.readContract({
-      address: poolAddress,
-      abi: ajnaPoolAbi,
-      functionName: "totalT0Debt",
-      blockNumber: effectiveBlockNumber
-    }),
-    publicClient.readContract({
-      address: poolAddress,
-      abi: ajnaPoolAbi,
-      functionName: "totalT0DebtInAuction",
-      blockNumber: effectiveBlockNumber
-    }),
-    publicClient.readContract({
-      address: poolAddress,
-      abi: ajnaPoolAbi,
-      functionName: "loansInfo",
-      blockNumber: effectiveBlockNumber
-    }),
-    borrowerAddress === undefined
-      ? Promise.resolve(undefined)
-      : publicClient.readContract({
-          address: poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "borrowerInfo",
-          args: [borrowerAddress],
-          blockNumber: effectiveBlockNumber
-        })
-  ]);
+    borrowerInfoRaw
+  ] = aggregatedPoolResults as readonly [
+    readonly [bigint, bigint],
+    readonly [bigint, bigint, bigint, bigint],
+    readonly [bigint, bigint, bigint, bigint],
+    readonly [bigint, bigint],
+    bigint,
+    bigint,
+    readonly [HexAddress, bigint, bigint],
+    readonly [bigint, bigint, bigint] | undefined
+  ];
+  const borrowerInfo =
+    borrowerAddress === undefined ? undefined : borrowerInfoRaw;
   const { quoteTokenAddress, collateralAddress, quoteTokenScale, poolType } =
     immutableMetadata;
 
@@ -301,26 +318,31 @@ export async function readAjnaPoolRateStateOnly(
     [currentRateWad, interestRateUpdateTimestamp],
     [currentDebtWad],
     [debtColEmaWad, lupt0DebtEmaWad, debtEmaWad, depositEmaWad]
-  ] = await Promise.all([
-    publicClient.readContract({
-      address: poolAddress,
-      abi: ajnaPoolAbi,
-      functionName: "interestRateInfo",
-      blockNumber: effectiveBlockNumber
-    }),
-    publicClient.readContract({
-      address: poolAddress,
-      abi: ajnaPoolAbi,
-      functionName: "debtInfo",
-      blockNumber: effectiveBlockNumber
-    }),
-    publicClient.readContract({
-      address: poolAddress,
-      abi: ajnaPoolAbi,
-      functionName: "emasInfo",
-      blockNumber: effectiveBlockNumber
-    })
-  ]);
+  ] = (await publicClient.multicall({
+    allowFailure: false,
+    contracts: [
+      {
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "interestRateInfo"
+      },
+      {
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "debtInfo"
+      },
+      {
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "emasInfo"
+      }
+    ],
+    blockNumber: effectiveBlockNumber
+  })) as readonly [
+    readonly [bigint, bigint],
+    readonly [bigint, bigint, bigint, bigint],
+    readonly [bigint, bigint, bigint, bigint]
+  ];
 
   const rateState: AjnaRateState = {
     currentRateWad,
@@ -379,97 +401,125 @@ export async function readSimulationAccountState(
     return cached;
   }
 
-  const [
-    quoteTokenBalance,
-    quoteTokenAllowance,
-    collateralBalance,
-    collateralAllowance,
-    lenderBucketStates
-  ] = await Promise.all([
-    options.needsQuoteState
-      ? publicClient.readContract({
-          address: readState.quoteTokenAddress,
-          abi: erc20Abi,
-          functionName: "balanceOf",
-          args: [simulationSenderAddress],
-          blockNumber: readState.blockNumber
-        })
-      : Promise.resolve(undefined),
-    options.needsQuoteState
-      ? publicClient.readContract({
-          address: readState.quoteTokenAddress,
-          abi: erc20Abi,
-          functionName: "allowance",
-          args: [simulationSenderAddress, poolAddress],
-          blockNumber: readState.blockNumber
-        })
-      : Promise.resolve(undefined),
-    options.needsCollateralState
-      ? publicClient.readContract({
-          address: readState.collateralAddress,
-          abi: erc20Abi,
-          functionName: "balanceOf",
-          args: [simulationSenderAddress],
-          blockNumber: readState.blockNumber
-        })
-      : Promise.resolve(undefined),
-    options.needsCollateralState
-      ? publicClient.readContract({
-          address: readState.collateralAddress,
-          abi: erc20Abi,
-          functionName: "allowance",
-          args: [simulationSenderAddress, poolAddress],
-          blockNumber: readState.blockNumber
-        })
-      : Promise.resolve(undefined),
-    lenderQuoteBucketIndexes.length === 0
-      ? Promise.resolve(undefined)
-      : Promise.all(
-          lenderQuoteBucketIndexes.map(async (bucketIndex) => {
-            const [[lpBalance, depositTime], bucketState] = await Promise.all([
-              publicClient.readContract({
-                address: poolAddress,
-                abi: ajnaPoolAbi,
-                functionName: "lenderInfo",
-                args: [BigInt(bucketIndex), simulationSenderAddress],
-                blockNumber: readState.blockNumber
-              }),
-              publicClient.readContract({
-                address: poolAddress,
-                abi: ajnaPoolAbi,
-                functionName: "bucketInfo",
-                args: [BigInt(bucketIndex)],
-                blockNumber: readState.blockNumber
-              })
-            ]);
-            const [
-              lpAccumulator,
-              availableCollateral,
-              bankruptcyTime,
-              bucketDeposit,
-              bucketScale
-            ] = bucketState;
+  const accountContracts: Array<{
+    address: HexAddress;
+    abi: typeof ajnaPoolAbi | typeof erc20Abi;
+    functionName: string;
+    args?: readonly unknown[];
+  }> = [];
 
-            return {
-              bucketIndex,
-              lpBalance,
-              depositTime,
-              lpAccumulator,
+  if (options.needsQuoteState) {
+    accountContracts.push(
+      {
+        address: readState.quoteTokenAddress,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [simulationSenderAddress]
+      },
+      {
+        address: readState.quoteTokenAddress,
+        abi: erc20Abi,
+        functionName: "allowance",
+        args: [simulationSenderAddress, poolAddress]
+      }
+    );
+  }
+  if (options.needsCollateralState) {
+    accountContracts.push(
+      {
+        address: readState.collateralAddress,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [simulationSenderAddress]
+      },
+      {
+        address: readState.collateralAddress,
+        abi: erc20Abi,
+        functionName: "allowance",
+        args: [simulationSenderAddress, poolAddress]
+      }
+    );
+  }
+  for (const bucketIndex of lenderQuoteBucketIndexes) {
+    accountContracts.push(
+      {
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "lenderInfo",
+        args: [BigInt(bucketIndex), simulationSenderAddress]
+      },
+      {
+        address: poolAddress,
+        abi: ajnaPoolAbi,
+        functionName: "bucketInfo",
+        args: [BigInt(bucketIndex)]
+      }
+    );
+  }
+
+  const multicallResults =
+    accountContracts.length === 0
+      ? []
+      : ((await publicClient.multicall({
+          allowFailure: false,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          contracts: accountContracts as any,
+          blockNumber: readState.blockNumber
+        })) as readonly unknown[]);
+
+  let resultIndex = 0;
+  const quoteTokenBalance = options.needsQuoteState
+    ? (multicallResults[resultIndex++] as bigint)
+    : undefined;
+  const quoteTokenAllowance = options.needsQuoteState
+    ? (multicallResults[resultIndex++] as bigint)
+    : undefined;
+  const collateralBalance = options.needsCollateralState
+    ? (multicallResults[resultIndex++] as bigint)
+    : undefined;
+  const collateralAllowance = options.needsCollateralState
+    ? (multicallResults[resultIndex++] as bigint)
+    : undefined;
+
+  const lenderBucketStates =
+    lenderQuoteBucketIndexes.length === 0
+      ? undefined
+      : lenderQuoteBucketIndexes.map((bucketIndex) => {
+          const [lpBalance, depositTime] = multicallResults[
+            resultIndex++
+          ] as readonly [bigint, bigint];
+          const [
+            lpAccumulator,
+            availableCollateral,
+            bankruptcyTime,
+            bucketDeposit,
+            bucketScale
+          ] = multicallResults[resultIndex++] as readonly [
+            bigint,
+            bigint,
+            bigint,
+            bigint,
+            bigint
+          ];
+
+          return {
+            bucketIndex,
+            lpBalance,
+            depositTime,
+            lpAccumulator,
+            availableCollateral,
+            bankruptcyTime,
+            bucketDeposit,
+            bucketScale,
+            maxWithdrawableQuoteAmount: calculateMaxWithdrawableQuoteAmountFromLp({
+              bucketLPAccumulator: lpAccumulator,
               availableCollateral,
-              bankruptcyTime,
               bucketDeposit,
-              bucketScale,
-              maxWithdrawableQuoteAmount: calculateMaxWithdrawableQuoteAmountFromLp({
-                bucketLPAccumulator: lpAccumulator,
-                availableCollateral,
-                bucketDeposit,
-                lenderLpBalance: lpBalance,
-                bucketPriceWad: fenwickIndexToPriceWad(bucketIndex)
-              })
-            } satisfies SimulationLenderBucketState;
-          })
-        )
-  ]);
+              lenderLpBalance: lpBalance,
+              bucketPriceWad: fenwickIndexToPriceWad(bucketIndex)
+            })
+          } satisfies SimulationLenderBucketState;
+        });
 
   const accountState: SimulationAccountState = {
     simulationSenderAddress,

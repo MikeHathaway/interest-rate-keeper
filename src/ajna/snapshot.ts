@@ -47,6 +47,7 @@ import {
   readAjnaPoolState,
   readSimulationAccountState
 } from "./snapshot-read.js";
+import { resolveViemChain } from "./viem-chain.js";
 import { type SnapshotSource } from "../snapshot.js";
 import { buildTargetBand } from "../planner.js";
 import { type ManagedMetadataKey } from "../snapshot-metadata.js";
@@ -426,26 +427,33 @@ async function readManualCandidateBucketSignatures(
     new Set(manualCandidates.flatMap((candidate) => referencedBucketIndexes(candidate)))
   ).sort((left, right) => left - right);
   const signatures = new Map<number, string>();
+  if (bucketIndexes.length === 0) {
+    return signatures;
+  }
 
-  await Promise.all(
-    bucketIndexes.map(async (bucketIndex) => {
-      try {
-        const bucketState = await publicClient.readContract({
-          address: poolAddress,
-          abi: ajnaPoolAbi,
-          functionName: "bucketInfo",
-          args: [BigInt(bucketIndex)],
-          blockNumber
-        });
-        signatures.set(
-          bucketIndex,
-          bucketState.map((value: unknown) => String(value)).join(":")
-        );
-      } catch {
-        signatures.set(bucketIndex, "bucket-read-failed");
-      }
-    })
-  );
+  const multicallResults = await publicClient.multicall({
+    allowFailure: true,
+    contracts: bucketIndexes.map((bucketIndex) => ({
+      address: poolAddress,
+      abi: ajnaPoolAbi,
+      functionName: "bucketInfo",
+      args: [BigInt(bucketIndex)]
+    })),
+    blockNumber
+  });
+
+  multicallResults.forEach((result, index) => {
+    const bucketIndex = bucketIndexes[index]!;
+    if (result.status !== "success") {
+      signatures.set(bucketIndex, "bucket-read-failed");
+      return;
+    }
+    const bucketState = result.result as readonly unknown[];
+    signatures.set(
+      bucketIndex,
+      bucketState.map((value) => String(value)).join(":")
+    );
+  });
 
   return signatures;
 }
@@ -741,6 +749,7 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
     this.publicClient =
       dependencies.publicClient ??
       createPublicClient({
+        chain: resolveViemChain(config.chainId, runtime.rpcUrl),
         transport: http(runtime.rpcUrl, { batch: true })
       });
     this.now = dependencies.now ?? (() => Math.floor(Date.now() / 1000));

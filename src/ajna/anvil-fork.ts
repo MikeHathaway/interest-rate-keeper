@@ -10,6 +10,8 @@ import {
   type PublicClient
 } from "viem";
 
+import { MULTICALL3_ADDRESS } from "./viem-chain.js";
+
 export interface TemporaryAnvilForkOptions {
   rpcUrl: string;
   chainId: number;
@@ -139,12 +141,19 @@ async function startTemporaryAnvilFork(
         default: {
           http: [rpcUrl]
         }
+      },
+      contracts: {
+        multicall3: {
+          address: MULTICALL3_ADDRESS
+        }
       }
     });
     const publicClient = createPublicClient({
+      chain: forkChain,
       transport: http(rpcUrl, { batch: true })
     });
     const testClient = createTestClient({
+      chain: forkChain,
       mode: "anvil",
       transport: http(rpcUrl, { batch: true })
     });

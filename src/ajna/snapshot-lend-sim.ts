@@ -196,21 +196,18 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
 
                 const hash =
                   action.type === "ADD_QUOTE"
-                    ? await (async () => {
-                        const simulationBlock = await publicClient.getBlock({ blockTag: "latest" });
-                        return walletClient.writeContract({
-                          account: simulationSenderAddress,
-                          chain: undefined,
-                          address: options.poolAddress,
-                          abi: ajnaPoolAbi,
-                          functionName: "addQuoteToken",
-                          args: [
-                            action.amount,
-                            BigInt(action.bucketIndex),
-                            simulationBlock.timestamp + expiryOffset
-                          ]
-                        });
-                      })()
+                    ? await walletClient.writeContract({
+                        account: simulationSenderAddress,
+                        chain: undefined,
+                        address: options.poolAddress,
+                        abi: ajnaPoolAbi,
+                        functionName: "addQuoteToken",
+                        args: [
+                          action.amount,
+                          BigInt(action.bucketIndex),
+                          BigInt(readState.blockTimestamp) + expiryOffset
+                        ]
+                      })
                     : await walletClient.writeContract({
                         account: simulationSenderAddress,
                         chain: undefined,
