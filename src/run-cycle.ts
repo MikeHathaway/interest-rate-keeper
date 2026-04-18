@@ -3,6 +3,7 @@ import { stepsUseManagedDual } from "./managed-controls.js";
 import { derivePlanCandidateCapitalMetrics } from "./candidate-metrics.js";
 import { planCycle } from "./planner.js";
 import {
+  managedPrefixSafetyGuards,
   normalizeStepForComparison,
   preSubmitRecheck,
   validatePlan
@@ -152,7 +153,18 @@ async function executePlan(
 
     if (stepsUseManagedDual(plan.requiredSteps)) {
       const prefixPlan = buildPrefixPlan(plan, executedSteps, freshSnapshot);
-      const prefixFailure = validatePlan(prefixPlan, freshSnapshot, config);
+      // Only verify the managed safety invariants that must hold for the
+      // executed prefix on its own: eligibility + release cap. The full
+      // dual thresholds (improvement / sensitivity) are intentionally NOT
+      // checked here because they are calibrated against the combined
+      // REMOVE_QUOTE + DRAW_DEBT improvement. Applying them to a
+      // REMOVE_QUOTE-only prefix would falsely reject legitimate dual
+      // plans where DRAW_DEBT provides the majority of the rate change.
+      const prefixFailure = managedPrefixSafetyGuards(
+        prefixPlan,
+        freshSnapshot,
+        config
+      );
       if (prefixFailure) {
         return {
           execution: buildExecutionFailure(

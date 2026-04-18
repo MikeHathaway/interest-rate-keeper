@@ -247,7 +247,8 @@ export interface GuardFailure {
     | "MANAGED_RELEASE_CAP_EXCEEDED"
     | "MANAGED_CONTROLLABILITY_TOO_LOW"
     | "POOL_STATE_CHANGED"
-    | "CANDIDATE_INVALIDATED";
+    | "CANDIDATE_INVALIDATED"
+    | "EXPIRED_STEP";
   reason: string;
 }
 

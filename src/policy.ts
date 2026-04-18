@@ -76,10 +76,15 @@ function findCandidate(snapshot: PoolSnapshot, candidateId: string) {
   return snapshot.candidates.find((candidate) => candidate.id === candidateId);
 }
 
+// expiry fields are deliberately omitted: auto-synthesized candidates regenerate
+// expiry from `now` at every read, so including it in the comparison would
+// reject legitimate plans whenever recheck fires a few seconds after planning.
+// Expiry is a freshness hint, not a semantic identifier; tampering it cannot
+// change what tokens are moved or where.
 export function normalizeStepForComparison(step: ExecutionStep): string {
   switch (step.type) {
     case "ADD_QUOTE":
-      return `ADD_QUOTE:${step.amount.toString()}:${step.bucketIndex}:${step.expiry}`;
+      return `ADD_QUOTE:${step.amount.toString()}:${step.bucketIndex}`;
     case "REMOVE_QUOTE":
       return `REMOVE_QUOTE:${step.amount.toString()}:${step.bucketIndex}`;
     case "DRAW_DEBT":
@@ -87,7 +92,7 @@ export function normalizeStepForComparison(step: ExecutionStep): string {
     case "REPAY_DEBT":
       return `REPAY_DEBT:${step.amount.toString()}:${(step.collateralAmountToPull ?? 0n).toString()}:${step.limitIndex ?? "-"}:${step.recipient ?? "-"}`;
     case "ADD_COLLATERAL":
-      return `ADD_COLLATERAL:${step.amount.toString()}:${step.bucketIndex}:${step.expiry ?? "-"}`;
+      return `ADD_COLLATERAL:${step.amount.toString()}:${step.bucketIndex}`;
     case "REMOVE_COLLATERAL":
       return `REMOVE_COLLATERAL:${step.amount.toString()}:${step.bucketIndex ?? "-"}`;
     case "UPDATE_INTEREST":
@@ -203,7 +208,17 @@ function snapshotGuards(
   return undefined;
 }
 
-function managedInventoryGuards(
+/**
+ * Eligibility + release-cap subset of managedInventoryGuards. Safe to apply
+ * to a partial prefix of a dual plan (e.g. just the REMOVE_QUOTE half) because
+ * these are standalone safety invariants: the managed mode must be eligible
+ * and the released amount must fit the configured cap regardless of what
+ * DRAW_DEBT contributes afterward. Deliberately omits the improvement and
+ * sensitivity gates because those thresholds are calibrated for the full dual
+ * plan; applying them to the prefix would reject legitimate dual plans where
+ * DRAW_DEBT provides most of the improvement.
+ */
+export function managedPrefixSafetyGuards(
   plan: CyclePlan,
   snapshot: PoolSnapshot,
   config: KeeperConfig
@@ -266,12 +281,36 @@ function managedInventoryGuards(
     }
   }
 
-  const minimumManagedSensitivityBpsPer10PctRelease =
-    config.minimumManagedSensitivityBpsPer10PctRelease ?? 0;
-  if (minimumManagedSensitivityBpsPer10PctRelease <= 0) {
+  return undefined;
+}
+
+function managedInventoryGuards(
+  plan: CyclePlan,
+  snapshot: PoolSnapshot,
+  config: KeeperConfig
+): GuardFailure | undefined {
+  const prefixFailure = managedPrefixSafetyGuards(plan, snapshot, config);
+  if (prefixFailure) {
+    return prefixFailure;
+  }
+  if (!stepsUseManagedRemoveQuote(plan.requiredSteps)) {
     return undefined;
   }
 
+  const managedMetadata = readManagedControlSnapshotMetadata(snapshot);
+  const totalWithdrawableQuoteAmount = managedMetadata.managedTotalWithdrawableQuoteAmount;
+  // managedPrefixSafetyGuards already verified totalWithdrawableQuoteAmount is defined + positive.
+  if (totalWithdrawableQuoteAmount === undefined || totalWithdrawableQuoteAmount <= 0n) {
+    return undefined;
+  }
+  const released = releasedQuoteInventoryAmount(plan.requiredSteps);
+
+  // Always revalidate the improvement floor, regardless of whether the
+  // sensitivity gate is configured. The planner filters candidates against
+  // minimumManagedImprovementBps at plan time, but pool state can shift
+  // between planning and submission and degrade a plan's actual improvement
+  // below that floor. Without this check, a plan that improved 50 bps at
+  // planning can shrink to 1 bp at recheck and still pass.
   const improvementBps = managedPlanImprovementBps(plan, snapshot);
   if (improvementBps <= 0) {
     return {
@@ -279,6 +318,22 @@ function managedInventoryGuards(
       reason:
         "managed inventory plan no longer improves the passive path in the fresh snapshot"
     };
+  }
+  const minimumManagedImprovementBps = config.minimumManagedImprovementBps ?? 0;
+  if (
+    minimumManagedImprovementBps > 0 &&
+    improvementBps < minimumManagedImprovementBps
+  ) {
+    return {
+      code: "MANAGED_CONTROLLABILITY_TOO_LOW",
+      reason: `managed inventory plan improvement of ${improvementBps} bps is below the configured floor of ${minimumManagedImprovementBps} bps`
+    };
+  }
+
+  const minimumManagedSensitivityBpsPer10PctRelease =
+    config.minimumManagedSensitivityBpsPer10PctRelease ?? 0;
+  if (minimumManagedSensitivityBpsPer10PctRelease <= 0) {
+    return undefined;
   }
 
   const normalizedSensitivityBpsPer10PctRelease =
@@ -419,6 +474,21 @@ export function preSubmitRecheck(
       return {
         code: "CANDIDATE_INVALIDATED",
         reason: "plan steps no longer match the fresh candidate's minimum execution steps"
+      };
+    }
+  }
+
+  // Defense in depth for the C1 fix: normalizeStepForComparison deliberately
+  // omits `expiry` so legitimate plans do not get invalidated whenever a
+  // recheck lands a few seconds after planning. That leaves a gap where a
+  // plan with a stale expiry could pass recheck and then revert at submission
+  // (wasted gas). Catch it here. snapshotAgeMaxSeconds bounds most cases but
+  // not configs where addQuoteExpirySeconds < snapshotAgeMaxSeconds.
+  for (const step of plan.requiredSteps) {
+    if (step.type === "ADD_QUOTE" && step.expiry <= freshSnapshot.blockTimestamp) {
+      return {
+        code: "EXPIRED_STEP",
+        reason: `ADD_QUOTE step expiry ${step.expiry} is at or before the fresh block timestamp ${freshSnapshot.blockTimestamp}`
       };
     }
   }

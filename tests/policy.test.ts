@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { preSubmitRecheck, validatePlan } from "../src/policy.js";
+import {
+  managedPrefixSafetyGuards,
+  preSubmitRecheck,
+  validatePlan
+} from "../src/policy.js";
 import type { CyclePlan, KeeperConfig, PoolSnapshot } from "../src/types.js";
 
 const config: KeeperConfig = {
@@ -558,5 +562,254 @@ describe("policy", () => {
 
     expect(failure?.code).toBe("MANAGED_CONTROLLABILITY_TOO_LOW");
     expect(failure?.reason).toMatch(/controllability gate|release fraction/i);
+  });
+
+  it("does not reject ADD_QUOTE plans whose fresh-candidate expiry drifted forward", () => {
+    // C1 regression: auto-synthesized ADD_QUOTE candidates recompute expiry
+    // from `now` at every read. A plan built at t=0 must not be invalidated
+    // by a recheck a few seconds later just because the fresh candidate's
+    // expiry advanced.
+    const driftedFreshSnapshot: PoolSnapshot = {
+      ...snapshot,
+      snapshotFingerprint: "different",
+      blockNumber: 11n,
+      blockTimestamp: 1_012,
+      snapshotAgeSeconds: 8,
+      candidates: snapshot.candidates.map((candidate) => ({
+        ...candidate,
+        minimumExecutionSteps: candidate.minimumExecutionSteps.map((step) =>
+          step.type === "ADD_QUOTE"
+            ? { ...step, expiry: step.expiry + 12 }
+            : step
+        )
+      }))
+    };
+
+    const failure = preSubmitRecheck(plan, snapshot, driftedFreshSnapshot, config);
+    expect(failure).toBeUndefined();
+  });
+
+  it("does not reject non-managed plans when the fresh snapshot's managed state shifts", () => {
+    // C2 regression: managed-control diagnostics are keeper-local and must
+    // not trip sameSemanticPoolState for non-managed plans.
+    const driftedFreshSnapshot: PoolSnapshot = {
+      ...snapshot,
+      snapshotFingerprint: "different",
+      blockNumber: 11n,
+      blockTimestamp: 1_012,
+      snapshotAgeSeconds: 8,
+      metadata: {
+        ...snapshot.metadata,
+        managedInventoryUpwardEligible: false,
+        managedDualUpwardEligible: false,
+        managedTotalWithdrawableQuoteAmount: "0",
+        managedInventoryIneligibilityReason: "curator drained own bucket"
+      }
+    };
+
+    const failure = preSubmitRecheck(plan, snapshot, driftedFreshSnapshot, config);
+    expect(failure).toBeUndefined();
+  });
+
+  it("managedPrefixSafetyGuards skips improvement/sensitivity checks", () => {
+    // C3 regression: prefix-safety must not reject a prefix just because
+    // its improvement or sensitivity is lower than the full dual plan's
+    // threshold. Only eligibility + release cap are safety invariants.
+    const prefixPlan: CyclePlan = {
+      ...plan,
+      requiredSteps: [{ type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 1 }],
+      // Predicted rate shows minimal improvement — would fail sensitivity.
+      predictedRateBpsAfterNextUpdate: 705,
+      quoteTokenDelta: 100n,
+      quoteInventoryDeployed: 0n,
+      quoteInventoryReleased: 100n,
+      netQuoteBorrowed: 100n,
+      operatorCapitalRequired: 0n,
+      operatorCapitalAtRisk: 0n
+    };
+
+    const prefixFriendlySnapshot: PoolSnapshot = {
+      ...snapshot,
+      predictedNextRateBps: 700,
+      metadata: {
+        ...snapshot.metadata,
+        managedInventoryUpwardEligible: true,
+        managedTotalWithdrawableQuoteAmount: "1000"
+      }
+    };
+
+    const failure = managedPrefixSafetyGuards(
+      prefixPlan,
+      prefixFriendlySnapshot,
+      {
+        ...config,
+        enableManagedInventoryUpwardControl: true,
+        // Thresholds that the prefix alone CANNOT meet; the full dual would.
+        minimumManagedImprovementBps: 100,
+        minimumManagedSensitivityBpsPer10PctRelease: 1_000_000
+      }
+    );
+
+    // Improvement/sensitivity are NOT checked by the prefix guard, so this
+    // passes — leaving the dual loop free to proceed to DRAW_DEBT.
+    expect(failure).toBeUndefined();
+  });
+
+  it("managedPrefixSafetyGuards still enforces release cap", () => {
+    const prefixPlan: CyclePlan = {
+      ...plan,
+      requiredSteps: [{ type: "REMOVE_QUOTE", amount: 500n, bucketIndex: 1 }],
+      predictedRateBpsAfterNextUpdate: 900,
+      quoteTokenDelta: 500n,
+      quoteInventoryDeployed: 0n,
+      quoteInventoryReleased: 500n,
+      netQuoteBorrowed: 500n,
+      operatorCapitalRequired: 0n,
+      operatorCapitalAtRisk: 0n
+    };
+
+    const failure = managedPrefixSafetyGuards(
+      prefixPlan,
+      {
+        ...snapshot,
+        metadata: {
+          ...snapshot.metadata,
+          managedInventoryUpwardEligible: true,
+          managedTotalWithdrawableQuoteAmount: "1000"
+        }
+      },
+      {
+        ...config,
+        enableManagedInventoryUpwardControl: true,
+        // 500/1000 = 50% released, cap is 20% → fail.
+        maxManagedInventoryReleaseBps: 2_000
+      }
+    );
+
+    expect(failure?.code).toBe("MANAGED_RELEASE_CAP_EXCEEDED");
+  });
+
+  it("rejects managed plans whose fresh-snapshot improvement falls below the configured floor", () => {
+    // H1 regression: minimumManagedImprovementBps must be revalidated at
+    // recheck time, even when the sensitivity gate is not configured. Without
+    // this check, a plan that improved 50 bps at planning can degrade to 1 bp
+    // at recheck and still pass.
+    const removeQuotePlan: CyclePlan = {
+      ...plan,
+      requiredSteps: [
+        { type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 1 }
+      ],
+      predictedRateBpsAfterNextUpdate: 705,
+      quoteTokenDelta: 100n,
+      quoteInventoryDeployed: 0n,
+      quoteInventoryReleased: 100n,
+      netQuoteBorrowed: 100n,
+      operatorCapitalRequired: 0n,
+      operatorCapitalAtRisk: 0n
+    };
+
+    const failure = validatePlan(
+      removeQuotePlan,
+      {
+        ...snapshot,
+        predictedNextRateBps: 700,
+        metadata: {
+          ...snapshot.metadata,
+          managedInventoryUpwardEligible: true,
+          managedTotalWithdrawableQuoteAmount: "1000"
+        }
+      },
+      {
+        ...config,
+        enableManagedInventoryUpwardControl: true,
+        // Improvement is 5 bps (705 - 700). Floor is 50 bps → fails.
+        // Sensitivity gate intentionally left off to cover the early-return path.
+        minimumManagedImprovementBps: 50
+      }
+    );
+
+    expect(failure?.code).toBe("MANAGED_CONTROLLABILITY_TOO_LOW");
+    expect(failure?.reason).toMatch(/below the configured floor of 50 bps/);
+  });
+
+  it("rejects plans whose ADD_QUOTE expiry has already elapsed at submission time", () => {
+    // M1 regression: C1 fix removes `expiry` from step-body comparison,
+    // which means a stale expiry could pass recheck and revert at submission
+    // (wasted gas). preSubmitRecheck must catch expired steps via a dedicated
+    // freshness check independent of the normalization.
+    const addQuotePlan: CyclePlan = {
+      ...plan,
+      requiredSteps: [
+        {
+          type: "ADD_QUOTE",
+          amount: 10n,
+          bucketIndex: 1,
+          expiry: 1_000 // same as fresh block timestamp → expired
+        }
+      ]
+    };
+
+    // Use a fresh snapshot with matching candidate (to isolate the expiry check
+    // from CANDIDATE_INVALIDATED). Same fingerprint so sameSemanticPoolState
+    // passes.
+    const freshSnapshot: PoolSnapshot = {
+      ...snapshot,
+      blockTimestamp: 1_000,
+      candidates: [
+        {
+          ...snapshot.candidates[0]!,
+          minimumExecutionSteps: [
+            {
+              type: "ADD_QUOTE",
+              amount: 10n,
+              bucketIndex: 1,
+              expiry: 1_000
+            }
+          ]
+        }
+      ]
+    };
+
+    const failure = preSubmitRecheck(addQuotePlan, snapshot, freshSnapshot, config);
+    expect(failure?.code).toBe("EXPIRED_STEP");
+    expect(failure?.reason).toMatch(/expiry 1000 is at or before/);
+  });
+
+  it("accepts ADD_QUOTE plans whose expiry is still in the future", () => {
+    // M1 happy path: expiry still in the future at recheck time.
+    const addQuotePlan: CyclePlan = {
+      ...plan,
+      requiredSteps: [
+        {
+          type: "ADD_QUOTE",
+          amount: 10n,
+          bucketIndex: 1,
+          expiry: 5_000
+        }
+      ]
+    };
+
+    const freshSnapshot: PoolSnapshot = {
+      ...snapshot,
+      blockTimestamp: 1_000,
+      snapshotFingerprint: "different",
+      snapshotAgeSeconds: 5,
+      candidates: [
+        {
+          ...snapshot.candidates[0]!,
+          minimumExecutionSteps: [
+            {
+              type: "ADD_QUOTE",
+              amount: 10n,
+              bucketIndex: 1,
+              expiry: 5_000
+            }
+          ]
+        }
+      ]
+    };
+
+    const failure = preSubmitRecheck(addQuotePlan, snapshot, freshSnapshot, config);
+    expect(failure).toBeUndefined();
   });
 });

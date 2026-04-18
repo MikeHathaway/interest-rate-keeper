@@ -461,24 +461,13 @@ export function semanticSnapshotMetadataSignature(
     return undefined;
   }
 
-  const managed = readManagedControlSnapshotMetadata(snapshot);
-  const managedInventoryUpwardEligible =
-    managed.managedInventoryUpwardEligible === undefined
-      ? "-"
-      : managed.managedInventoryUpwardEligible
-        ? "1"
-        : "0";
-  const managedDualUpwardEligible =
-    managed.managedDualUpwardEligible === undefined
-      ? "-"
-      : managed.managedDualUpwardEligible
-        ? "1"
-        : "0";
-  const managedTotalWithdrawableQuoteAmount =
-    managed.managedTotalWithdrawableQuoteAmount === undefined
-      ? "-"
-      : managed.managedTotalWithdrawableQuoteAmount.toString();
-
+  // Managed-control diagnostics are intentionally NOT included here.
+  // sameSemanticPoolState is consulted for every plan in preSubmitRecheck,
+  // so mixing in keeper-local managed state would reject non-managed plans
+  // (plain ADD_QUOTE, DRAW_DEBT, UPDATE_INTEREST) whenever the operator's
+  // own inventory shifts. Managed plans are separately re-validated by
+  // managedInventoryGuards, which runs first in preSubmitRecheck and
+  // catches eligibility / release-cap / sensitivity drift on its own.
   return [
     poolAddress,
     currentRateWad,
@@ -487,9 +476,6 @@ export function semanticSnapshotMetadataSignature(
     depositEmaWad,
     debtColEmaWad,
     lupt0DebtEmaWad,
-    String(lastInterestRateUpdateTimestamp),
-    managedInventoryUpwardEligible,
-    managedDualUpwardEligible,
-    managedTotalWithdrawableQuoteAmount
+    String(lastInterestRateUpdateTimestamp)
   ].join(":");
 }

@@ -1,4 +1,4 @@
-import { type PublicClient } from "viem";
+import { type ContractFunctionParameters, type PublicClient } from "viem";
 
 import { ajnaPoolAbi, erc20Abi } from "./abi.js";
 import {
@@ -36,6 +36,8 @@ interface AjnaPoolImmutableMetadata {
   poolType: number;
   quoteTokenScale: bigint;
 }
+
+const MAX_POOL_IMMUTABLE_METADATA_CACHE_ENTRIES = 512;
 
 const poolImmutableMetadataCache = new Map<
   string,
@@ -89,12 +91,21 @@ async function readAjnaPoolImmutableMetadata(
     return { quoteTokenAddress, collateralAddress, quoteTokenScale, poolType };
   })();
 
-  poolImmutableMetadataCache.set(cacheKey, promise);
+  setBoundedCacheEntry(
+    poolImmutableMetadataCache,
+    cacheKey,
+    promise,
+    MAX_POOL_IMMUTABLE_METADATA_CACHE_ENTRIES
+  );
   try {
     return await promise;
   } catch (error) {
-    // Evict failed fetches so later calls can retry
-    poolImmutableMetadataCache.delete(cacheKey);
+    // Evict failed fetches so later calls can retry, but only if the entry
+    // still points at this promise (a concurrent second fetch may have
+    // raced in and replaced it with a successful one).
+    if (poolImmutableMetadataCache.get(cacheKey) === promise) {
+      poolImmutableMetadataCache.delete(cacheKey);
+    }
     throw error;
   }
 }
@@ -393,12 +404,7 @@ export async function readSimulationAccountState(
     return cached;
   }
 
-  const accountContracts: Array<{
-    address: HexAddress;
-    abi: typeof ajnaPoolAbi | typeof erc20Abi;
-    functionName: string;
-    args?: readonly unknown[];
-  }> = [];
+  const accountContracts: ContractFunctionParameters[] = [];
 
   if (options.needsQuoteState) {
     accountContracts.push(
@@ -454,8 +460,7 @@ export async function readSimulationAccountState(
       ? []
       : ((await publicClient.multicall({
           allowFailure: false,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          contracts: accountContracts as any,
+          contracts: accountContracts,
           blockNumber: readState.blockNumber
         })) as readonly unknown[]);
 

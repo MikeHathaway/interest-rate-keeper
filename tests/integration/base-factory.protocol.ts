@@ -26,12 +26,24 @@ export function wdiv(left: bigint, right: bigint): bigint {
   return (left * 1_000_000_000_000_000_000n + right / 2n) / right;
 }
 
+// Kept in sync with src/ajna/protocol-constants.ts priceToFenwickIndex —
+// same defensive guards against non-finite / non-positive inputs. Falls back
+// to MAX (7388) when math degenerates, matching the `?? MAX_AJNA_LIMIT_INDEX`
+// call-site pattern used in production (protocol-approx.ts).
 export function priceToFenwickIndex(priceWad: bigint): number {
   const price = Number(priceWad) / 1e18;
+  if (!Number.isFinite(price) || price <= 0) {
+    return 7388;
+  }
+
   const rawIndex = Math.log(price) / Math.log(AJNA_FLOAT_STEP);
   const ceilIndex = Math.ceil(rawIndex);
   const fenwickIndex =
     rawIndex < 0 && ceilIndex - rawIndex > 0.5 ? 4157 - ceilIndex : 4156 - ceilIndex;
+
+  if (!Number.isFinite(fenwickIndex)) {
+    return 7388;
+  }
 
   return Math.max(0, Math.min(7388, fenwickIndex));
 }
