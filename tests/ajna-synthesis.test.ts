@@ -7,8 +7,8 @@ import {
   synthesizeAjnaHeuristicCandidates,
   synthesizeAjnaLendAndBorrowCandidate,
   synthesizeAjnaLendCandidate
-} from "../src/ajna/snapshot.js";
-import type { KeeperConfig } from "../src/types.js";
+} from "../src/ajna/adapter/synthesis-policy.js";
+import type { KeeperConfig } from "../src/core/types.js";
 import { baseConfig, WAD } from "./ajna-test-fixtures.js";
 
 describe("resolveAjnaSynthesisPolicy", () => {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { formatCycleCapitalSummary } from "../src/human-summary.js";
-import { type CycleResult } from "../src/types.js";
+import { type CycleResult } from "../src/core/types.js";
 
 describe("formatCycleCapitalSummary", () => {
   it("formats a short human-readable capital summary", () => {

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  rankProtocolShapedDualBranches,
   resolveBorrowSimulationLookaheadAttempts,
   resolveManagedInventoryBucketIndexes,
   resolveProtocolApproximationBucketIndexes,
@@ -11,7 +10,8 @@ import {
   resolveSimulationBorrowLimitIndexes,
   resolveTimedBorrowSimulationLookaheadAttempts,
   searchCoarseToFineDualSpace
-} from "../src/ajna/snapshot.js";
+} from "../src/ajna/search/index.js";
+import { rankProtocolShapedDualBranches } from "../src/ajna/search/dual-prefilter.js";
 import { baseConfig, WAD } from "./ajna-test-fixtures.js";
 
 describe("searchCoarseToFineDualSpace", () => {
@@ -463,4 +463,3 @@ describe("resolveBorrowSimulationLookaheadAttempts", () => {
     ).toEqual([1, 3]);
   });
 });
-

@@ -1,13 +1,13 @@
-import { resolveKeeperConfig } from "./config.js";
-import { parseObject } from "./config-parse.js";
-import { runCycle, type RunCycleDependencies } from "./run-cycle.js";
+import { resolveKeeperConfig } from "./core/config/config.js";
+import { parseObject } from "./core/config/parse.js";
+import { runCycle, type RunCycleDependencies } from "./core/cycle/run-cycle.js";
 import {
   resolvePoolSnapshot,
   StaticSnapshotSource,
   type SnapshotSource
-} from "./snapshot.js";
-import { AjnaRpcSnapshotSource } from "./ajna/snapshot.js";
-import { safeJsonStringify } from "./json.js";
+} from "./core/snapshot/file.js";
+import { AjnaRpcSnapshotSource } from "./ajna/adapter/synthesis-policy.js";
+import { safeJsonStringify } from "./core/support/json.js";
 
 export function resolveKeeperHubPayload(input: unknown): {
   config: ReturnType<typeof resolveKeeperConfig>;

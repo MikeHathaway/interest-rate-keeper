@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   derivePlanCandidateCapitalMetrics,
   resolveCandidateCapitalMetrics
-} from "../src/candidate-metrics.js";
-import type { PlanCandidate } from "../src/types.js";
+} from "../src/core/planning/candidate-metrics.js";
+import type { PlanCandidate } from "../src/core/types.js";
 
 const ZERO = {
   quoteTokenDelta: 0n,

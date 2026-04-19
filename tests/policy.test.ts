@@ -4,8 +4,8 @@ import {
   managedPrefixSafetyGuards,
   preSubmitRecheck,
   validatePlan
-} from "../src/policy.js";
-import type { CyclePlan, KeeperConfig, PoolSnapshot } from "../src/types.js";
+} from "../src/core/planning/policy.js";
+import type { CyclePlan, KeeperConfig, PoolSnapshot } from "../src/core/types.js";
 
 const config: KeeperConfig = {
   chainId: 8453,

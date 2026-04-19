@@ -8,7 +8,7 @@ import {
   releasedQuoteInventoryAmount,
   stepsUseManagedDual,
   stepsUseManagedRemoveQuote
-} from "../src/managed-controls.js";
+} from "../src/core/planning/managed-controls.js";
 
 describe("managedImprovementBps", () => {
   it("is positive when candidate reduces distance", () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { calculateMaxWithdrawableQuoteAmountFromLp } from "../src/ajna/snapshot-read.js";
+import { calculateMaxWithdrawableQuoteAmountFromLp } from "../src/ajna/read/pool-state.js";
 
 const WAD = 1_000_000_000_000_000_000n;
 

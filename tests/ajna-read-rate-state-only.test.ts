@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
-import { clearAjnaSnapshotCaches } from "../src/ajna/snapshot.js";
-import { readAjnaPoolRateStateOnly } from "../src/ajna/snapshot-read.js";
+import { clearAjnaSnapshotCaches } from "../src/ajna/adapter/synthesis-policy.js";
+import { readAjnaPoolRateStateOnly } from "../src/ajna/read/pool-state.js";
 
 const POOL = "0x1111111111111111111111111111111111111111" as const;
 

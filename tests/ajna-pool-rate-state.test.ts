@@ -3,9 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildSimulationPreamble,
   resolveEffectiveAccountState
-} from "../src/ajna/snapshot-sim-context.js";
-import type { AjnaPoolStateRead } from "../src/ajna/snapshot-internal.js";
-import type { AjnaRatePrediction } from "../src/ajna/rate-state.js";
+} from "../src/ajna/synthesize/sim/context.js";
+import type { AjnaPoolStateRead } from "../src/ajna/domain.js";
+import type { AjnaRatePrediction } from "../src/ajna/math/rate-state.js";
 import { baseConfig } from "./ajna-test-fixtures.js";
 
 const POOL_ADDRESS = "0x1111111111111111111111111111111111111111" as const;

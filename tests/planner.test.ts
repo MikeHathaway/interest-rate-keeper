@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { planCycle } from "../src/planner.js";
-import type { KeeperConfig, PoolSnapshot } from "../src/types.js";
+import { planCycle } from "../src/core/planning/planner.js";
+import type { KeeperConfig, PoolSnapshot } from "../src/core/types.js";
 
 const baseConfig: KeeperConfig = {
   chainId: 8453,

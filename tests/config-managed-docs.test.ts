@@ -3,7 +3,10 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { MANAGED_CONFIG_OPTION_KEYS, MANAGED_CONFIG_OPTIONS } from "../src/config-managed.js";
+import {
+  MANAGED_CONFIG_OPTION_KEYS,
+  MANAGED_CONFIG_OPTIONS
+} from "../src/core/config/managed.js";
 
 const repoRoot = join(import.meta.dirname, "..");
 

@@ -1,4 +1,4 @@
-import type { KeeperConfig } from "../src/types.js";
+import type { KeeperConfig } from "../src/core/types.js";
 
 export const WAD = 1_000_000_000_000_000_000n;
 

@@ -245,7 +245,7 @@ const child = spawn(
     "run",
     "--config",
     "vitest.integration.config.ts",
-    "tests/integration/base-factory.integration.ts",
+    "tests/integration/base/index.integration.ts",
     ...forwardedVitestArgs
   ],
   {

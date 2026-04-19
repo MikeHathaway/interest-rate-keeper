@@ -174,7 +174,7 @@ Notes:
 - `npm run lint` runs the source-focused ESLint pass over `src/**/*.ts` plus the release runner script.
 - `npm run verify` runs `lint + typecheck + unit tests + build` and is the same gate used by CI and publish workflows.
 - `npm run test:integration:base:smoke` runs the smallest Base-fork health checks through the managed fork runner.
-- `npm run test:integration:base` runs the broader default Base-fork integration profile in [`tests/integration/base-factory.integration.ts`](./tests/integration/base-factory.integration.ts) through the managed fork runner.
+- `npm run test:integration:base` runs the broader default Base-fork integration profile in [`tests/integration/base/index.integration.ts`](./tests/integration/base/index.integration.ts) through the managed fork runner.
 - `npm run test:integration:base:slow` runs the slower but still routine exact-path proofs through the managed fork runner.
 - `npm run test:integration:base:stress` runs the heavier but consistently passable managed-local-Anvil proofs.
 - `npm run test:integration:base:experimental` runs the longest algorithmic exact-search proofs, including the broader existing-borrower same-cycle borrow scan. These are exploratory and can still take many minutes.

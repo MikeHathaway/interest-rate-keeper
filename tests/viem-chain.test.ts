@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { base, mainnet } from "viem/chains";
 
-import { MULTICALL3_ADDRESS, resolveViemChain } from "../src/ajna/viem-chain.js";
+import { MULTICALL3_ADDRESS, resolveViemChain } from "../src/ajna/adapter/viem-chain.js";
 
 // Ethereum addresses are case-insensitive; viem/chains ships multicall3 with
 // lowercase addresses while our own synthesized chains use EIP-55 checksummed

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseCliArgs, resolveKeeperConfig } from "../src/config.js";
+import { parseCliArgs, resolveKeeperConfig } from "../src/core/config/config.js";
 
 describe("resolveKeeperConfig", () => {
   it("parses a valid config", () => {

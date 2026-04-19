@@ -4,7 +4,7 @@ import {
   classifyAjnaNextRate,
   forecastAjnaNextEligibleRate,
   hasUninitializedAjnaEmaState
-} from "../src/ajna/snapshot.js";
+} from "../src/ajna/math/rate-state.js";
 import { WAD } from "./ajna-test-fixtures.js";
 
 describe("classifyAjnaNextRate", () => {
