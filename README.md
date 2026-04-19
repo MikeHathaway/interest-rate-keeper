@@ -183,6 +183,7 @@ npm install
 npm run build
 npm run lint
 npm run typecheck
+npm run render:diagrams
 npm run verify
 npm test
 npm run test:integration:base:smoke
@@ -190,11 +191,13 @@ npm run test:integration:base
 npm run test:integration:base:slow
 npm run test:integration:base:stress
 npm run test:integration:base:experimental
+npm run test:integration:base:all
 ```
 
 Notes:
 - `npm test` runs the fast unit suite only.
-- `npm run lint` runs the source-focused ESLint pass over `src/**/*.ts` plus the release runner script.
+- `npm run lint` runs the repo ESLint pass over the current project tree.
+- `npm run render:diagrams` regenerates the architecture and run-cycle diagram assets from the DOT sources in `docs/diagrams/`.
 - `npm run verify` runs `lint + typecheck + unit tests + build` and is the same gate used by CI and publish workflows.
 - `npm run test:integration:base:smoke` runs the smallest Base-fork health checks through the managed fork runner.
 - `npm run test:integration:base` runs the broader default Base-fork integration profile in [`tests/integration/base/index.integration.ts`](./tests/integration/base/index.integration.ts) through the managed fork runner.
@@ -202,7 +205,8 @@ Notes:
 - `npm run test:integration:base:stress` runs the heavier but consistently passable managed-local-Anvil proofs.
 - `npm run test:integration:base:experimental` runs the longest algorithmic exact-search proofs, including the broader existing-borrower same-cycle borrow scan. These are exploratory and can still take many minutes.
 - `npm run test:integration:base:all` runs every profile together, including `experimental`, and also uses the managed local-Anvil path.
-- The Base integration test uses `BASE_RPC_URL` if provided, otherwise it falls back to `https://mainnet.base.org`.
+- Base-fork package scripts require either:
+  `BASE_LOCAL_ANVIL_URL` pointing at an already-running Base fork you control, or `BASE_RPC_URL` so the managed runner can start its own local fork.
 - If `BASE_LOCAL_ANVIL_URL` is unset, the managed fork runner picks a profile-specific free local port, starts its own local Anvil fork there, and tears it down after the run.
 - If `BASE_LOCAL_ANVIL_URL` is set, the test harness reuses that already-running local Anvil fork instead of spawning a fresh one.
 - The Base integration test logs the selected profile plus either the explicit reused local fork host or the spawned upstream/local hosts at startup.
@@ -258,7 +262,7 @@ For the longest exploratory exact-search proofs, use:
 BASE_LOCAL_ANVIL_URL=http://127.0.0.1:9545 npm run test:integration:base:experimental
 ```
 
-If `BASE_LOCAL_ANVIL_URL` is unset, all Base-fork package scripts automatically start a managed local Anvil fork on a profile-specific free local port, run the suite there, then shut it down when the run finishes.
+If `BASE_LOCAL_ANVIL_URL` is unset, all Base-fork package scripts automatically start a managed local Anvil fork on a profile-specific free local port, run the suite there, then shut it down when the run finishes. That managed path requires `BASE_RPC_URL`.
 
 ## CLI Usage
 
@@ -328,6 +332,7 @@ Optional live-execution fields:
 - `logPath`
 - `manualCandidates`
 - `maxGasCostWei`
+- `allowHeuristicExecution`
 - `addQuoteBucketIndex`
 - `addQuoteBucketIndexes`
 - `addQuoteExpirySeconds`
@@ -349,7 +354,31 @@ Optional live-execution fields:
 - `enableHeuristicLendSynthesis`
 - `enableHeuristicBorrowSynthesis`
 
-The synthesis flags are now best thought of as explicit overrides. When they are left unset, the live Ajna snapshot source auto-selects a default internal synthesis policy from the available runtime context.
+The non-obvious flags are best understood by function:
+
+- execution/context:
+  `borrowerAddress`, `recipientAddress`, `logPath`, `maxGasCostWei`
+- heuristic execution gate:
+  `allowHeuristicExecution`
+- manual override path:
+  `manualCandidates`
+- lend-side exact-search overrides:
+  `addQuoteBucketIndex`, `addQuoteBucketIndexes`, `addQuoteExpirySeconds`
+- borrow-side exact-search overrides:
+  `drawDebtLimitIndex`, `drawDebtLimitIndexes`, `drawDebtCollateralAmount`, `drawDebtCollateralAmounts`, `borrowSimulationLookaheadUpdates`
+- simulation/exact-path control:
+  `simulationSenderAddress`, `enableSimulationBackedLendSynthesis`, `enableSimulationBackedBorrowSynthesis`
+- heuristic recommendation control:
+  `enableHeuristicLendSynthesis`, `enableHeuristicBorrowSynthesis`
+- managed inventory-backed upward control:
+  `enableManagedInventoryUpwardControl`, `enableManagedDualUpwardControl`, `minimumManagedImprovementBps`, `maxManagedInventoryReleaseBps`, `minimumManagedSensitivityBpsPer10PctRelease`, `removeQuoteBucketIndex`, `removeQuoteBucketIndexes`
+
+Practical reading:
+
+- most operators should leave the synthesis flags unset and let the live snapshot source choose the default internal policy
+- most operators should leave `allowHeuristicExecution` off so heuristic candidates stay advisory-only
+- the bucket / limit / collateral fields are low-level search overrides, mainly for experiments or tightly controlled deployments
+- the managed inventory flags are only relevant for curator-style used-pool upward control
 
 ### Curator-Mode Config Example
 
@@ -414,31 +443,23 @@ The Base integration test is intended to stay close to real deployed Ajna behavi
 - it deploys mock ERC20 collateral and quote tokens into the fork
 - it calls the deployed Base Ajna ERC20 factory
 - it creates a fresh pool through that real factory
-- it advances time past the 12-hour update window
-- it runs the keeper cycle and verifies that `UPDATE_INTEREST` changes the rate as expected
-- it also proves that the keeper can find a due-cycle `LEND` plan in a representative borrowed-pool step-up fixture without appending a separate `UPDATE_INTEREST` step
-- it also proves that exact same-cycle `BORROW` synthesis still finds no candidate in a representative brand-new quote-only Base fixture after the first passive update, even though the fork reaches real states where borrower-side steering would be desirable
-- it also includes experimental proofs that exact same-cycle `BORROW` synthesis still finds no candidate across a broadened representative set of true existing-borrower Base fixtures, including a deliberately borrower-heavy existing-loan matrix
-- it also includes experimental manual one-update borrower probes that still find no positive same-cycle `DRAW_DEBT` improvement in the saved brand-new quote-only fixture or the borrower-heavy existing-loan fixture set, even after widening the probe to near-current targets, tiny collateral adds, and sub-token borrow amounts
-- it also includes experimental first-update borrower probes that still find no positive same-cycle `DRAW_DEBT` improvement in a brand-new single-bucket quote-only pool or a brand-new multi-bucket quote-only pool searched near the collateralization boundary
-- it also includes an experimental first-update multi-bucket borrower probe that still finds no positive same-cycle `DRAW_DEBT` improvement even when collateral is binary-searched down to the execution boundary
-- it also includes an experimental bounded boundary-targeted existing-borrower search that still finds no manual same-cycle `DRAW_DEBT` improvement in a higher-utilization fixture set
-- it also proves that borrower-side lookahead planning can find and live-execute a representative multi-cycle `BORROW` plan when `borrowSimulationLookaheadUpdates` is enabled with a wider search space
-- it also proves that the keeper aborts safely when another actor changes the pool between planning and execution
-- it also proves that multi-bucket quote search can surface, naturally select, and live-execute a representative exact `LEND_AND_BORROW` candidate on the fork
-- it proves the one-cycle-ahead forecast by checking that a post-update not-due snapshot predicts the passive next eligible rate update correctly on a later real `updateInterest`
-- it proves that the one-cycle-ahead deterministic not-due step-up fixture still does not surface an exact or heuristic pre-window `LEND` plan that improves the very next eligible update
-- it also includes a routine slow-profile exact proof that the deterministic manual-positive state can surface a multi-cycle pre-window `LEND` plan when the known-good bucket is pinned
-- it also includes an experimental positive proof that a representative multi-actor ongoing-pool fixture now surfaces a generic exact pre-window `LEND` plan in the live snapshot path
-- it also includes an experimental positive manual probe showing that one representative complex ongoing multi-actor fixture does have a two-update pre-window `LEND` improvement near the DWATP threshold
-- it also includes an experimental targeted exact proof that the same representative complex ongoing fixture can surface, select, and execute a multi-cycle pre-window `LEND` plan when the manual-positive bucket and amount are pinned
-- it also includes an experimental generic exact proof that a manually positive complex ongoing fixture can surface and execute a multi-cycle pre-window `LEND` plan without pinning the bucket or amount
-- it also includes experimental DWATP-threshold probes that show a positive manual pre-window `LEND` effect over a two-update horizon in the deterministic not-due fixture
-- it also includes an experimental targeted exact proof that the deterministic manual-positive state can be surfaced, selected, and executed as a multi-cycle pre-window `LEND` plan when the known-good bucket and amount are pinned
-- it also includes an experimental targeted exact proof that the same deterministic state can surface a multi-cycle pre-window `LEND` plan when only the known-good bucket is pinned and the exact engine selects the amount
-- it also includes an experimental generic exact proof that the deterministic threshold-aware bucket sweep can surface and live-execute a multi-cycle pre-window `LEND` plan without pinning the bucket or amount
-- it proves repeated update-only cycles across roughly a week by stepping a pool from `1000 bps` down to a `200 bps` target band over 15 successive real updates, then verifying the keeper stops cleanly once the band is reached
-- it can optionally skip live pool discovery and replay against `BASE_ACTIVE_POOL_ADDRESS` when that env var is set
+- it advances time across real Ajna update windows and verifies planning/execution against live contract behavior
+
+Profile reading:
+
+- `base:smoke`: smallest health checks
+- `base`: routine supported surface
+  representative due-window `LEND`, representative multi-cycle `BORROW`, representative exact `LEND_AND_BORROW`, safe recheck aborts, and repeated downward convergence
+- `base:slow`: routine but heavier exact-path proofs
+  deterministic exact pre-window lend proof and the current managed remove-only curator proof
+- `base:experimental`: broader research sweeps
+  pre-window borrower/lend explorations, used-pool upward probes, and pinned-state research
+
+Practical reading:
+
+- `base` and `base:slow` are the routine confidence gates
+- `base:experimental` is research evidence, not the supported product surface
+- the detailed upward-control research boundary is documented in [docs/used-pool-upward-control-summary.md](./docs/used-pool-upward-control-summary.md)
 
 Run it with:
 
@@ -446,7 +467,7 @@ Run it with:
 npm run test:integration:base
 ```
 
-## Current Limitations
+## Remaining Gaps
 
 - generic used-pool upward control is still not a supported product mode
 - exact same-cycle borrower steering is still unresolved
@@ -454,15 +475,6 @@ npm run test:integration:base
 - managed used-pool upward control is still narrower than downward or new-pool upward control
 - `manualCandidates` remain a fallback for unsupported or operator-specified plans
 
+This section is intentionally narrower than `Status`: `Status` describes the supported and experimental surface, while `Remaining Gaps` only lists the unresolved product boundaries.
+
 The detailed evidence and negative results live in [docs/used-pool-upward-control-summary.md](./docs/used-pool-upward-control-summary.md).
-- Exact simulation-backed paths depend on runtime account context. If live exact synthesis cannot run because there is no resolvable simulation sender/private key, the planner now says so more explicitly instead of quietly looking like a pure heuristic miss.
-- Brand-new pool upward-convergence and abandoned-pool recovery should not be treated as the same keeper mode; they share engine pieces, but the proven execution paths are different.
-- Exact simulation-backed `LEND_AND_BORROW` synthesis is now wired into the live snapshot path when both exact lend and borrow synthesis are enabled, and it benchmarks candidate dual paths against the best exact single-action paths before emitting them.
-- Adding multi-bucket quote search made that stricter benchmark productive again in the representative Base fixture: the keeper now surfaces and naturally selects a real exact `LEND_AND_BORROW` candidate there.
-- The representative live-execution equivalence check for the exact dual plan is now covered on the fork: the executed due-window plan lands on the same first-update rate the simulation predicted.
-- Exact same-cycle borrow synthesis now uses Ajna `bucketInfo` reads to prioritize funded live bucket indexes, reads `borrowerInfo` and `loansInfo` to ground borrower-side search, broadens a single configured `drawDebtLimitIndex` into a wider protocol sample set, expands a single configured `drawDebtCollateralAmount` toward the live account’s available collateral during simulation, and includes `0` additional collateral for existing borrowers. It also no longer short-circuits just because the current rate is in band; same-cycle borrower, lender, and dual synthesis now correctly consider whether the next eligible update is about to step out of band. For one-update exact borrow validation, the engine now uses same-cycle heuristic borrow as a seed, not a hard gate, and runs a bounded broader exact search across more collateral and limit-index paths before giving up. Even with that broader and more pool-aware borrower search, it still remains conservative in the representative brand-new quote-only fixture, and the broader existing-borrower negative proof remains exploratory in `experimental` after filtering to real borrower/loan states and borrower-heavy loan shapes.
-- Heuristic `LEND_AND_BORROW` synthesis only covers the “temper an oversized borrow with a small quote deposit” case today; it is not yet a general liquidity-seeding or multi-dimensional search strategy.
-- Heuristic lend synthesis is opt-in and currently validated for live planning/dry-run discovery, not for blind live execution in borrowed pools.
-- Repeated natural update-only convergence is covered by integration tests, including week-scale multi-cycle operation.
-- Token approvals are checked, not managed.
-- The current fork integration tests prove factory creation, real interest updates, next-cycle forecasting, a live-executed representative due-window `LEND_AND_BORROW` cycle, a live-executed representative multi-cycle `BORROW` cycle, safe recheck aborts under competing actor interference, a representative due-window `LEND` planning cycle, and the exact-vs-heuristic split for lend planning, but not yet a fully validated live-executed computed same-cycle borrower-side steering cycle.
