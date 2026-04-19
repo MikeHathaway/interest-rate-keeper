@@ -1,18 +1,17 @@
 import {
   currentAndProjectedRatesAreInBand,
-  distanceToTargetBand,
   withExecutionBuffer
 } from "./planner.js";
 import {
-  managedDistanceImprovementBps,
-  maximumManagedReleasedQuoteAmount,
-  normalizedManagedSensitivityBpsPer10PctRelease,
-  releasedQuoteInventoryAmount,
-  stepsUseManagedDual,
-  stepsUseManagedRemoveQuote
+  releasedQuoteInventoryAmount
 } from "./managed-controls.js";
 import {
-  readManagedControlSnapshotMetadata,
+  evaluateManagedPlan,
+  type ManagedCheckFailure,
+  type ManagedCheckName,
+  type ManagedPlanEvaluationInputs
+} from "./managed-plan-evaluation.js";
+import {
   semanticSnapshotMetadataSignature
 } from "./snapshot-metadata.js";
 import {
@@ -22,7 +21,6 @@ import {
   type KeeperConfig,
   type PoolSnapshot
 } from "./types.js";
-import { BPS_DENOMINATOR } from "./units.js";
 
 function stepAmount(step: ExecutionStep): bigint {
   switch (step.type) {
@@ -150,16 +148,95 @@ function coarseSnapshotSignature(snapshot: PoolSnapshot): string {
   ].join(":");
 }
 
-function managedPlanImprovementBps(plan: CyclePlan, snapshot: PoolSnapshot): number {
-  return managedDistanceImprovementBps(
-    {
-      snapshotPlanningRateBps: snapshot.planningRateBps,
-      snapshotPredictedNextRateBps: snapshot.predictedNextRateBps,
-      afterPlanningRateBps: plan.planningRateBps,
-      afterPredictedRateBpsAfterNextUpdate: plan.predictedRateBpsAfterNextUpdate
-    },
-    (rateBps) => distanceToTargetBand(rateBps, plan.targetBand)
-  );
+function buildPlanEvaluationInputs(
+  plan: CyclePlan,
+  snapshot: PoolSnapshot,
+  config: KeeperConfig
+): ManagedPlanEvaluationInputs {
+  return {
+    steps: plan.requiredSteps,
+    snapshotPlanningRateBps: snapshot.planningRateBps,
+    snapshotPredictedNextRateBps: snapshot.predictedNextRateBps,
+    afterPlanningRateBps: plan.planningRateBps,
+    afterPredictedRateBpsAfterNextUpdate: plan.predictedRateBpsAfterNextUpdate,
+    targetBand: plan.targetBand,
+    snapshot,
+    releasedQuoteAmount: releasedQuoteInventoryAmount(plan.requiredSteps),
+    config
+  };
+}
+
+// Maps the centralized ManagedCheckFailure shape into this module's GuardFailure
+// codes and the exact reason strings asserted by policy.test.ts. Any new failure
+// kind added to managed-plan-evaluation must be mapped here.
+function toGuardFailure(failure: ManagedCheckFailure): GuardFailure {
+  switch (failure.check) {
+    case "eligibility": {
+      const prefix =
+        failure.kind === "dual_ineligible"
+          ? "managed dual upward control is no longer eligible"
+          : "managed inventory upward control is no longer eligible";
+      return {
+        code: "MANAGED_CONTROL_UNAVAILABLE",
+        reason:
+          failure.ineligibilityReason === undefined
+            ? `${prefix} in the fresh snapshot`
+            : `${prefix} because ${failure.ineligibilityReason}`
+      };
+    }
+    case "availability":
+      return {
+        code: "MANAGED_CONTROL_UNAVAILABLE",
+        reason:
+          "managed upward control is configured, but the fresh snapshot no longer exposes withdrawable managed inventory totals"
+      };
+    case "release_cap":
+      // missing_withdrawable_totals is caught by the "availability" check that
+      // policy always runs first, so in practice only exceeds_release_cap
+      // reaches here in the policy flow.
+      if (failure.kind === "missing_withdrawable_totals") {
+        return {
+          code: "MANAGED_CONTROL_UNAVAILABLE",
+          reason:
+            "managed upward control is configured, but the fresh snapshot no longer exposes withdrawable managed inventory totals"
+        };
+      }
+      return {
+        code: "MANAGED_RELEASE_CAP_EXCEEDED",
+        reason: `plan exceeds the configured managed inventory release cap of ${failure.maxManagedInventoryReleaseBps} bps`
+      };
+    case "improvement_floor":
+      if (failure.kind === "no_improvement") {
+        return {
+          code: "MANAGED_CONTROLLABILITY_TOO_LOW",
+          reason:
+            "managed inventory plan no longer improves the passive path in the fresh snapshot"
+        };
+      }
+      return {
+        code: "MANAGED_CONTROLLABILITY_TOO_LOW",
+        reason: `managed inventory plan improvement of ${failure.improvementBps} bps is below the configured floor of ${failure.minimumImprovementBps} bps`
+      };
+    case "sensitivity_threshold":
+      if (failure.kind === "missing_withdrawable_totals") {
+        return {
+          code: "MANAGED_CONTROL_UNAVAILABLE",
+          reason:
+            "managed upward control is configured, but the fresh snapshot no longer exposes withdrawable managed inventory totals"
+        };
+      }
+      if (failure.kind === "zero_release_fraction") {
+        return {
+          code: "MANAGED_CONTROLLABILITY_TOO_LOW",
+          reason:
+            "managed controllability gate is configured, but the fresh snapshot produced a zero effective release fraction"
+        };
+      }
+      return {
+        code: "MANAGED_CONTROLLABILITY_TOO_LOW",
+        reason: `plan failed the configured controllability gate of ${failure.minimumManagedSensitivityBpsPer10PctRelease} bps per 10% inventory release`
+      };
+  }
 }
 
 function sameSemanticPoolState(previousSnapshot: PoolSnapshot, freshSnapshot: PoolSnapshot): boolean {
@@ -208,80 +285,42 @@ function snapshotGuards(
   return undefined;
 }
 
-/**
- * Eligibility + release-cap subset of managedInventoryGuards. Safe to apply
- * to a partial prefix of a dual plan (e.g. just the REMOVE_QUOTE half) because
- * these are standalone safety invariants: the managed mode must be eligible
- * and the released amount must fit the configured cap regardless of what
- * DRAW_DEBT contributes afterward. Deliberately omits the improvement and
- * sensitivity gates because those thresholds are calibrated for the full dual
- * plan; applying them to the prefix would reject legitimate dual plans where
- * DRAW_DEBT provides most of the improvement.
- */
+// Eligibility + availability + release-cap subset of managedInventoryGuards.
+// Safe to apply to a partial prefix of a dual plan (e.g. just the REMOVE_QUOTE
+// half) because these are standalone safety invariants: the managed mode must
+// be eligible, the snapshot must expose withdrawable totals, and the released
+// amount must fit the configured cap regardless of what DRAW_DEBT contributes
+// afterward. Deliberately omits the improvement and sensitivity gates because
+// those thresholds are calibrated for the full dual plan; applying them to the
+// prefix would reject legitimate dual plans where DRAW_DEBT provides most of
+// the improvement.
+const PREFIX_SAFETY_CHECKS: readonly ManagedCheckName[] = [
+  "eligibility",
+  "availability",
+  "release_cap"
+];
+
+// Full set of managed checks: the prefix-safety subset plus the improvement
+// floor and the per-10%-release sensitivity gate. H1 / review 3: the
+// improvement floor must revalidate regardless of whether the sensitivity gate
+// is configured, because pool state can shift between planning and submission
+// and degrade a plan below config.minimumManagedImprovementBps.
+const FULL_MANAGED_CHECKS: readonly ManagedCheckName[] = [
+  ...PREFIX_SAFETY_CHECKS,
+  "improvement_floor",
+  "sensitivity_threshold"
+];
+
 export function managedPrefixSafetyGuards(
   plan: CyclePlan,
   snapshot: PoolSnapshot,
   config: KeeperConfig
 ): GuardFailure | undefined {
-  if (!stepsUseManagedRemoveQuote(plan.requiredSteps)) {
-    return undefined;
-  }
-
-  const managedMetadata = readManagedControlSnapshotMetadata(snapshot);
-  if (managedMetadata.managedInventoryUpwardEligible !== true) {
-    const ineligibilityReason = managedMetadata.managedInventoryIneligibilityReason;
-    return {
-      code: "MANAGED_CONTROL_UNAVAILABLE",
-      reason:
-        ineligibilityReason === undefined
-          ? "managed inventory upward control is no longer eligible in the fresh snapshot"
-          : `managed inventory upward control is no longer eligible because ${ineligibilityReason}`
-    };
-  }
-
-  if (
-    stepsUseManagedDual(plan.requiredSteps) &&
-    managedMetadata.managedDualUpwardEligible !== true
-  ) {
-    const ineligibilityReason = managedMetadata.managedDualIneligibilityReason;
-    return {
-      code: "MANAGED_CONTROL_UNAVAILABLE",
-      reason:
-        ineligibilityReason === undefined
-          ? "managed dual upward control is no longer eligible in the fresh snapshot"
-          : `managed dual upward control is no longer eligible because ${ineligibilityReason}`
-    };
-  }
-
-  const maxManagedInventoryReleaseBps = config.maxManagedInventoryReleaseBps;
-  const totalWithdrawableQuoteAmount = managedMetadata.managedTotalWithdrawableQuoteAmount;
-  if (totalWithdrawableQuoteAmount === undefined || totalWithdrawableQuoteAmount <= 0n) {
-    return {
-      code: "MANAGED_CONTROL_UNAVAILABLE",
-      reason:
-        "managed upward control is configured, but the fresh snapshot no longer exposes withdrawable managed inventory totals"
-    };
-  }
-
-  const released = releasedQuoteInventoryAmount(plan.requiredSteps);
-
-  if (
-    maxManagedInventoryReleaseBps !== undefined &&
-    maxManagedInventoryReleaseBps < BPS_DENOMINATOR
-  ) {
-    const maximumReleased = maximumManagedReleasedQuoteAmount(
-      totalWithdrawableQuoteAmount,
-      maxManagedInventoryReleaseBps
-    );
-    if (released > maximumReleased) {
-      return {
-        code: "MANAGED_RELEASE_CAP_EXCEEDED",
-        reason: `plan exceeds the configured managed inventory release cap of ${maxManagedInventoryReleaseBps} bps`
-      };
-    }
-  }
-
-  return undefined;
+  const failure = evaluateManagedPlan(
+    buildPlanEvaluationInputs(plan, snapshot, config),
+    PREFIX_SAFETY_CHECKS
+  );
+  return failure ? toGuardFailure(failure) : undefined;
 }
 
 function managedInventoryGuards(
@@ -289,77 +328,11 @@ function managedInventoryGuards(
   snapshot: PoolSnapshot,
   config: KeeperConfig
 ): GuardFailure | undefined {
-  const prefixFailure = managedPrefixSafetyGuards(plan, snapshot, config);
-  if (prefixFailure) {
-    return prefixFailure;
-  }
-  if (!stepsUseManagedRemoveQuote(plan.requiredSteps)) {
-    return undefined;
-  }
-
-  const managedMetadata = readManagedControlSnapshotMetadata(snapshot);
-  const totalWithdrawableQuoteAmount = managedMetadata.managedTotalWithdrawableQuoteAmount;
-  // managedPrefixSafetyGuards already verified totalWithdrawableQuoteAmount is defined + positive.
-  if (totalWithdrawableQuoteAmount === undefined || totalWithdrawableQuoteAmount <= 0n) {
-    return undefined;
-  }
-  const released = releasedQuoteInventoryAmount(plan.requiredSteps);
-
-  // Always revalidate the improvement floor, regardless of whether the
-  // sensitivity gate is configured. The planner filters candidates against
-  // minimumManagedImprovementBps at plan time, but pool state can shift
-  // between planning and submission and degrade a plan's actual improvement
-  // below that floor. Without this check, a plan that improved 50 bps at
-  // planning can shrink to 1 bp at recheck and still pass.
-  const improvementBps = managedPlanImprovementBps(plan, snapshot);
-  if (improvementBps <= 0) {
-    return {
-      code: "MANAGED_CONTROLLABILITY_TOO_LOW",
-      reason:
-        "managed inventory plan no longer improves the passive path in the fresh snapshot"
-    };
-  }
-  const minimumManagedImprovementBps = config.minimumManagedImprovementBps ?? 0;
-  if (
-    minimumManagedImprovementBps > 0 &&
-    improvementBps < minimumManagedImprovementBps
-  ) {
-    return {
-      code: "MANAGED_CONTROLLABILITY_TOO_LOW",
-      reason: `managed inventory plan improvement of ${improvementBps} bps is below the configured floor of ${minimumManagedImprovementBps} bps`
-    };
-  }
-
-  const minimumManagedSensitivityBpsPer10PctRelease =
-    config.minimumManagedSensitivityBpsPer10PctRelease ?? 0;
-  if (minimumManagedSensitivityBpsPer10PctRelease <= 0) {
-    return undefined;
-  }
-
-  const normalizedSensitivityBpsPer10PctRelease =
-    normalizedManagedSensitivityBpsPer10PctRelease(
-      improvementBps,
-      released,
-      totalWithdrawableQuoteAmount
-    );
-  if (normalizedSensitivityBpsPer10PctRelease === undefined) {
-    return {
-      code: "MANAGED_CONTROLLABILITY_TOO_LOW",
-      reason:
-        "managed controllability gate is configured, but the fresh snapshot produced a zero effective release fraction"
-    };
-  }
-  if (
-    normalizedSensitivityBpsPer10PctRelease <
-    BigInt(minimumManagedSensitivityBpsPer10PctRelease)
-  ) {
-    return {
-      code: "MANAGED_CONTROLLABILITY_TOO_LOW",
-      reason: `plan failed the configured controllability gate of ${minimumManagedSensitivityBpsPer10PctRelease} bps per 10% inventory release`
-    };
-  }
-
-  return undefined;
+  const failure = evaluateManagedPlan(
+    buildPlanEvaluationInputs(plan, snapshot, config),
+    FULL_MANAGED_CHECKS
+  );
+  return failure ? toGuardFailure(failure) : undefined;
 }
 
 export function validatePlan(
