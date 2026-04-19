@@ -812,4 +812,83 @@ describe("policy", () => {
     const failure = preSubmitRecheck(addQuotePlan, snapshot, freshSnapshot, config);
     expect(failure).toBeUndefined();
   });
+
+  it("rejects manual ADD_COLLATERAL plans whose expiry has already elapsed", () => {
+    const addCollateralPlan: CyclePlan = {
+      ...plan,
+      requiredSteps: [
+        {
+          type: "ADD_COLLATERAL",
+          amount: 10n,
+          bucketIndex: 1,
+          expiry: 1_000
+        }
+      ]
+    };
+
+    const failure = validatePlan(addCollateralPlan, snapshot, config);
+    expect(failure?.code).toBe("EXPIRED_STEP");
+    expect(failure?.reason).toMatch(/ADD_COLLATERAL step expiry 1000 is at or before/);
+  });
+
+  it("rejects ADD_COLLATERAL plans whose expiry has already elapsed at submission time", () => {
+    const { selectedCandidateId: _selectedCandidateId, ...planWithoutCandidate } = plan;
+    const addCollateralPlan: CyclePlan = {
+      ...planWithoutCandidate,
+      requiredSteps: [
+        {
+          type: "ADD_COLLATERAL",
+          amount: 10n,
+          bucketIndex: 1,
+          expiry: 1_000
+        }
+      ]
+    };
+
+    const freshSnapshot: PoolSnapshot = {
+      ...snapshot,
+      blockTimestamp: 1_000,
+      candidates: []
+    };
+
+    const failure = preSubmitRecheck(
+      addCollateralPlan,
+      { ...snapshot, candidates: [] },
+      freshSnapshot,
+      config
+    );
+    expect(failure?.code).toBe("EXPIRED_STEP");
+    expect(failure?.reason).toMatch(/ADD_COLLATERAL step expiry 1000 is at or before/);
+  });
+
+  it("accepts ADD_COLLATERAL plans whose expiry is still in the future", () => {
+    const { selectedCandidateId: _selectedCandidateId, ...planWithoutCandidate } = plan;
+    const addCollateralPlan: CyclePlan = {
+      ...planWithoutCandidate,
+      requiredSteps: [
+        {
+          type: "ADD_COLLATERAL",
+          amount: 10n,
+          bucketIndex: 1,
+          expiry: 5_000
+        }
+      ]
+    };
+
+    const freshSnapshot: PoolSnapshot = {
+      ...snapshot,
+      blockTimestamp: 1_000,
+      snapshotFingerprint: "different",
+      snapshotAgeSeconds: 5,
+      candidates: []
+    };
+
+    const failure = preSubmitRecheck(
+      addCollateralPlan,
+      { ...snapshot, candidates: [] },
+      freshSnapshot,
+      config
+    );
+    expect(failure).toBeUndefined();
+  });
 });

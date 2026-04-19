@@ -74,6 +74,34 @@ function findCandidate(snapshot: PoolSnapshot, candidateId: string) {
   return snapshot.candidates.find((candidate) => candidate.id === candidateId);
 }
 
+function stepExpiry(step: ExecutionStep): number | undefined {
+  switch (step.type) {
+    case "ADD_QUOTE":
+      return step.expiry;
+    case "ADD_COLLATERAL":
+      return step.expiry;
+    default:
+      return undefined;
+  }
+}
+
+function expiredStepFailure(
+  plan: CyclePlan,
+  snapshot: PoolSnapshot
+): GuardFailure | undefined {
+  for (const step of plan.requiredSteps) {
+    const expiry = stepExpiry(step);
+    if (expiry !== undefined && expiry <= snapshot.blockTimestamp) {
+      return {
+        code: "EXPIRED_STEP",
+        reason: `${step.type} step expiry ${expiry} is at or before the fresh block timestamp ${snapshot.blockTimestamp}`
+      };
+    }
+  }
+
+  return undefined;
+}
+
 // expiry fields are deliberately omitted: auto-synthesized candidates regenerate
 // expiry from `now` at every read, so including it in the comparison would
 // reject legitimate plans whenever recheck fires a few seconds after planning.
@@ -350,6 +378,11 @@ export function validatePlan(
     return managedFailure;
   }
 
+  const expiredFailure = expiredStepFailure(plan, snapshot);
+  if (expiredFailure) {
+    return expiredFailure;
+  }
+
   let totalQuoteExposure = 0n;
   let totalBorrowExposure = 0n;
 
@@ -451,19 +484,9 @@ export function preSubmitRecheck(
     }
   }
 
-  // Defense in depth for the C1 fix: normalizeStepForComparison deliberately
-  // omits `expiry` so legitimate plans do not get invalidated whenever a
-  // recheck lands a few seconds after planning. That leaves a gap where a
-  // plan with a stale expiry could pass recheck and then revert at submission
-  // (wasted gas). Catch it here. snapshotAgeMaxSeconds bounds most cases but
-  // not configs where addQuoteExpirySeconds < snapshotAgeMaxSeconds.
-  for (const step of plan.requiredSteps) {
-    if (step.type === "ADD_QUOTE" && step.expiry <= freshSnapshot.blockTimestamp) {
-      return {
-        code: "EXPIRED_STEP",
-        reason: `ADD_QUOTE step expiry ${step.expiry} is at or before the fresh block timestamp ${freshSnapshot.blockTimestamp}`
-      };
-    }
+  const expiredFailure = expiredStepFailure(plan, freshSnapshot);
+  if (expiredFailure) {
+    return expiredFailure;
   }
 
   if (
