@@ -51,21 +51,21 @@ Supported surface today:
 - representative due-window `LEND` planning is proven
 - representative exact due-window `LEND_AND_BORROW` execution is proven
 - representative exact multi-cycle `BORROW` execution is proven for upward steering
-- the keeper aborts safely when pool state changes between planning and execution
+- managed used-pool upward control through curator-style inventory-backed `REMOVE_QUOTE` is end-to-end verified on the dog/USDC archetype: the candidate surfaces, the planned call executes on the forked pool, and the realized on-chain rate after the next Ajna rate update matches the simulation prediction exactly (see the [Operator Runbook](./docs/curator-mode.md#operator-runbook) for how to enable it safely)
+- the keeper aborts safely when pool state changes between planning and execution, including per-bucket withdrawable depletion and lender-bucket-state drift
 - dry-run, capital metrics, validation signatures, and submit-time recheck are all wired into the live path
 
 Experimental or narrow surface:
 
 - generic pre-window `LEND` is not a broad supported live feature yet, even though there are real positive proofs in deterministic and representative fixtures
 - pre-window `BORROW` exists in narrow exact proofs, but it is not a broad used-pool upward solution
-- managed used-pool upward control through curator-style inventory-backed `REMOVE_QUOTE` is the only credible used-pool upward path today
 - heuristic candidates still exist for exploration and dry runs, but they are recommendation-only unless `allowHeuristicExecution` is explicitly enabled
 
 Not broadly supported:
 
-- generic used-pool upward control
+- generic used-pool upward control without an operator's standing lender inventory
 - exact same-cycle borrower-side steering
-- managed dual `REMOVE_QUOTE + DRAW_DEBT` as a routine surfaced live path
+- managed dual `REMOVE_QUOTE + DRAW_DEBT` as a routine surfaced live path (exact synthesis has not surfaced a dual candidate on any pinned archetype even with bucket + limit seeding)
 
 Important runtime behavior:
 
@@ -130,14 +130,14 @@ This is the case where quote and borrow actions together beat either side alone.
 | --- | --- | --- |
 | Brand-new pools | proven for update-only convergence and representative due-window `LEND` planning | supported only through representative multi-cycle `BORROW`; exact same-cycle `BORROW` remains experimental / unsupported |
 | Abandoned high-rate pools | modeled and partly covered through `RESET_TO_TEN` forecasting plus shared downward engine behavior, but not separately proven end-to-end as its own live strategy | not separately proven; only the shared representative multi-cycle borrower path exists, not an abandoned-pool-specific upward proof |
-| Existing used pools | proven in representative cases; due-window `LEND` is proven and deterministic exact pre-window surfaced-plan coverage exists, while broader pre-window execution remains experimental | supported in representative multi-cycle `BORROW` cases and representative due-window exact `LEND_AND_BORROW` cases; exact same-cycle `BORROW` remains experimental / unsupported |
+| Existing used pools | proven in representative cases; due-window `LEND` is proven and deterministic exact pre-window surfaced-plan coverage exists, while broader pre-window execution remains experimental | supported in representative multi-cycle `BORROW` cases and representative due-window exact `LEND_AND_BORROW` cases, and supported through curator-mode inventory-backed `REMOVE_QUOTE` for operators with standing lender LP in a pinned archetype (end-to-end verified on dog/USDC); exact same-cycle `BORROW` and exact dual `REMOVE_QUOTE + DRAW_DEBT` remain experimental / unsupported |
 
 Practical reading:
 - downward convergence is the strongest part of the system today
-- upward convergence is supported primarily through multi-cycle `BORROW`, not same-cycle borrower steering
-- exact block-pinned real used-pool upward archetypes now exist in the experimental suite, and they still do not surface a generic exact upward simulation candidate
+- upward convergence for brand-new pools is supported primarily through multi-cycle `BORROW`, not same-cycle borrower steering
+- exact block-pinned real used-pool upward archetypes now exist in the experimental suite, and they still do not surface a generic exact upward simulation candidate (generic discovery remains unsupported)
 - even when those pinned real used-pool states are paired with recent real lender addresses from quote-token transfers into the pool, the generic exact paired `LEND_AND_BORROW` search still does not surface an upward candidate
-- the only currently credible used-pool upward path is managed inventory-backed control; see [docs/curator-mode.md](./docs/curator-mode.md)
+- for used pools, the supported upward path is curator-mode managed `REMOVE_QUOTE` when the operator has standing lender LP in the target bucket; see [docs/curator-mode.md](./docs/curator-mode.md) including the Operator Runbook section
 - abandoned-pool reset/recovery is modeled correctly, but not yet proven as a distinct end-to-end product mode
 
 ## Terms
@@ -418,7 +418,7 @@ The live executor currently:
 - estimates gas cost before each live step and aborts when the estimate exceeds `maxGasCostWei`, if that cap is configured
 - does not auto-submit approval transactions for you
 - treats exact simulation-backed candidates as live-executable only when the simulation sender and the live signer are the same account
-- revalidates managed inventory-backed plans against fresh managed-eligibility metadata and `maxManagedInventoryReleaseBps` before submit
+- revalidates managed inventory-backed plans against the fresh snapshot before submit, including eligibility, aggregate and per-bucket withdrawable inventory, release cap, improvement floor, per-10%-release sensitivity gate, and lender-bucket-state validation signature
 
 Supported low-level execution steps:
 - `ADD_QUOTE`

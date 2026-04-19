@@ -170,10 +170,12 @@ Treat the keeper as:
 
 Used-pool upward control should currently be described as:
 
-- research / experimental
-- only plausibly viable for operators with meaningful existing inventory in the pool
+- targeted managed `REMOVE_QUOTE` is **supported** for operators with meaningful existing inventory in a pinned archetype, with full end-to-end fork verification (`tests/integration/base/curator.ts`)
+- managed `REMOVE_QUOTE + DRAW_DEBT` (dual) remains **research**
+- generic cold-start / borrower-only used-pool upward control is **not supported**
 
-That operating model is documented in [Curator Mode](./curator-mode.md).
+That operating model, including a configuration and dry-run runbook for curator
+operators, is documented in [Curator Mode](./curator-mode.md).
 
 ## Recommended Next Engineering Step
 
@@ -186,11 +188,14 @@ The first inventory-backed steps are now in place:
 3. exact simulation-backed `REMOVE_QUOTE + DRAW_DEBT` synthesis for tightly gated same-account managed-pool states
 4. pool-aware dual borrow limit-index discovery now seeds from runtime bucket context instead of requiring all dual borrow indexes to be preconfigured
 
-That changed the research boundary but not the supported product boundary, so the next serious step is:
+That changed the research boundary but not the supported product boundary. The immediate follow-ups are now done:
 
-5. Promote the dog/USDC targeted seeded exact `REMOVE_QUOTE` path from experimental research to a more explicit managed-pool supported mode if it stays stable across reruns.
+5. ~~Promote the dog/USDC targeted seeded exact `REMOVE_QUOTE` path from experimental research to a more explicit managed-pool supported mode if it stays stable across reruns.~~ **Done.** End-to-end fork verification now asserts the on-chain REMOVE_QUOTE submit succeeds and the realized rate after the next Ajna rate update matches the simulation prediction exactly. Snapshot metadata also exposes per-bucket withdrawable inventory, and auto-synthesized candidates carry a bucket-state validation signature so recheck catches LP drift cleanly. See [Curator Mode](./curator-mode.md) including the Operator Runbook section.
+7. ~~Add a controllability gate so the keeper refuses low-sensitivity used-pool upward interventions.~~ **Done.** `minimumManagedSensitivityBpsPer10PctRelease` is enforced at both plan time and submit time via `managedInventoryGuards`.
+
+Remaining:
+
 6. If dual-side work continues, focus on turning one of the existing hand-picked manual dual positives into an exact surfaced candidate under the stricter "beat remove-only" rule.
-7. Add a controllability gate so the keeper refuses low-sensitivity used-pool upward interventions.
 
 ## Recommended Product Policy
 

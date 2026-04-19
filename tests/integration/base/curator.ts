@@ -239,26 +239,6 @@ export function registerBaseFactoryCuratorTests(
   );
 
   itBaseExperimental(
-    "surfaces a targeted exact remove-quote candidate from the hand-picked concentrated ajna.info.finance dog/usdc managed used-pool archetype when the lender bucket is seeded",
-    async () => {
-      const result = await findTargetedAjnaInfoManagedUsedPoolInventoryCandidate(
-        "ajna-info-managed-dog-usdc-2026-03-18",
-        {
-          targetIntent: "LEND"
-        }
-      );
-
-      expect(result.candidate, result.observations.join(" | ")).toBeDefined();
-      expect(result.candidate?.intent, result.observations.join(" | ")).toBe("LEND");
-      expect(
-        result.candidate?.minimumExecutionSteps.some((step) => step.type === "REMOVE_QUOTE"),
-        result.observations.join(" | ")
-      ).toBe(true);
-    },
-    420_000
-  );
-
-  itBaseExperimental(
     "does not yet surface a targeted exact remove-quote-plus-draw-debt candidate from a hand-picked concentrated ajna.info.finance managed used-pool archetype even when the lender bucket and limit indexes are seeded",
     async () => {
       const result = await findTargetedAjnaInfoManagedUsedPoolInventoryCandidate(

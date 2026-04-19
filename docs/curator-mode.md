@@ -12,6 +12,22 @@ This is a different product mode from the default keeper boundary.
 
 Without standing inventory, the current evidence still does not support broad used-pool upward control.
 
+## Status
+
+Targeted managed `REMOVE_QUOTE` is now a **supported** curator-mode path. A pinned
+real used-pool archetype (dog/USDC at Base block `43,506,804`) has been verified
+end-to-end: the simulation-backed synthesis produces a REMOVE_QUOTE candidate,
+the planned call executes against the forked pool, and the realized on-chain
+rate after a warp-and-update matches the simulator's prediction exactly
+(`+28 bps` on the first update, `+58 bps` terminal across two updates, for a
+release of ~67% of the target bucket's deposit).
+
+Managed `REMOVE_QUOTE + DRAW_DEBT` (dual mode) remains **research**: manual
+probes still find some improvements on hand-picked states, but the exact
+simulation-backed synthesis has not surfaced a dual candidate on any pinned
+archetype, even with the lender bucket and borrow limit indexes explicitly
+seeded.
+
 ## Current Keeper State
 
 Today, the keeper is strongest at:
@@ -24,11 +40,11 @@ The main unresolved gap is still generic upward control on used pools.
 
 The important used-pool result is narrower:
 
-- targeted exact managed `REMOVE_QUOTE` now surfaces on at least one pinned actual-chain managed state
+- targeted exact managed `REMOVE_QUOTE` now surfaces on at least one pinned actual-chain managed state, AND the planned action has been verified to execute on-chain against the fork with the realized rate matching the simulator prediction exactly
 - bounded manual managed `REMOVE_QUOTE + DRAW_DEBT` can still improve some hand-picked managed states, but the earlier PRIME/USDC positive no longer holds on the current rerun
 - generic managed upward search still does not surface broadly on its own
 
-So curator mode is plausible, but it is not yet the default supported used-pool behavior.
+So curator-only `REMOVE_QUOTE` is a supported product path for operators with existing inventory in a pinned archetype; dual mode is still research; generic discovery remains out of scope.
 
 ## What Curator Mode Means
 
@@ -216,7 +232,156 @@ So the honest message is:
 
 ## Next Steps
 
-1. Promote targeted managed `REMOVE_QUOTE` from research into an explicit experimental supported mode.
-2. Add a controllability gate so low-sensitivity used-pool upward actions are refused automatically.
+1. ~~Promote targeted managed `REMOVE_QUOTE` from research into an explicit experimental supported mode.~~ **Done.** The dog/USDC archetype has end-to-end verification (synthesis → planning → on-chain submit → realized rate matching prediction). See the Operator Runbook below.
+2. ~~Add a controllability gate so low-sensitivity used-pool upward actions are refused automatically.~~ **Done.** `minimumManagedSensitivityBpsPer10PctRelease` is wired into `managedInventoryGuards` and enforced at both plan time and submit time.
 3. Keep managed `REMOVE_QUOTE + DRAW_DEBT` in research until it exact-surfaces on pinned actual-chain managed states, not just manual probes.
 4. Keep generic used-pool upward control outside the default supported boundary until inventory-backed managed proofs are broader.
+5. Per-bucket recheck: the snapshot now exposes `managedPerBucketWithdrawableQuoteAmount` (a map-encoded string of `idx:amount` pairs). `preSubmitRecheck` validates the specific bucket(s) the plan targets still have enough withdrawable inventory, catching the case where aggregate withdrawable stays positive but the target bucket was drained.
+6. Candidate validation signatures: auto-synthesized REMOVE_QUOTE candidates carry a lender-bucket-state fingerprint as `validationSignature`. At recheck, any drift in LP balance, bucket deposit, or LP accumulator for the target bucket produces a clean `CANDIDATE_INVALIDATED` failure rather than relying on implicit amount-in-ID drift.
+
+## Operator Runbook
+
+This section is for an operator with real lender LP in an Ajna pool who wants to
+enable curator-mode upward steering. It assumes you have already set up the
+keeper CLI and the `AJNA_KEEPER_PRIVATE_KEY` environment variable.
+
+### When this applies
+
+You qualify for curator-mode REMOVE_QUOTE steering if:
+
+- Your account has a nonzero `lenderInfo(bucketIndex, your_address)` LP balance
+  in one or more buckets of the pool.
+- The pool is EMA-initialized (has `>1` loan and non-zero EMAs). Brand-new pools
+  do not qualify.
+- The current rate is below your target, and the next eligible rate update is
+  at least `minTimeBeforeRateWindowSeconds` away.
+
+### Minimum config
+
+Add these keys to your keeper config (alongside the standard `chainId`,
+`poolAddress`, `rpcUrl`, `targetRateBps`, `toleranceBps`, `toleranceMode`,
+`completionPolicy`, `maxQuoteTokenExposure`, `maxBorrowExposure`,
+`snapshotAgeMaxSeconds`, `minTimeBeforeRateWindowSeconds`, and the minimum
+executable amount knobs):
+
+```json
+{
+  "enableManagedInventoryUpwardControl": true,
+  "simulationSenderAddress": "<your on-chain address>",
+  "borrowerAddress": "<your borrower address, or same as sender>",
+  "removeQuoteBucketIndexes": [<fenwick index of each bucket you hold LP in>],
+  "minimumManagedImprovementBps": 10,
+  "maxManagedInventoryReleaseBps": 2000,
+  "minimumManagedSensitivityBpsPer10PctRelease": 5,
+  "enableSimulationBackedLendSynthesis": true
+}
+```
+
+Leave `enableManagedDualUpwardControl` unset (false) until dual-mode graduates
+from research. Enabling it today will not cause the keeper to run dual plans,
+but it will populate managed dual diagnostics in the snapshot that have no
+production use yet.
+
+### Pre-flight: dry-run before going live
+
+Run the keeper with `--dry-run` (or whatever your entrypoint uses for dry-run)
+and inspect the resulting `CycleResult`:
+
+**1. Confirm managed eligibility in the snapshot metadata.**
+
+```jsonc
+{
+  "managedInventoryUpwardControlEnabled": true,
+  "managedInventoryUpwardEligible": true,
+  "managedTotalWithdrawableQuoteAmount": "<non-zero wad>",
+  "managedPerBucketWithdrawableQuoteAmount": "<idx>:<amount>,<idx>:<amount>"
+}
+```
+
+If `managedInventoryUpwardEligible` is `false`, read
+`managedInventoryIneligibilityReason`. Common reasons:
+
+- *"the current target does not require upward steering"* — your target is
+  already reached; no action needed.
+- *"managed inventory upward control currently only runs before the next
+  eligible rate update"* — the next rate-update window has already opened;
+  wait for the next one.
+- *"managed inventory upward control is only modeled on EMA-initialized used
+  pools"* — the pool is brand-new; curator mode doesn't apply. Use the default
+  keeper lend path instead.
+- *"no withdrawable quote inventory was found in the configured or derived
+  managed buckets"* — your LP is not in the buckets listed in
+  `removeQuoteBucketIndexes`, or the buckets are empty. Double-check your
+  bucket list against `lenderInfo(bucketIndex, your_address)` on the pool.
+- *"exact managed inventory control requires a resolvable simulation
+  sender/private key"* — `AJNA_KEEPER_PRIVATE_KEY` is missing or the address
+  it derives does not match `simulationSenderAddress`.
+
+**2. Confirm the candidate that the planner selected.**
+
+In the `CyclePlan` output, verify:
+
+- `intent: "LEND"` (not `"NO_OP"`)
+- `requiredSteps` contains a `REMOVE_QUOTE` step for your bucket, with an
+  `amount` that's less than `maxManagedInventoryReleaseBps / 10000` of your
+  total withdrawable inventory.
+- `predictedRateBpsAfterNextUpdate` is closer to your target than
+  `snapshot.predictedNextRateBps` by at least `minimumManagedImprovementBps`.
+- The selected candidate's `validationSignature` is non-empty. This binds the
+  plan to the exact bucket state it was synthesized against; any change in
+  your LP balance before submit will cause a clean abort.
+
+**3. Confirm the guard rails are active.**
+
+Temporarily tighten `minimumManagedSensitivityBpsPer10PctRelease` above what
+you see the plan delivering, and confirm the cycle now returns `NO_OP` with
+reason code `MANAGED_CONTROLLABILITY_TOO_LOW`. Restore your real value once
+you've seen the guard fire.
+
+### After a live cycle runs
+
+Verify in the `CycleResult`:
+
+- `status: "EXECUTED"`
+- `transactionHashes` has one hash per executed step
+- `executedSteps` contains the REMOVE_QUOTE you planned
+
+Then, after the next Ajna rate-update window (up to 12 h later), read
+`interestRateInfo()` on the pool. The new rate should match
+`predictedRateBpsAfterNextUpdate` from the plan. For multi-cycle plans
+(`planningLookaheadUpdates === 2`), the rate after the second update should
+match `planningRateBps`.
+
+### Safety properties that catch mistakes
+
+These run automatically at submit time and will abort the cycle cleanly
+(with a specific `GuardFailure` code) rather than submitting a bad transaction:
+
+- **`MANAGED_CONTROL_UNAVAILABLE`** — eligibility flipped, totals disappeared,
+  or the specific target bucket no longer has enough withdrawable inventory.
+- **`MANAGED_RELEASE_CAP_EXCEEDED`** — plan would release more than
+  `maxManagedInventoryReleaseBps` of your total inventory in a single cycle.
+- **`MANAGED_CONTROLLABILITY_TOO_LOW`** — plan no longer clears the
+  improvement floor or sensitivity gate in the fresh snapshot.
+- **`CANDIDATE_INVALIDATED`** — bucket state drifted between planning and
+  submission (LP transferred, deposit accrued differently, etc.).
+- **`EXPIRED_STEP`** — the plan sat too long and a step's expiry has passed.
+- **`STALE_SNAPSHOT`** / **`UNSAFE_TIME_WINDOW`** — snapshot aged out or we
+  hit the rate-update boundary before submit.
+
+If any of these fire on a live run, the keeper logs the reason and takes no
+on-chain action; re-running the cycle with a fresh snapshot is safe.
+
+### What NOT to do
+
+- **Do not enable `enableManagedDualUpwardControl: true` on a live pool.** The
+  dual synthesis doesn't produce exact candidates reliably yet; at best you
+  will get the same REMOVE_QUOTE candidate the single-action path produces,
+  at worst you will confuse yourself with additional dual-mode diagnostics
+  that have no production meaning.
+- **Do not rely on a single successful cycle as proof the rate moved.** Ajna
+  rates update on 12 h minimum intervals; a successful REMOVE_QUOTE only
+  produces the predicted rate after the next update (not on the same block).
+- **Do not reuse the same bucket indexes across pools.** Ajna fenwick indexes
+  encode the price level per pool's quote/collateral decimals; bucket 6003 in
+  one pool is a different price point from bucket 6003 in another.
