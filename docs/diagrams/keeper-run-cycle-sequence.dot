@@ -28,10 +28,10 @@ digraph KeeperRunCycleSequence {
 
   operator [label="Operator", shape=oval, color="#c2410c", fillcolor="#fff7ed"];
   entry [label="CLI / KeeperHub"];
-  snapshot [label="SnapshotSource"];
-  planner [label="Planner"];
-  policy [label="Policy"];
-  executor [label="Execution backend"];
+  snapshot [label="core SnapshotSource /\najna SnapshotSource"];
+  planner [label="core Planner"];
+  policy [label="core Policy"];
+  executor [label="core Execution backend"];
   pool [label="Ajna pool / ERC20"];
 
   {
@@ -48,7 +48,7 @@ digraph KeeperRunCycleSequence {
   operator -> entry [label="1. run command or payload"];
   entry -> snapshot [label="2. getSnapshot() for planning"];
   snapshot -> pool [label="3. read pool + borrower state"];
-  pool -> snapshot [label="4. passive path + candidates"];
+  pool -> snapshot [label="4. passive path + search + candidates"];
   snapshot -> planner [label="5. PoolSnapshot"];
   planner -> policy [label="6. CyclePlan"];
   policy -> entry [label="7. validate or abort"];

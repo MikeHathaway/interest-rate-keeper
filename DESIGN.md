@@ -282,46 +282,45 @@ flowchart TD
     KeeperHub["keeperhub.ts\npayload adapter"]
   end
 
-  subgraph Snapshot["Snapshot layer"]
-    FileSource["FileSnapshotSource /\nStaticSnapshotSource /\nPayloadThenLiveSnapshotSource"]
-    AjnaSource["AjnaRpcSnapshotSource"]
-    AjnaRead["Ajna RPC reads\nblock-pinned pool + account state"]
-    Synthesis["Exact + heuristic synthesis\nlend / borrow / dual candidates"]
-    PoolSnapshot["PoolSnapshot\ncurrent rate + passive path + candidates"]
+  subgraph Core["Core engine"]
+    CoreConfig["core/config/*\nparse + normalize config"]
+    CoreSnapshot["core/snapshot/*\nSnapshotSource + metadata"]
+    Planner["core/planning/planner.ts\nplanCycle()"]
+    Policy["core/planning/policy.ts\nvalidatePlan() + preSubmitRecheck()"]
+    RunCycle["core/cycle/run-cycle.ts\norchestrate one cycle"]
+    StepExec["core/cycle/execute.ts\nbackend abstraction"]
   end
 
-  subgraph Decision["Decision layer"]
-    Planner["planner.ts\nplanCycle()"]
-    Policy["policy.ts\nvalidatePlan()"]
-    Recheck["policy.ts\npreSubmitRecheck()"]
-  end
-
-  subgraph Execution["Execution layer"]
-    RunCycle["run-cycle.ts\norchestrate plan / recheck / execute"]
-    StepExec["execute.ts\nstepwise backend"]
-    AjnaExec["ajna/executor.ts\nlive Ajna tx handlers"]
+  subgraph Ajna["Ajna adapter"]
+    AjnaSource["ajna/adapter/snapshot-source.ts\nAjnaRpcSnapshotSource"]
+    AjnaRead["ajna/read/*\nblock-pinned pool + account reads"]
+    AjnaSearch["ajna/search/*\nbounded candidate-space construction"]
+    AjnaSynthesize["ajna/synthesize/*\nexact + heuristic lend / borrow / dual"]
+    AjnaExec["ajna/adapter/executor.ts\nlive Ajna tx handlers"]
     AjnaPool["Ajna pool + ERC20 contracts\nvia viem"]
+  end
+
+  subgraph Snapshot["Snapshot artifact"]
+    PoolSnapshot["PoolSnapshot\ncurrent rate + passive path + candidates"]
   end
 
   subgraph Outputs["Outputs"]
     Result["CycleResult\nstatus + plan + capital + tx hashes"]
-    Log["log.ts\nJSONL append"]
+    Log["core/support/log.ts\nJSONL append"]
     Human["CLI JSON / KeeperHub response /\nhuman summary"]
   end
 
   Operator --> CLI
   Operator --> KeeperHub
+  CLI --> CoreConfig
+  KeeperHub --> CoreConfig
   CLI --> RunCycle
   KeeperHub --> RunCycle
-  CLI --> FileSource
-  KeeperHub --> FileSource
-  RunCycle --> FileSource
+  RunCycle --> CoreSnapshot
   RunCycle --> AjnaSource
-  AjnaSource --> AjnaRead --> Synthesis --> PoolSnapshot
-  FileSource --> PoolSnapshot
+  AjnaSource --> AjnaRead --> AjnaSearch --> AjnaSynthesize --> PoolSnapshot
+  CoreSnapshot --> PoolSnapshot
   PoolSnapshot --> Planner --> Policy --> RunCycle
-  RunCycle --> Recheck
-  Recheck --> AjnaSource
   RunCycle --> StepExec --> AjnaExec --> AjnaPool
   AjnaPool --> Result
   RunCycle --> Result
@@ -330,56 +329,60 @@ flowchart TD
   StepExec -. multi-step plans fetch a fresh snapshot and re-plan between steps .-> AjnaSource
 ```
 
-Operationally, the architecture is split into four layers:
-- entrypoints: CLI and KeeperHub normalize config and runtime mode
-- snapshot: build a block-pinned `PoolSnapshot` and synthesize candidate actions
-- decision: pick one closed-form plan and apply guard checks
-- execution: submit steps, re-read/re-plan between sequential actions, then emit structured results
+Operationally, the architecture is split into three real boundaries:
+- `core`: protocol-agnostic config, snapshot interfaces, planning, policy, and cycle orchestration
+- `ajna`: protocol-specific reads, search-space construction, synthesis, and execution
+- `entrypoints`: CLI and KeeperHub wrappers around the same cycle engine
 
-### Proposed Module Layout
+The end-to-end runtime flow is:
 
-Keep v1 flat and functional, not class-heavy:
+`config -> core snapshot interface -> ajna adapter -> ajna read -> ajna search -> ajna synthesize -> core planner -> core policy -> core cycle runner -> ajna executor`
+
+The fuller prose explainer for that flow lives in [docs/architecture.md](./docs/architecture.md).
+
+### Current Module Layout
 
 ```mermaid
 flowchart LR
-  Types["types.ts\nshared schemas"]
-  Config["config.ts\nparse + validate"]
-  GenericSnapshot["snapshot.ts\nfile/manual snapshot parsing"]
-  AjnaSnapshot["ajna/snapshot.ts\nlive reads + candidate synthesis"]
-  Metrics["candidate-metrics.ts\ncapital derivation"]
-  Planner["planner.ts\npure plan selection"]
-  Policy["policy.ts\nguards + recheck"]
-  Execute["execute.ts\nbackend abstraction"]
-  AjnaExec["ajna/executor.ts\nAjna tx execution"]
-  RunCycle["run-cycle.ts\none-cycle orchestration"]
-  Log["log.ts\nJSONL logging"]
+  CoreTypes["core/types.ts\nshared schemas"]
+  CoreConfig["core/config/*\nparse + normalize"]
+  CoreSnapshot["core/snapshot/*\nfile/payload snapshot sources + metadata"]
+  CorePlanning["core/planning/*\nmetrics + planner + policy"]
+  CoreCycle["core/cycle/*\nexecution abstraction + orchestration"]
+  AjnaAdapter["ajna/adapter/*\nsnapshot source + execution wiring"]
+  AjnaRead["ajna/read/*\nblock-pinned reads + caches"]
+  AjnaSearch["ajna/search/*\nsearch-space resolution"]
+  AjnaSynthesize["ajna/synthesize/*\nexact / heuristic evaluation"]
+  AjnaMath["ajna/math/*\nrate math + protocol constants"]
+  AjnaDev["ajna/dev/*\nfork helpers"]
+  Log["core/support/log.ts\nJSONL logging"]
   Summary["human-summary.ts\nstderr summary line"]
   CLI["cli.ts"]
   KeeperHub["keeperhub.ts"]
 
-  Types --> Config
-  Types --> GenericSnapshot
-  Types --> AjnaSnapshot
-  Types --> Metrics
-  Types --> Planner
-  Types --> Policy
-  Types --> Execute
-  Types --> RunCycle
-  Config --> CLI
-  Config --> KeeperHub
-  GenericSnapshot --> CLI
-  GenericSnapshot --> KeeperHub
-  AjnaSnapshot --> CLI
-  AjnaSnapshot --> KeeperHub
-  Metrics --> Planner
-  Planner --> RunCycle
-  Policy --> RunCycle
-  Execute --> RunCycle
-  AjnaExec --> Execute
-  Log --> RunCycle
+  CoreTypes --> CoreConfig
+  CoreTypes --> CoreSnapshot
+  CoreTypes --> CorePlanning
+  CoreTypes --> CoreCycle
+  CoreConfig --> CLI
+  CoreConfig --> KeeperHub
+  CoreSnapshot --> CLI
+  CoreSnapshot --> KeeperHub
+  AjnaAdapter --> CLI
+  AjnaAdapter --> KeeperHub
+  AjnaRead --> AjnaAdapter
+  AjnaSearch --> AjnaAdapter
+  AjnaSynthesize --> AjnaAdapter
+  AjnaMath --> AjnaRead
+  AjnaMath --> AjnaSearch
+  AjnaMath --> AjnaSynthesize
+  AjnaDev --> AjnaSynthesize
+  CorePlanning --> CoreCycle
+  AjnaAdapter --> CoreCycle
+  Log --> CoreCycle
   Summary --> CLI
-  RunCycle --> CLI
-  RunCycle --> KeeperHub
+  CoreCycle --> CLI
+  CoreCycle --> KeeperHub
 ```
 
 ### `runCycle()` Sequence
@@ -389,23 +392,25 @@ sequenceDiagram
   autonumber
   actor O as Operator
   participant E as CLI / KeeperHub
-  participant S as SnapshotSource
-  participant P as Planner
-  participant G as Policy / Guards
-  participant X as Execution backend
+  participant CS as core SnapshotSource
+  participant AS as ajna SnapshotSource
+  participant P as core Planner
+  participant G as core Policy / Guards
+  participant X as core Execution backend
   participant A as Ajna pool / ERC20
 
   O->>E: run config or payload
-  E->>S: getSnapshot() for planning
-  S-->>E: PoolSnapshot
+  E->>CS: getSnapshot() for planning
+  E->>AS: get live Ajna snapshot when needed
+  AS-->>E: PoolSnapshot
   E->>P: planCycle(snapshot, config)
   P-->>E: CyclePlan
   E->>G: validatePlan(plan, snapshot, config)
   G-->>E: valid or abort
 
   alt recheckBeforeSubmit
-    E->>S: getSnapshot() for recheck
-    S-->>E: fresh PoolSnapshot
+    E->>AS: getSnapshot() for recheck
+    AS-->>E: fresh PoolSnapshot
     E->>G: preSubmitRecheck(plan, previous, fresh, config)
     G-->>E: valid or abort
   end
@@ -416,8 +421,8 @@ sequenceDiagram
 
   opt sequential multi-step plan
     X-->>E: first step executed
-    E->>S: getSnapshot() again
-    S-->>E: fresh PoolSnapshot
+    E->>AS: getSnapshot() again
+    AS-->>E: fresh PoolSnapshot
     E->>P: replan remaining step(s)
     P-->>E: continue or abort
     E->>X: execute remaining step
@@ -428,16 +433,17 @@ sequenceDiagram
 ```
 
 Module responsibilities:
-- `types.ts`: shared typed schemas
-- `config.ts`: parse/validate config
-- `snapshot.ts`: generic file/manual snapshot parsing plus `SnapshotSource` helpers
-- `ajna/snapshot.ts`: block-pinned Ajna RPC reads, passive-path classification, exact/heuristic synthesis
-- `planner.ts`: pure decision logic and plan-capital derivation
-- `policy.ts`: caps, stale guards, unsafe-window guards, pre-submit recheck
-- `execute.ts`: transaction submission abstraction and stepwise execution backend
-- `ajna/executor.ts`: live Ajna transaction handlers
-- `log.ts`: append-only structured run logs
-- `run-cycle.ts`: orchestration of one cycle
+- `src/core/types.ts`: shared typed schemas
+- `src/core/config/*`: parse, normalize, and validate config
+- `src/core/snapshot/*`: generic file/payload snapshot parsing plus `SnapshotSource` helpers
+- `src/core/planning/*`: candidate metrics, planner, managed controls, and policy
+- `src/core/cycle/*`: transaction-submission abstraction and one-cycle orchestration
+- `src/ajna/adapter/*`: live Ajna snapshot/execution wiring into the core engine
+- `src/ajna/read/*`: block-pinned Ajna RPC reads and caches
+- `src/ajna/search/*`: bucket/amount/limit-index search-space construction
+- `src/ajna/synthesize/*`: exact/heuristic lend, borrow, and dual candidate evaluation
+- `src/ajna/math/*`: Ajna rate math and protocol constants
+- `src/ajna/dev/*`: local fork helpers for exact simulation and integration workflows
 - `cli.ts`: one-shot local entrypoint
 - `keeperhub.ts`: one-shot KeeperHub adapter
 

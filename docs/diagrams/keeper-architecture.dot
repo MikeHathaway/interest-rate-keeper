@@ -47,10 +47,11 @@ digraph KeeperArchitecture {
     color="#cbd5e1";
     style="rounded";
 
-    file_source [label="snapshot.ts\nFileSnapshotSource / StaticSnapshotSource /\nPayloadThenLiveSnapshotSource"];
-    ajna_source [label="ajna/snapshot.ts\nAjnaRpcSnapshotSource"];
-    ajna_reads [label="Ajna RPC reads\nblock-pinned pool + account state"];
-    synthesis [label="exact + heuristic synthesis\nlend / borrow / dual candidates"];
+    file_source [label="core/snapshot/file.ts\nFileSnapshotSource / StaticSnapshotSource /\nPayloadThenLiveSnapshotSource"];
+    ajna_source [label="ajna/adapter/snapshot-source.ts\nAjnaRpcSnapshotSource"];
+    ajna_reads [label="ajna/read/*\nblock-pinned pool + account state"];
+    search_space [label="ajna/search/*\nbounded bucket / amount / limit search"];
+    synthesis [label="ajna/synthesize/*\nexact + heuristic lend / borrow / dual"];
     pool_snapshot [label="PoolSnapshot\ncurrent rate + passive path + candidates"];
   }
 
@@ -59,9 +60,9 @@ digraph KeeperArchitecture {
     color="#cbd5e1";
     style="rounded";
 
-    planner [label="planner.ts\nplanCycle()"];
-    policy [label="policy.ts\nvalidatePlan()"];
-    recheck [label="policy.ts\npreSubmitRecheck()"];
+    planner [label="core/planning/planner.ts\nplanCycle()"];
+    policy [label="core/planning/policy.ts\nvalidatePlan()"];
+    recheck [label="core/planning/policy.ts\npreSubmitRecheck()"];
   }
 
   subgraph cluster_execution {
@@ -69,9 +70,9 @@ digraph KeeperArchitecture {
     color="#cbd5e1";
     style="rounded";
 
-    run_cycle [label="run-cycle.ts\norchestrate plan / recheck / execute"];
-    backend [label="execute.ts\nstepwise backend"];
-    ajna_executor [label="ajna/executor.ts\nlive Ajna tx handlers"];
+    run_cycle [label="core/cycle/run-cycle.ts\norchestrate plan / recheck / execute"];
+    backend [label="core/cycle/execute.ts\nstepwise backend"];
+    ajna_executor [label="ajna/adapter/executor.ts\nlive Ajna tx handlers"];
     contracts [label="Ajna pool + ERC20 contracts\nvia viem"];
   }
 
@@ -81,7 +82,7 @@ digraph KeeperArchitecture {
     style="rounded";
 
     result [label="CycleResult\nstatus + plan + capital + tx hashes"];
-    log_jsonl [label="log.ts\nJSONL append"];
+    log_jsonl [label="core/support/log.ts\nJSONL append"];
     responses [label="CLI JSON / KeeperHub response /\nhuman summary"];
   }
 
@@ -93,7 +94,7 @@ digraph KeeperArchitecture {
   keeperhub -> file_source [label="payload snapshot"];
   run_cycle -> file_source [label="planning snapshot", style=dashed];
   run_cycle -> ajna_source [label="live snapshot / recheck"];
-  ajna_source -> ajna_reads -> synthesis -> pool_snapshot;
+  ajna_source -> ajna_reads -> search_space -> synthesis -> pool_snapshot;
   file_source -> pool_snapshot;
   pool_snapshot -> planner -> policy -> run_cycle;
   run_cycle -> recheck;

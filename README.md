@@ -9,9 +9,9 @@ This repo currently contains:
 - CLI and KeeperHub entrypoints
 - unit tests plus a Base-fork integration test that uses the deployed Base Ajna ERC20 factory
 
-The detailed product and engineering decisions are in [DESIGN.md](./DESIGN.md). The used-pool upward research boundary is summarized in [docs/used-pool-upward-control-summary.md](./docs/used-pool-upward-control-summary.md), and the managed inventory-backed operating model is in [docs/curator-mode.md](./docs/curator-mode.md). Deferred work is tracked in [TODOS.md](./TODOS.md).
+The detailed product and engineering decisions are in [DESIGN.md](./DESIGN.md). The used-pool upward research boundary is summarized in [docs/used-pool-upward-control-summary.md](./docs/used-pool-upward-control-summary.md), the managed inventory-backed operating model is in [docs/curator-mode.md](./docs/curator-mode.md), and the current runtime/module explainer is in [docs/architecture.md](./docs/architecture.md). Deferred work is tracked in [TODOS.md](./TODOS.md).
 
-An architecture diagram for the keeper runtime and module layout lives in [DESIGN.md#architecture](./DESIGN.md#architecture).
+Current architecture diagrams also live in [DESIGN.md#architecture](./DESIGN.md#architecture).
 
 ![Keeper architecture](./docs/diagrams/keeper-architecture.png)
 
@@ -20,38 +20,61 @@ Rendered assets:
 - [Sequence SVG](./docs/diagrams/keeper-run-cycle-sequence.svg)
 - [Sequence PNG](./docs/diagrams/keeper-run-cycle-sequence.png)
 
+## Module Flow
+
+At a high level, the runtime flow is:
+
+`config -> core snapshot interface -> ajna adapter -> ajna read -> ajna search -> ajna synthesize -> core planner -> core policy -> core cycle runner -> ajna executor`
+
+Current source layout:
+
+- `src/core/config/*`: config parsing and normalization
+- `src/core/snapshot/*`: generic snapshot types, metadata, and file/payload sources
+- `src/core/planning/*`: planner, policy, managed-control rules, and capital metrics
+- `src/core/cycle/*`: execution backend abstraction and one-cycle orchestration
+- `src/ajna/adapter/*`: Ajna-specific wiring into the core engine
+- `src/ajna/read/*`: authoritative onchain reads and caches
+- `src/ajna/search/*`: bounded candidate-space construction
+- `src/ajna/synthesize/*`: exact and heuristic candidate evaluation
+- `src/ajna/math/*`: Ajna rate math and constants
+- `src/ajna/dev/*`: fork/testing helpers
+
+For the fuller end-to-end explainer, see [docs/architecture.md](./docs/architecture.md).
+
 ## Status
 
-This is still an early implementation. The core keeper loop exists and the live Ajna path is wired, but fully automatic steering is still incomplete:
+This is still an early but working implementation. The core keeper loop, live Ajna snapshot source, live execution backend, and Base-fork coverage are all in place.
 
-- exact simulation-backed `ADD_QUOTE` synthesis now exists and is auto-attempted in live snapshots when runtime simulation prerequisites are available, unless explicit flags override that behavior
-- exact simulation-backed `DRAW_DEBT` synthesis now exists and is auto-attempted in live snapshots when runtime simulation prerequisites are available, unless explicit flags override that behavior
-- exact simulation-backed `LEND_AND_BORROW` synthesis now exists when both exact lend and borrow synthesis are enabled by that internal policy or by explicit flags
-- heuristic `ADD_QUOTE` synthesis still exists and now acts as the default exploratory fallback when explicit flags are unset and no exact lend candidate surfaced
-- heuristic `DRAW_DEBT` synthesis now exists and acts as the default exploratory fallback when explicit flags are unset and no exact borrower candidate surfaced
-- heuristic `LEND_AND_BORROW` synthesis now exists for the narrow case where adding quote tempers an oversized borrow path toward the target band
+Supported surface today:
 
-Today, the snapshot builder reads real pool state and predicts the next Ajna rate move. For steering candidates:
+- downward convergence is the strongest path
+- representative due-window `LEND` planning is proven
+- representative exact due-window `LEND_AND_BORROW` execution is proven
+- representative exact multi-cycle `BORROW` execution is proven for upward steering
+- the keeper aborts safely when pool state changes between planning and execution
+- dry-run, capital metrics, validation signatures, and submit-time recheck are all wired into the live path
 
-- `manualCandidates` are now an optional override/fallback bridge for live steering plans rather than the default live path
-- `manualCandidates` can now carry `planningRateBps` and `planningLookaheadUpdates`, so manually supplied multi-cycle plans are ranked correctly
-- candidates now expose derived capital metrics from their execution steps: `additionalCollateralRequired`, `netQuoteBorrowed`, `operatorCapitalRequired`, and `operatorCapitalAtRisk`
-- live Ajna snapshots now bind `manualCandidates` to snapshot-specific validation signatures that include pool, borrower, loan, and referenced-bucket context, so recheck can invalidate stale manual plans before execution
-- simulation-backed `ADD_QUOTE` synthesis is an exact opt-in path that forks the current chain state and tests candidate quote deposits against real Ajna contract behavior
-- simulation-backed `DRAW_DEBT` synthesis is an exact opt-in path that forks the current chain state and tests candidate borrow amounts against real Ajna contract behavior
-- simulation-backed `LEND_AND_BORROW` synthesis is an exact opt-in path that searches direct `ADD_QUOTE -> DRAW_DEBT` combinations on a fork and validates the full `ADD_QUOTE -> DRAW_DEBT -> updateInterest` path before emitting them
-- simulation-backed exact candidates are now downgraded to `unsupported` when they were derived from a `simulationSenderAddress` that does not match the live execution signer
-- heuristic `ADD_QUOTE` synthesis remains useful for exploratory planning and dry-run validation
-- heuristic `DRAW_DEBT` synthesis now provides exploratory upward-steering candidates when exact same-cycle borrow remains too conservative
-- heuristic `LEND_AND_BORROW` synthesis is deliberately narrow: it looks for `ADD_QUOTE -> DRAW_DEBT` plans that soften a borrow overshoot rather than trying to solve a full two-dimensional optimizer
-- when `borrowSimulationLookaheadUpdates` is unset, the live exact borrower path now treats not-due and due states differently: it uses `[1, 2, 3]` in not-due states, but once the rate window is already open it skips the one-update path by default after Ajna EMAs are initialized and goes straight to the default 3-update exact borrow path
-- when synthesis flags are unset, the live snapshot source now follows an internal ladder: attempt exact pre-window borrower steering in not-due states, skip futile same-cycle exact borrower search in normal due-window states after EMA initialization, fall back to exact multi-cycle borrower steering, then surface heuristic borrower guidance if exact search still cannot produce a candidate
-- heuristic candidates are now recommendation-only by default. They still surface in snapshots and dry runs, but the live planner will not execute them unless `allowHeuristicExecution` is explicitly enabled
-- dry-run results are now explicit: CLI JSON and KeeperHub responses carry `dryRun`, and summaries also surface the selected candidate mode plus any multi-cycle planning horizon
-- snapshot `predictedNextOutcome` / `predictedNextRateBps` now describe the next eligible Ajna rate update, even when that update is not due yet
-- candidate usefulness is now judged against the do-nothing next update path, not just against the current rate, so the planner can prefer neutralizing a bad upcoming move over letting the pool drift farther away
+Experimental or narrow surface:
 
-The current Base-fork evidence is important: the keeper now finds a lend plan in representative borrowed-pool step-up fixtures, borrower-side lookahead planning can find and live-execute a representative multi-cycle `BORROW` plan when a wider search space is enabled, and multi-bucket quote search now surfaces, naturally selects, and live-executes a representative exact `LEND_AND_BORROW` candidate on the fork. Due-window mutating plans no longer append a separate `UPDATE_INTEREST` step, because the first mutating action can consume the overdue update itself. The fork suite now also proves that the keeper aborts safely when another actor changes the pool between planning and execution. On the borrower side, exact same-cycle `DRAW_DEBT` search still does not find a safe candidate in the representative brand-new quote-only fixture covered by routine integration, while heuristic `DRAW_DEBT` synthesis is now available as advisory guidance only. The broader existing-borrower exact same-cycle negative proof remains in the `experimental` profile, now filtered to true borrower/loan states, and it is still negative even on a deliberately borrower-heavy existing-loan fixture set. Experimental manual one-update borrower probes are now also negative in both the saved brand-new quote-only fixture and the borrower-heavy existing-loan fixture set, even after widening the probe to near-current targets, tiny collateral adds, and sub-token borrow amounts. Brand-new first-update probes are now also negative in both a single-bucket quote-only pool and a deliberately multi-bucket quote-only pool searched near the collateralization boundary. Even a first-update multi-bucket search that binary-discovers the minimum executable collateral at the execution boundary is still negative, and a bounded mechanics-first boundary-targeted existing-borrower search is also still negative. So the current same-cycle gap is no longer just “the exact search missed it” in those representative states. Pre-window lend is no longer best understood as “flip the next update.” DWATP-threshold probes now show a positive manual pre-window `LEND` effect over a two-update horizon in the deterministic not-due step-up fixture, which matches Ajna’s lagged meaningful-deposit EMA mechanics. A deterministic exact surfaced-plan proof for that fixture now lives in the routine `slow` profile, while the execution proofs remain exploratory. The generic threshold-aware path is still experimental, but it no longer collapses to a near-max quote deposit in that deterministic proof. A second representative complex ongoing multi-actor fixture now has both a generic surfaced exact pre-window `LEND` proof and targeted execution proofs on a manually positive ongoing state. Borrower-side exact mode is now useful for representative multi-cycle live steering, and there is also an experimental generic exact surfaced-plan proof plus targeted execution proof for pre-window `BORROW` on a deterministic brand-new quote-only post-update fixture. That richer borrower-side path is still narrow, but it is no longer uniformly negative across used-pool fixtures: a representative existing-borrower fixture can now surface a tiny exact pre-window `BORROW` plan, while the representative complex ongoing multi-actor borrower fixture family still remains negative, bounded manual multi-cycle pre-window borrower probes across those used-pool fixture families have not yet produced a broader positive counterexample, the newer boundary-math-ranked existing-borrower pre-window search remains negative, and even a representative multi-bucket existing-borrower pre-window borrower probe stays negative after ranking candidates with a protocol-grounded cached-interest-state approximation. Same-cycle borrower steering is still experimental and not a supported live path.
+- generic pre-window `LEND` is not a broad supported live feature yet, even though there are real positive proofs in deterministic and representative fixtures
+- pre-window `BORROW` exists in narrow exact proofs, but it is not a broad used-pool upward solution
+- managed used-pool upward control through curator-style inventory-backed `REMOVE_QUOTE` is the only credible used-pool upward path today
+- heuristic candidates still exist for exploration and dry runs, but they are recommendation-only unless `allowHeuristicExecution` is explicitly enabled
+
+Not broadly supported:
+
+- generic used-pool upward control
+- exact same-cycle borrower-side steering
+- managed dual `REMOVE_QUOTE + DRAW_DEBT` as a routine surfaced live path
+
+Important runtime behavior:
+
+- when synthesis flags are unset, the live snapshot source follows an internal ladder instead of requiring operators to choose a borrower strategy
+- exact candidates are downgraded to `unsupported` when they were derived from a `simulationSenderAddress` that does not match the live execution signer
+- `manualCandidates` are now a fallback/override bridge, not the default live mechanism
+- candidate usefulness is judged against the passive next-update path, not just the current rate
+
+For the detailed research boundary and actual-chain evidence, see [docs/used-pool-upward-control-summary.md](./docs/used-pool-upward-control-summary.md). For the managed-pool operating model, see [docs/curator-mode.md](./docs/curator-mode.md).
 
 ## Product Modes
 
@@ -425,13 +448,13 @@ npm run test:integration:base
 
 ## Current Limitations
 
-- The planner does not yet synthesize the minimum directional threshold directly from live Ajna pool state across every keeper mode.
-- `manualCandidates` remain an optional fallback for unsupported or operator-specified live steering plans.
-- live snapshots now attach validation signatures to `manualCandidates`, so recheck can invalidate them when pool, borrower, loan, or referenced-bucket context drifts before execution.
-- Exact simulation-backed lend synthesis is opt-in and now covers both due-window representative lend fixtures and a deterministic routine multi-cycle pre-window surfaced-plan proof, with broader generic pre-window lend coverage still living in `experimental`.
-- Pre-window lend is still experimental as a generic live feature. The exact path now has a deterministic surfaced-plan proof over a two-update horizon in routine `slow` coverage, plus representative complex ongoing multi-actor proofs in `experimental` where the generic exact path surfaces a pre-window `LEND` and a manually positive ongoing state executes cleanly without pinning bucket or amount. The heuristic path is still intentionally suppressed to avoid overclaiming what the next update can do.
-- Exact simulation-backed borrow synthesis is opt-in and now supports multi-cycle planning through `borrowSimulationLookaheadUpdates`, with representative Base-fork coverage for a live-executed 3-update borrower path. When `borrowSimulationLookaheadUpdates` is unset, the live snapshot source tries `[1, 2, 3]` exact borrow planning in not-due states, but once the rate window is already open it defaults to `[3]` after EMA initialization because Ajna computes the immediate due-window rate move from previously cached interest-state values. The old `[1, 3]` ladder is kept only for explicitly pinned one-update experiments or pre-EMA-initialization states.
-- Heuristic borrow synthesis is opt-in and now covers exploratory upward-steering candidates through the same heuristic search path used by the pure planner tests, but those candidates are advisory by default and are not live-executed unless `allowHeuristicExecution` is enabled.
+- generic used-pool upward control is still not a supported product mode
+- exact same-cycle borrower steering is still unresolved
+- pre-window lend and pre-window borrow both have real positive evidence, but broader generic live support is still experimental
+- managed used-pool upward control is still narrower than downward or new-pool upward control
+- `manualCandidates` remain a fallback for unsupported or operator-specified plans
+
+The detailed evidence and negative results live in [docs/used-pool-upward-control-summary.md](./docs/used-pool-upward-control-summary.md).
 - Exact simulation-backed paths depend on runtime account context. If live exact synthesis cannot run because there is no resolvable simulation sender/private key, the planner now says so more explicitly instead of quietly looking like a pure heuristic miss.
 - Brand-new pool upward-convergence and abandoned-pool recovery should not be treated as the same keeper mode; they share engine pieces, but the proven execution paths are different.
 - Exact simulation-backed `LEND_AND_BORROW` synthesis is now wired into the live snapshot path when both exact lend and borrow synthesis are enabled, and it benchmarks candidate dual paths against the best exact single-action paths before emitting them.
