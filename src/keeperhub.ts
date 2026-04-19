@@ -1,20 +1,13 @@
-import { resolveKeeperConfig } from "./config.js";
-import { runCycle, type RunCycleDependencies } from "./run-cycle.js";
+import { resolveKeeperConfig } from "./core/config/config.js";
+import { parseObject } from "./core/config/parse.js";
+import { runCycle, type RunCycleDependencies } from "./core/cycle/run-cycle.js";
 import {
   resolvePoolSnapshot,
   StaticSnapshotSource,
   type SnapshotSource
-} from "./snapshot.js";
-import { AjnaRpcSnapshotSource } from "./ajna/snapshot.js";
-import { safeJsonStringify } from "./json.js";
-
-function parseObject(input: unknown, label: string): Record<string, unknown> {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw new Error(`${label} must be an object`);
-  }
-
-  return input as Record<string, unknown>;
-}
+} from "./core/snapshot/file.js";
+import { AjnaRpcSnapshotSource } from "./ajna/adapter/synthesis-policy.js";
+import { safeJsonStringify } from "./core/support/json.js";
 
 export function resolveKeeperHubPayload(input: unknown): {
   config: ReturnType<typeof resolveKeeperConfig>;
@@ -81,6 +74,7 @@ export async function runKeeperHubPayload(
 }
 
 export function formatKeeperHubResponse(result: Awaited<ReturnType<typeof runKeeperHubPayload>>): string {
+  const inventoryBacked = result.plan.requiredSteps.some((step) => step.type === "REMOVE_QUOTE");
   return safeJsonStringify({
     dryRun: result.dryRun,
     status: result.status,
@@ -94,8 +88,11 @@ export function formatKeeperHubResponse(result: Awaited<ReturnType<typeof runKee
     predictedRateBpsAfterNextUpdate: result.plan.predictedRateBpsAfterNextUpdate,
     planningRateBps: result.plan.planningRateBps,
     planningLookaheadUpdates: result.plan.planningLookaheadUpdates,
+    inventoryBacked,
     capital: {
       quoteTokenDelta: result.plan.quoteTokenDelta,
+      quoteInventoryDeployed: result.plan.quoteInventoryDeployed,
+      quoteInventoryReleased: result.plan.quoteInventoryReleased,
       additionalCollateralRequired: result.plan.additionalCollateralRequired,
       netQuoteBorrowed: result.plan.netQuoteBorrowed,
       operatorCapitalRequired: result.plan.operatorCapitalRequired,

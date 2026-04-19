@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { planCycle } from "../src/planner.js";
-import type { KeeperConfig, PoolSnapshot } from "../src/types.js";
+import { planCycle } from "../src/core/planning/planner.js";
+import type { KeeperConfig, PoolSnapshot } from "../src/core/types.js";
 
 const baseConfig: KeeperConfig = {
   chainId: 8453,
@@ -201,6 +201,123 @@ describe("planCycle", () => {
     });
   });
 
+  it("keeps REMOVE_QUOTE unbuffered and treats it as zero new capital required", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 900,
+        predictedNextOutcome: "NO_CHANGE",
+        predictedNextRateBps: 900,
+        metadata: {
+          managedInventoryUpwardEligible: true,
+          managedTotalWithdrawableQuoteAmount: "1000"
+        },
+        candidates: [
+          {
+            id: "remove-quote",
+            intent: "LEND",
+            minimumExecutionSteps: [
+              {
+                type: "REMOVE_QUOTE",
+                amount: 100n,
+                bucketIndex: 3000
+              }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 1000,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 100n,
+            explanation: "withdraw quote inventory to support higher rates"
+          }
+        ]
+      }),
+      {
+        ...baseConfig,
+        toleranceMode: "absolute",
+        toleranceBps: 50,
+        minimumManagedSensitivityBpsPer10PctRelease: 10
+      }
+    );
+
+    expect(plan.intent).toBe("LEND");
+    expect(plan.requiredSteps).toEqual([
+      {
+        type: "REMOVE_QUOTE",
+        amount: 100n,
+        bucketIndex: 3000
+      }
+    ]);
+    expect(plan.quoteInventoryDeployed).toBe(0n);
+    expect(plan.quoteInventoryReleased).toBe(100n);
+    expect(plan.operatorCapitalRequired).toBe(0n);
+    expect(plan.operatorCapitalAtRisk).toBe(0n);
+  });
+
+  it("treats REMOVE_QUOTE plus DRAW_DEBT as inventory-backed capital with only collateral externally required", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 900,
+        predictedNextOutcome: "NO_CHANGE",
+        predictedNextRateBps: 900,
+        metadata: {
+          managedInventoryUpwardEligible: true,
+          managedDualUpwardEligible: true,
+          managedTotalWithdrawableQuoteAmount: "1000"
+        },
+        candidates: [
+          {
+            id: "remove-quote-dual",
+            intent: "LEND_AND_BORROW",
+            minimumExecutionSteps: [
+              {
+                type: "REMOVE_QUOTE",
+                amount: 100n,
+                bucketIndex: 3000
+              },
+              {
+                type: "DRAW_DEBT",
+                amount: 50n,
+                limitIndex: 3200,
+                collateralAmount: 25n
+              }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 1000,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 150n,
+            explanation: "withdraw quote and draw debt to support higher rates"
+          }
+        ]
+      }),
+      {
+        ...baseConfig,
+        toleranceMode: "absolute",
+        toleranceBps: 50,
+        minimumManagedSensitivityBpsPer10PctRelease: 10
+      }
+    );
+
+    expect(plan.intent).toBe("LEND_AND_BORROW");
+    expect(plan.requiredSteps).toEqual([
+      {
+        type: "REMOVE_QUOTE",
+        amount: 100n,
+        bucketIndex: 3000
+      },
+      {
+        type: "DRAW_DEBT",
+        amount: 51n,
+        limitIndex: 3200,
+        collateralAmount: 25n
+      }
+    ]);
+    expect(plan.quoteInventoryDeployed).toBe(0n);
+    expect(plan.quoteInventoryReleased).toBe(100n);
+    expect(plan.additionalCollateralRequired).toBe(25n);
+    expect(plan.netQuoteBorrowed).toBe(151n);
+    expect(plan.operatorCapitalRequired).toBe(25n);
+    expect(plan.operatorCapitalAtRisk).toBe(0n);
+  });
+
   it("treats heuristic candidates as advisory unless heuristic execution is explicitly allowed", () => {
     const heuristicCandidate = {
       id: "heuristic-borrow",
@@ -279,6 +396,125 @@ describe("planCycle", () => {
 
     expect(plan.intent).toBe("NO_OP");
     expect(plan.reason).toMatch(/different sender than the live execution signer/i);
+  });
+
+  it("surfaces a managed-inventory refusal reason when curator mode is enabled but no withdrawable quote inventory is available", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 900,
+        predictedNextOutcome: "NO_CHANGE",
+        predictedNextRateBps: 900,
+        metadata: {
+          managedInventoryUpwardControlEnabled: true,
+          managedInventoryUpwardEligible: false,
+          managedInventoryIneligibilityReason:
+            "no withdrawable quote inventory was found in the configured or derived managed buckets"
+        }
+      }),
+      {
+        ...baseConfig,
+        targetRateBps: 1000,
+        toleranceMode: "absolute",
+        toleranceBps: 25,
+        enableManagedInventoryUpwardControl: true
+      }
+    );
+
+    expect(plan.intent).toBe("NO_OP");
+    expect(plan.reason).toMatch(/managed inventory upward control is enabled but unavailable/i);
+    expect(plan.reason).toMatch(/no withdrawable quote inventory/i);
+  });
+
+  it("refuses managed remove-quote candidates that exceed the configured inventory release cap", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 900,
+        predictedNextOutcome: "NO_CHANGE",
+        predictedNextRateBps: 900,
+        metadata: {
+          managedInventoryUpwardControlEnabled: true,
+          managedInventoryUpwardEligible: true,
+          managedTotalWithdrawableQuoteAmount: "1000",
+          managedRemoveQuoteCandidateCount: 1
+        },
+        candidates: [
+          {
+            id: "remove-too-much",
+            intent: "LEND",
+            minimumExecutionSteps: [
+              {
+                type: "REMOVE_QUOTE",
+                amount: 300n,
+                bucketIndex: 3000
+              }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 1000,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 300n,
+            explanation: "release too much managed inventory"
+          }
+        ]
+      }),
+      {
+        ...baseConfig,
+        targetRateBps: 1000,
+        toleranceMode: "absolute",
+        toleranceBps: 25,
+        enableManagedInventoryUpwardControl: true,
+        maxManagedInventoryReleaseBps: 2000
+      }
+    );
+
+    expect(plan.intent).toBe("NO_OP");
+    expect(plan.reason).toMatch(/inventory release cap/i);
+    expect(plan.reason).toMatch(/2000 bps/i);
+  });
+
+  it("refuses managed remove-quote candidates that fail the controllability gate", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 900,
+        predictedNextOutcome: "NO_CHANGE",
+        predictedNextRateBps: 900,
+        metadata: {
+          managedInventoryUpwardControlEnabled: true,
+          managedInventoryUpwardEligible: true,
+          managedTotalWithdrawableQuoteAmount: "1000",
+          managedRemoveQuoteCandidateCount: 1
+        },
+        candidates: [
+          {
+            id: "remove-low-sensitivity",
+            intent: "LEND",
+            minimumExecutionSteps: [
+              {
+                type: "REMOVE_QUOTE",
+                amount: 500n,
+                bucketIndex: 3000
+              }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 946,
+            resultingDistanceToTargetBps: 4,
+            quoteTokenDelta: 500n,
+            explanation: "release inventory for a marginal improvement"
+          }
+        ]
+      }),
+      {
+        ...baseConfig,
+        targetRateBps: 1000,
+        toleranceMode: "absolute",
+        toleranceBps: 50,
+        enableManagedInventoryUpwardControl: true,
+        minimumManagedSensitivityBpsPer10PctRelease: 10
+      }
+    );
+
+    expect(plan.intent).toBe("NO_OP");
+    expect(plan.reason).toMatch(/controllability gate/i);
+    expect(plan.reason).toMatch(/10 bps per 10% inventory release/i);
   });
 
   it("can choose a candidate using planningRateBps instead of only the next update rate", () => {
@@ -483,5 +719,133 @@ describe("planCycle", () => {
 
     expect(plan.intent).toBe("LEND");
     expect(plan.reason).toMatch(/less operator capital|lend path reaches the band/);
+  });
+
+  it("surfaces a 'no exact managed candidate beat the passive path' reason when eligibility holds but no candidate clears the improvement threshold", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 900,
+        predictedNextOutcome: "NO_CHANGE",
+        predictedNextRateBps: 900,
+        metadata: {
+          managedInventoryUpwardControlEnabled: true,
+          managedInventoryUpwardEligible: true,
+          managedTotalWithdrawableQuoteAmount: "1000",
+          managedRemoveQuoteCandidateCount: 1
+        },
+        candidates: [
+          {
+            id: "too-small-improvement",
+            intent: "LEND",
+            minimumExecutionSteps: [
+              {
+                type: "REMOVE_QUOTE",
+                amount: 100n,
+                bucketIndex: 3000
+              }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 905,
+            resultingDistanceToTargetBps: 95,
+            quoteTokenDelta: 100n,
+            explanation: "marginal improvement"
+          }
+        ]
+      }),
+      {
+        ...baseConfig,
+        targetRateBps: 1000,
+        toleranceMode: "absolute",
+        toleranceBps: 25,
+        enableManagedInventoryUpwardControl: true,
+        minimumManagedImprovementBps: 50
+      }
+    );
+
+    expect(plan.intent).toBe("NO_OP");
+    expect(plan.reason).toMatch(/no candidate changes the next-rate outcome|managed inventory upward control/i);
+  });
+
+  it("surfaces a distinct reason when managed totals are missing rather than release-cap blaming", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 900,
+        predictedNextOutcome: "NO_CHANGE",
+        predictedNextRateBps: 900,
+        metadata: {
+          managedInventoryUpwardControlEnabled: true,
+          managedInventoryUpwardEligible: true,
+          managedRemoveQuoteCandidateCount: 1
+        },
+        candidates: [
+          {
+            id: "any-remove",
+            intent: "LEND",
+            minimumExecutionSteps: [
+              { type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 3000 }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 1000,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 100n,
+            explanation: "remove"
+          }
+        ]
+      }),
+      {
+        ...baseConfig,
+        targetRateBps: 1000,
+        toleranceMode: "absolute",
+        toleranceBps: 25,
+        enableManagedInventoryUpwardControl: true,
+        maxManagedInventoryReleaseBps: 2000
+      }
+    );
+
+    expect(plan.intent).toBe("NO_OP");
+    expect(plan.reason).toMatch(/withdrawable managed inventory totals/i);
+  });
+
+  it("filters out managed dual candidates when dual eligibility is false even if inventory is eligible", () => {
+    const plan = planCycle(
+      snapshot({
+        currentRateBps: 900,
+        predictedNextOutcome: "NO_CHANGE",
+        predictedNextRateBps: 900,
+        metadata: {
+          managedInventoryUpwardControlEnabled: true,
+          managedDualUpwardControlEnabled: true,
+          managedInventoryUpwardEligible: true,
+          managedDualUpwardEligible: false,
+          managedTotalWithdrawableQuoteAmount: "1000",
+          managedDualCandidateCount: 1
+        },
+        candidates: [
+          {
+            id: "dual-gated",
+            intent: "LEND_AND_BORROW",
+            minimumExecutionSteps: [
+              { type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 3000 },
+              { type: "DRAW_DEBT", amount: 50n, limitIndex: 3200, collateralAmount: 25n }
+            ],
+            predictedOutcome: "STEP_UP",
+            predictedRateBpsAfterNextUpdate: 1000,
+            resultingDistanceToTargetBps: 0,
+            quoteTokenDelta: 150n,
+            explanation: "dual path"
+          }
+        ]
+      }),
+      {
+        ...baseConfig,
+        targetRateBps: 1000,
+        toleranceMode: "absolute",
+        toleranceBps: 25,
+        enableManagedInventoryUpwardControl: true,
+        enableManagedDualUpwardControl: true
+      }
+    );
+
+    expect(plan.intent).toBe("NO_OP");
   });
 });

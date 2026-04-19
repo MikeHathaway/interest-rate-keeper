@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { assertGasCostWithinCap, estimateGasCostWei } from "../src/ajna/executor.js";
-import { resolveAjnaSignerAddress } from "../src/ajna/runtime.js";
-import { resolveSimulationExecutionCompatibility } from "../src/ajna/snapshot.js";
-import type { KeeperConfig } from "../src/types.js";
+import {
+  assertGasCostWithinCap,
+  estimateGasCostWei
+} from "../src/ajna/adapter/executor.js";
+import { resolveAjnaSignerAddress } from "../src/ajna/adapter/runtime.js";
+import { resolveSimulationExecutionCompatibility } from "../src/ajna/adapter/synthesis-policy.js";
+import type { KeeperConfig } from "../src/core/types.js";
 
 const baseConfig: KeeperConfig = {
   chainId: 8453,

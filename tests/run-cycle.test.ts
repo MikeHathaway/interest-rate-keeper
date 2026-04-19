@@ -4,10 +4,13 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { DryRunExecutionBackend, StepwiseExecutionBackend } from "../src/execute.js";
-import { runCycle } from "../src/run-cycle.js";
-import { StaticSnapshotSource } from "../src/snapshot.js";
-import type { KeeperConfig, PoolSnapshot } from "../src/types.js";
+import {
+  DryRunExecutionBackend,
+  StepwiseExecutionBackend
+} from "../src/core/cycle/execute.js";
+import { runCycle } from "../src/core/cycle/run-cycle.js";
+import { StaticSnapshotSource } from "../src/core/snapshot/file.js";
+import type { KeeperConfig, PoolSnapshot } from "../src/core/types.js";
 
 const baseConfig: KeeperConfig = {
   chainId: 8453,

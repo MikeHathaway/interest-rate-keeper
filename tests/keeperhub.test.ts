@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { DryRunExecutionBackend, StepwiseExecutionBackend } from "../src/execute.js";
+import {
+  DryRunExecutionBackend,
+  StepwiseExecutionBackend
+} from "../src/core/cycle/execute.js";
 import {
   formatKeeperHubResponse,
   resolveKeeperHubPayload,
@@ -113,6 +116,8 @@ describe("keeperhub", () => {
     });
 
     expect(payload.snapshot.candidates[0]?.additionalCollateralRequired).toBe(25n);
+    expect(payload.snapshot.candidates[0]?.quoteInventoryDeployed).toBe(100n);
+    expect(payload.snapshot.candidates[0]?.quoteInventoryReleased).toBe(0n);
     expect(payload.snapshot.candidates[0]?.netQuoteBorrowed).toBe(-50n);
     expect(payload.snapshot.candidates[0]?.operatorCapitalRequired).toBe(125n);
     expect(payload.snapshot.candidates[0]?.operatorCapitalAtRisk).toBe(125n);
@@ -291,6 +296,8 @@ describe("keeperhub", () => {
     expect(formatted.planningLookaheadUpdates).toBeUndefined();
     expect(formatted.capital).toEqual({
       quoteTokenDelta: "51",
+      quoteInventoryDeployed: "0",
+      quoteInventoryReleased: "0",
       additionalCollateralRequired: "25",
       netQuoteBorrowed: "51",
       operatorCapitalRequired: "25",
@@ -469,5 +476,44 @@ describe("keeperhub", () => {
     expect(formatted.candidateExecutionMode).toBe("advisory");
     expect(formatted.planningRateBps).toBe(990);
     expect(formatted.planningLookaheadUpdates).toBe(2);
+  });
+
+  it("marks inventory-backed plans in KeeperHub responses", () => {
+    const response = formatKeeperHubResponse({
+      dryRun: true,
+      status: "NO_OP",
+      reason: "managed remove-quote plan",
+      poolId: "base:pool",
+      chainId: 8453,
+      snapshotFingerprint: "snapshot",
+      transactionHashes: [],
+      executedSteps: [],
+      plan: {
+        intent: "LEND",
+        reason: "managed remove quote",
+        targetBand: {
+          minRateBps: 900,
+          maxRateBps: 1100
+        },
+        requiredSteps: [
+          {
+            type: "REMOVE_QUOTE",
+            amount: 100n,
+            bucketIndex: 3000
+          }
+        ],
+        predictedOutcomeAfterPlan: "STEP_UP",
+        predictedRateBpsAfterNextUpdate: 1000,
+        quoteTokenDelta: 100n,
+        quoteInventoryDeployed: 0n,
+        quoteInventoryReleased: 100n,
+        additionalCollateralRequired: 0n,
+        netQuoteBorrowed: 100n,
+        operatorCapitalRequired: 0n,
+        operatorCapitalAtRisk: 0n
+      }
+    });
+
+    expect(response).toMatch(/"inventoryBacked":true/);
   });
 });

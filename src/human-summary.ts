@@ -1,13 +1,15 @@
-import { type CycleResult } from "./types.js";
+import { type CycleResult } from "./core/types.js";
 
 export function formatCycleCapitalSummary(
   result: Pick<CycleResult, "dryRun" | "status" | "plan">
 ): string {
+  const inventoryBacked = result.plan.requiredSteps.some((step) => step.type === "REMOVE_QUOTE");
   return [
     "summary",
     `dry_run=${result.dryRun ? "true" : "false"}`,
     `status=${result.status}`,
     `intent=${result.plan.intent}`,
+    `inventory_backed=${inventoryBacked ? "true" : "false"}`,
     ...(result.plan.selectedCandidateExecutionMode === undefined
       ? []
       : [`candidate_mode=${result.plan.selectedCandidateExecutionMode}`]),
@@ -17,6 +19,8 @@ export function formatCycleCapitalSummary(
     ...(result.plan.planningRateBps === undefined
       ? []
       : [`planning_rate=${result.plan.planningRateBps}`]),
+    `inventory_deployed=${result.plan.quoteInventoryDeployed.toString()}`,
+    `inventory_released=${result.plan.quoteInventoryReleased.toString()}`,
     `required=${result.plan.operatorCapitalRequired.toString()}`,
     `at_risk=${result.plan.operatorCapitalAtRisk.toString()}`,
     `net_quote=${result.plan.netQuoteBorrowed.toString()}`,

@@ -4,20 +4,20 @@ import "dotenv/config";
 
 import { readFile } from "node:fs/promises";
 
-import { parseCliArgs, resolveKeeperConfig } from "./config.js";
-import { DryRunExecutionBackend, type ExecutionBackend } from "./execute.js";
+import { parseCliArgs, resolveKeeperConfig } from "./core/config/config.js";
+import { DryRunExecutionBackend, type ExecutionBackend } from "./core/cycle/execute.js";
 import { formatCycleCapitalSummary } from "./human-summary.js";
 import {
   formatKeeperHubResponse,
   resolveKeeperHubPayload,
   runKeeperHubPayload
 } from "./keeperhub.js";
-import { runCycle } from "./run-cycle.js";
-import { FileSnapshotSource } from "./snapshot.js";
-import { createAjnaExecutionBackend } from "./ajna/executor.js";
-import { AjnaRpcSnapshotSource } from "./ajna/snapshot.js";
-import { safeJsonStringify } from "./json.js";
-import { type KeeperConfig } from "./types.js";
+import { runCycle } from "./core/cycle/run-cycle.js";
+import { FileSnapshotSource } from "./core/snapshot/file.js";
+import { createAjnaExecutionBackend } from "./ajna/adapter/executor.js";
+import { AjnaRpcSnapshotSource } from "./ajna/adapter/synthesis-policy.js";
+import { safeJsonStringify } from "./core/support/json.js";
+import { type KeeperConfig } from "./core/types.js";
 
 function resolveBackend(config: KeeperConfig, dryRun: boolean): ExecutionBackend {
   return dryRun ? new DryRunExecutionBackend() : createAjnaExecutionBackend(config);
