@@ -148,6 +148,11 @@ export interface PoolSnapshotMetadata {
   managedConfiguredBucketCount?: number;
   managedMaxWithdrawableQuoteAmount?: string;
   managedTotalWithdrawableQuoteAmount?: string;
+  // Comma-separated "bucketIndex:amount" pairs, e.g. "2618:1000000,2619:2000000".
+  // Captures the per-bucket withdrawable so recheck can validate the specific
+  // buckets a plan targets rather than the aggregate alone (see
+  // per_bucket_availability check in managed-plan-evaluation).
+  managedPerBucketWithdrawableQuoteAmount?: string;
   managedRemoveQuoteCandidateCount?: number;
   managedDualCandidateCount?: number;
 }

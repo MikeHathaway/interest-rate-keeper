@@ -16,7 +16,10 @@ import {
   smallestBigInt
 } from "../../domain.js";
 import { synthesizeAjnaLendCandidate } from "./heuristic.js";
-import { readAjnaPoolRateStateOnly } from "../../read/pool-state.js";
+import {
+  fingerprintLenderBucketState,
+  readAjnaPoolRateStateOnly
+} from "../../read/pool-state.js";
 import {
   buildSimulationPreamble,
   resolveEffectiveAccountState
@@ -525,6 +528,12 @@ export async function synthesizeAjnaLendCandidateViaSimulation(
             quoteTokenDelta: selected.amount,
             planningRateBps: selected.evaluation.terminalRateBps,
             planningLookaheadUpdates: lookaheadUpdates,
+            // Binds the candidate to the exact lender bucket state used at
+            // synthesis time. At preSubmitRecheck, the fresh snapshot
+            // re-synthesizes with fresh bucket state and the fingerprint will
+            // differ if LP / deposit / accumulator shifted, producing a
+            // CANDIDATE_INVALIDATED failure before we submit.
+            validationSignature: fingerprintLenderBucketState(lenderBucketState),
             explanation: `simulation-backed remove-quote result improves the ${lookaheadUpdates}-update path from ${baselinePath.firstOutcome} to ${selected.evaluation.predictedOutcome}`
           };
           const finalizedCandidate = finalizeCandidate(candidate);

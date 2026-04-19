@@ -76,6 +76,31 @@ type BaseFactoryCuratorTestContext = {
     probedMatches: ProbedManagedMatch[];
     observations: string[];
   }>;
+  executeTargetedAjnaInfoManagedUsedPoolRemoveQuote: (
+    archetypeId: string
+  ) => Promise<{
+    archetypeId: string;
+    candidate: {
+      minimumExecutionSteps: Array<{ type: string }>;
+      intent: string;
+      predictedRateBpsAfterNextUpdate: number;
+      planningRateBps?: number;
+      planningLookaheadUpdates?: number;
+    };
+    currentRateBps: number;
+    targetRateBps: number;
+    removeQuoteAmount: bigint;
+    lenderBucketIndex: number;
+    bucketDepositBeforeWad: bigint;
+    bucketDepositAfterWad: bigint;
+    transactionHash: `0x${string}`;
+    gasUsed: bigint;
+    submissionDurationMs: number;
+    quoteTokenScale: bigint;
+    rateBpsAfterFirstUpdate: number;
+    rateBpsAfterTerminalUpdate?: number;
+    observations: string[];
+  }>;
 };
 
 export function registerBaseFactoryCuratorTests(
@@ -93,7 +118,8 @@ export function registerBaseFactoryCuratorTests(
     inspectAjnaInfoManagedUsedPoolArchetypes,
     probeAjnaInfoManagedUsedPoolManualRemoveQuote,
     findTargetedAjnaInfoManagedUsedPoolInventoryCandidate,
-    probeAjnaInfoManagedUsedPoolManualRemoveQuoteAndBorrow
+    probeAjnaInfoManagedUsedPoolManualRemoveQuoteAndBorrow,
+    executeTargetedAjnaInfoManagedUsedPoolRemoveQuote
   } = context;
 
   itBaseExperimental(
@@ -244,6 +270,100 @@ export function registerBaseFactoryCuratorTests(
       );
 
       expect(result.candidate, result.observations.join(" | ")).toBeUndefined();
+    },
+    420_000
+  );
+
+  itBaseSlow(
+    "executes the targeted curator-mode REMOVE_QUOTE on the dog/usdc archetype and decreases the target bucket's deposit on-chain",
+    async () => {
+      const result = await executeTargetedAjnaInfoManagedUsedPoolRemoveQuote(
+        "ajna-info-managed-dog-usdc-2026-03-18"
+      );
+
+      expect(
+        result.candidate.minimumExecutionSteps.some((step) => step.type === "REMOVE_QUOTE"),
+        result.observations.join(" | ")
+      ).toBe(true);
+      expect(result.candidate.intent, result.observations.join(" | ")).toBe("LEND");
+      expect(result.removeQuoteAmount, result.observations.join(" | ")).toBeGreaterThan(0n);
+      expect(
+        result.bucketDepositAfterWad,
+        result.observations.join(" | ")
+      ).toBeLessThan(result.bucketDepositBeforeWad);
+      // tx receipt status is 'success' (the helper throws otherwise)
+      expect(result.transactionHash, result.observations.join(" | ")).toMatch(/^0x[0-9a-fA-F]+$/);
+
+      // Realized-rate verification: after warping to the next Ajna rate-update
+      // boundary and calling updateInterest, the on-chain rate must equal what
+      // the simulation-backed synthesis predicted. Any drift here would mean
+      // the planner disagrees with the actual protocol math for this state.
+      expect(
+        result.rateBpsAfterFirstUpdate,
+        result.observations.join(" | ")
+      ).toBe(result.candidate.predictedRateBpsAfterNextUpdate);
+
+      if ((result.candidate.planningLookaheadUpdates ?? 1) > 1) {
+        expect(
+          result.rateBpsAfterTerminalUpdate,
+          result.observations.join(" | ")
+        ).toBe(result.candidate.planningRateBps);
+      }
+
+      // Ajna stores quote amounts in WAD (1e18) regardless of the underlying
+      // ERC20 decimals; quoteTokenScale = 1e18 / 10^nativeDecimals.
+      const quoteTokenDecimals = Math.round(
+        Math.log10(Number(10n ** 18n / result.quoteTokenScale))
+      );
+      const wadToHuman = (wad: bigint) => Number(wad) / 1e18;
+      const removeQuoteHuman = wadToHuman(result.removeQuoteAmount);
+      const bucketDepositBeforeHuman = wadToHuman(result.bucketDepositBeforeWad);
+      const bucketDepositAfterHuman = wadToHuman(result.bucketDepositAfterWad);
+      const bucketDepositDeltaHuman =
+        bucketDepositBeforeHuman - bucketDepositAfterHuman;
+      const predictedMoveBps =
+        result.candidate.predictedRateBpsAfterNextUpdate - result.currentRateBps;
+      const terminalMoveBps =
+        (result.candidate.planningRateBps ??
+          result.candidate.predictedRateBpsAfterNextUpdate) - result.currentRateBps;
+      const realizedFirstMoveBps =
+        result.rateBpsAfterFirstUpdate - result.currentRateBps;
+      const realizedTerminalMoveBps =
+        result.rateBpsAfterTerminalUpdate === undefined
+          ? null
+          : result.rateBpsAfterTerminalUpdate - result.currentRateBps;
+      console.log(
+        "[curator-dog-usdc-summary]",
+        JSON.stringify(
+          {
+            archetype: result.archetypeId,
+            currentRateBps: result.currentRateBps,
+            targetRateBps: result.targetRateBps,
+            predictedNextRateBps: result.candidate.predictedRateBpsAfterNextUpdate,
+            predictedMoveBps,
+            realizedRateBpsAfterFirstUpdate: result.rateBpsAfterFirstUpdate,
+            realizedFirstMoveBps,
+            planningRateBps: result.candidate.planningRateBps ?? null,
+            planningLookaheadUpdates: result.candidate.planningLookaheadUpdates ?? 1,
+            terminalMoveBps,
+            realizedRateBpsAfterTerminalUpdate:
+              result.rateBpsAfterTerminalUpdate ?? null,
+            realizedTerminalMoveBps,
+            lenderBucketIndex: result.lenderBucketIndex,
+            removeQuoteAmountRaw: result.removeQuoteAmount.toString(),
+            removeQuoteAmountQuoteToken: removeQuoteHuman,
+            quoteTokenDecimals,
+            bucketDepositBeforeQuoteToken: bucketDepositBeforeHuman,
+            bucketDepositAfterQuoteToken: bucketDepositAfterHuman,
+            bucketDepositDeltaQuoteToken: bucketDepositDeltaHuman,
+            gasUsed: result.gasUsed.toString(),
+            submissionDurationMs: result.submissionDurationMs,
+            transactionHash: result.transactionHash
+          },
+          null,
+          2
+        )
+      );
     },
     420_000
   );

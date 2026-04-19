@@ -135,7 +135,8 @@ const {
   inspectAjnaInfoManagedUsedPoolArchetypes,
   findTargetedAjnaInfoManagedUsedPoolInventoryCandidate,
   probeAjnaInfoManagedUsedPoolManualRemoveQuote,
-  probeAjnaInfoManagedUsedPoolManualRemoveQuoteAndBorrow
+  probeAjnaInfoManagedUsedPoolManualRemoveQuoteAndBorrow,
+  executeTargetedAjnaInfoManagedUsedPoolRemoveQuote
 } = createBaseFactoryCuratorHelpers({
   createExistingBorrowerSameCycleFixture,
   createExistingBorrowerMultiBucketFixture,
@@ -818,7 +819,8 @@ describeIf("Base factory fork integration", () => {
     inspectAjnaInfoManagedUsedPoolArchetypes,
     probeAjnaInfoManagedUsedPoolManualRemoveQuote,
     findTargetedAjnaInfoManagedUsedPoolInventoryCandidate,
-    probeAjnaInfoManagedUsedPoolManualRemoveQuoteAndBorrow
+    probeAjnaInfoManagedUsedPoolManualRemoveQuoteAndBorrow,
+    executeTargetedAjnaInfoManagedUsedPoolRemoveQuote
   });
 
   registerBaseFactoryBorrowerTests({

@@ -891,4 +891,187 @@ describe("policy", () => {
     );
     expect(failure).toBeUndefined();
   });
+
+  it("rejects managed plans when the plan's target bucket no longer has enough withdrawable inventory", () => {
+    // The fresh aggregate is healthy (bucket 2 has plenty), but the plan targets
+    // bucket 1 which has been drained below the plan's amount. Without the
+    // per-bucket check, the aggregate availability check would pass and the
+    // plan would reach on-chain submit and revert.
+    const removeQuotePlan: CyclePlan = {
+      ...plan,
+      requiredSteps: [
+        { type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 1 }
+      ],
+      quoteTokenDelta: 100n,
+      quoteInventoryDeployed: 0n,
+      quoteInventoryReleased: 100n,
+      netQuoteBorrowed: 100n,
+      operatorCapitalRequired: 0n,
+      operatorCapitalAtRisk: 0n
+    };
+
+    const failure = validatePlan(
+      removeQuotePlan,
+      {
+        ...snapshot,
+        metadata: {
+          ...snapshot.metadata,
+          managedInventoryUpwardEligible: true,
+          managedTotalWithdrawableQuoteAmount: "10050",
+          managedPerBucketWithdrawableQuoteAmount: "1:50,2:10000"
+        }
+      },
+      { ...config, enableManagedInventoryUpwardControl: true }
+    );
+
+    expect(failure?.code).toBe("MANAGED_CONTROL_UNAVAILABLE");
+    expect(failure?.reason).toMatch(/managed bucket 1 no longer exposes enough withdrawable inventory/);
+  });
+
+  it("accepts managed plans when the plan's target bucket still has enough inventory even if another bucket was drained", () => {
+    const removeQuotePlan: CyclePlan = {
+      ...plan,
+      requiredSteps: [
+        { type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 1 }
+      ],
+      predictedRateBpsAfterNextUpdate: 950,
+      quoteTokenDelta: 100n,
+      quoteInventoryDeployed: 0n,
+      quoteInventoryReleased: 100n,
+      netQuoteBorrowed: 100n,
+      operatorCapitalRequired: 0n,
+      operatorCapitalAtRisk: 0n
+    };
+
+    const failure = managedPrefixSafetyGuards(
+      removeQuotePlan,
+      {
+        ...snapshot,
+        predictedNextRateBps: 700,
+        metadata: {
+          ...snapshot.metadata,
+          managedInventoryUpwardEligible: true,
+          managedTotalWithdrawableQuoteAmount: "1000",
+          // bucket 1 (target) still has 500; bucket 2 dropped to 500 too but
+          // that does not matter because the plan does not touch it
+          managedPerBucketWithdrawableQuoteAmount: "1:500,2:500"
+        }
+      },
+      { ...config, enableManagedInventoryUpwardControl: true }
+    );
+
+    expect(failure).toBeUndefined();
+  });
+
+  it("tolerates snapshots that did not emit managedPerBucketWithdrawableQuoteAmount at all", () => {
+    // Legacy / older-writer snapshots may not include the per-bucket field.
+    // The per-bucket check must fall through cleanly rather than failing
+    // closed; the aggregate availability check already catches fully depleted
+    // inventory.
+    const removeQuotePlan: CyclePlan = {
+      ...plan,
+      requiredSteps: [
+        { type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 1 }
+      ],
+      predictedRateBpsAfterNextUpdate: 950,
+      quoteTokenDelta: 100n,
+      quoteInventoryDeployed: 0n,
+      quoteInventoryReleased: 100n,
+      netQuoteBorrowed: 100n,
+      operatorCapitalRequired: 0n,
+      operatorCapitalAtRisk: 0n
+    };
+
+    const failure = managedPrefixSafetyGuards(
+      removeQuotePlan,
+      {
+        ...snapshot,
+        predictedNextRateBps: 700,
+        metadata: {
+          ...snapshot.metadata,
+          managedInventoryUpwardEligible: true,
+          managedTotalWithdrawableQuoteAmount: "1000"
+          // managedPerBucketWithdrawableQuoteAmount intentionally omitted
+        }
+      },
+      { ...config, enableManagedInventoryUpwardControl: true }
+    );
+
+    expect(failure).toBeUndefined();
+  });
+
+  it("aborts preSubmitRecheck when the candidate validationSignature drifts between plan and fresh snapshot", () => {
+    // This mirrors the REMOVE_QUOTE auto-candidate behavior: the fresh snapshot
+    // still produces a candidate with the same id/steps but the lender bucket
+    // state changed (lpBalance dropped), so the validationSignature no longer
+    // matches what the plan captured at synthesis time.
+    const eligibleManagedMetadata = {
+      ...snapshot.metadata,
+      managedInventoryUpwardEligible: true,
+      managedTotalWithdrawableQuoteAmount: "1000",
+      managedPerBucketWithdrawableQuoteAmount: "1:1000"
+    };
+
+    const previousSnapshot: PoolSnapshot = {
+      ...snapshot,
+      predictedNextRateBps: 700,
+      metadata: eligibleManagedMetadata,
+      candidates: [
+        {
+          id: "sim-lend:1:remove-quote:100",
+          intent: "LEND",
+          validationSignature: "1:1000:0:1:0:0:100000:1:100",
+          minimumExecutionSteps: [
+            { type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 1 }
+          ],
+          predictedOutcome: "STEP_UP",
+          predictedRateBpsAfterNextUpdate: 950,
+          resultingDistanceToTargetBps: 0,
+          quoteTokenDelta: 100n,
+          explanation: "sim remove quote"
+        }
+      ]
+    };
+
+    const freshSnapshot: PoolSnapshot = {
+      ...previousSnapshot,
+      snapshotFingerprint: "different",
+      blockNumber: 11n,
+      blockTimestamp: 1_012,
+      snapshotAgeSeconds: 8,
+      candidates: [
+        {
+          ...previousSnapshot.candidates[0]!,
+          // same id and steps so step-body comparison would pass, but lp
+          // balance drifted, so the fingerprint has changed
+          validationSignature: "1:500:0:1:0:0:50000:1:50"
+        }
+      ]
+    };
+
+    const removeQuotePlan: CyclePlan = {
+      ...plan,
+      selectedCandidateId: "sim-lend:1:remove-quote:100",
+      requiredSteps: [
+        { type: "REMOVE_QUOTE", amount: 100n, bucketIndex: 1 }
+      ],
+      predictedRateBpsAfterNextUpdate: 950,
+      quoteTokenDelta: 100n,
+      quoteInventoryDeployed: 0n,
+      quoteInventoryReleased: 100n,
+      netQuoteBorrowed: 100n,
+      operatorCapitalRequired: 0n,
+      operatorCapitalAtRisk: 0n
+    };
+
+    const failure = preSubmitRecheck(
+      removeQuotePlan,
+      previousSnapshot,
+      freshSnapshot,
+      { ...config, enableManagedInventoryUpwardControl: true }
+    );
+
+    expect(failure?.code).toBe("CANDIDATE_INVALIDATED");
+    expect(failure?.reason).toMatch(/selected candidate context changed/);
+  });
 });

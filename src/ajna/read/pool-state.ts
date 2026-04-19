@@ -133,22 +133,24 @@ export function calculateMaxWithdrawableQuoteAmountFromLp(options: {
   return quoteAmount > options.bucketDeposit ? options.bucketDeposit : quoteAmount;
 }
 
+export function fingerprintLenderBucketState(
+  state: SimulationLenderBucketState
+): string {
+  return [
+    state.bucketIndex,
+    state.lpBalance.toString(),
+    state.depositTime.toString(),
+    state.lpAccumulator.toString(),
+    state.availableCollateral.toString(),
+    state.bankruptcyTime.toString(),
+    state.bucketDeposit.toString(),
+    state.bucketScale.toString(),
+    state.maxWithdrawableQuoteAmount.toString()
+  ].join(":");
+}
+
 function serializeLenderBucketStates(states: readonly SimulationLenderBucketState[]): string {
-  return states
-    .map((state) =>
-      [
-        state.bucketIndex,
-        state.lpBalance.toString(),
-        state.depositTime.toString(),
-        state.lpAccumulator.toString(),
-        state.availableCollateral.toString(),
-        state.bankruptcyTime.toString(),
-        state.bucketDeposit.toString(),
-        state.bucketScale.toString(),
-        state.maxWithdrawableQuoteAmount.toString()
-      ].join(":")
-    )
-    .join("|");
+  return states.map(fingerprintLenderBucketState).join("|");
 }
 
 export async function readAjnaPoolState(

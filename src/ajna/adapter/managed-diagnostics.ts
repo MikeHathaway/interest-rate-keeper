@@ -2,7 +2,10 @@ import { type AjnaPoolStateRead, type SimulationAccountState } from "../domain.j
 import { hasUninitializedAjnaEmaState } from "../math/rate-state.js";
 import { resolveRemoveQuoteBucketIndexes } from "../search/index.js";
 import { buildTargetBand } from "../../core/planning/planner.js";
-import { type ManagedMetadataKey } from "../../core/snapshot/metadata.js";
+import {
+  type ManagedMetadataKey,
+  serializeManagedPerBucketWithdrawable
+} from "../../core/snapshot/metadata.js";
 import { type KeeperConfig } from "../../core/types.js";
 
 export type ManagedInventoryDiagnosticsWrite = Partial<
@@ -19,6 +22,7 @@ export type ManagedInventoryDiagnosticsWrite = Partial<
   managedConfiguredBucketCount?: number;
   managedMaxWithdrawableQuoteAmount?: string;
   managedTotalWithdrawableQuoteAmount?: string;
+  managedPerBucketWithdrawableQuoteAmount?: string;
 };
 
 /**
@@ -60,6 +64,17 @@ export function deriveManagedInventoryDiagnostics(
         : largest,
     0n
   );
+  const perBucketWithdrawableMap = new Map<number, bigint>();
+  for (const bucketState of eligibleLenderBucketStates) {
+    perBucketWithdrawableMap.set(
+      bucketState.bucketIndex,
+      bucketState.maxWithdrawableQuoteAmount
+    );
+  }
+  const perBucketWithdrawableSerialized =
+    perBucketWithdrawableMap.size === 0
+      ? undefined
+      : serializeManagedPerBucketWithdrawable(perBucketWithdrawableMap);
   const preWindowState = readState.immediatePrediction.secondsUntilNextRateUpdate > 0;
   const usedPoolLike =
     (readState.loansState?.noOfLoans ?? 0n) > 1n &&
@@ -143,6 +158,9 @@ export function deriveManagedInventoryDiagnostics(
     managedInventoryBucketCount: eligibleLenderBucketStates.length,
     managedConfiguredBucketCount: configuredBucketCount,
     managedMaxWithdrawableQuoteAmount: maxWithdrawableQuoteAmount.toString(),
-    managedTotalWithdrawableQuoteAmount: totalWithdrawableQuoteAmount.toString()
+    managedTotalWithdrawableQuoteAmount: totalWithdrawableQuoteAmount.toString(),
+    ...(perBucketWithdrawableSerialized === undefined
+      ? {}
+      : { managedPerBucketWithdrawableQuoteAmount: perBucketWithdrawableSerialized })
   };
 }

@@ -295,6 +295,7 @@ function buildPoolSnapshot(
     managedConfiguredBucketCount?: number;
     managedMaxWithdrawableQuoteAmount?: string;
     managedTotalWithdrawableQuoteAmount?: string;
+    managedPerBucketWithdrawableQuoteAmount?: string;
     managedRemoveQuoteCandidateCount?: number;
     managedDualCandidateCount?: number;
   }
@@ -442,6 +443,12 @@ function buildPoolSnapshot(
         : {
             managedTotalWithdrawableQuoteAmount:
               diagnostics.managedTotalWithdrawableQuoteAmount
+          }),
+      ...(diagnostics?.managedPerBucketWithdrawableQuoteAmount === undefined
+        ? {}
+        : {
+            managedPerBucketWithdrawableQuoteAmount:
+              diagnostics.managedPerBucketWithdrawableQuoteAmount
           }),
       ...(diagnostics?.managedRemoveQuoteCandidateCount === undefined
         ? {}

@@ -218,6 +218,18 @@ function toGuardFailure(failure: ManagedCheckFailure): GuardFailure {
         reason:
           "managed upward control is configured, but the fresh snapshot no longer exposes withdrawable managed inventory totals"
       };
+    case "per_bucket_availability":
+      if (failure.kind === "missing_per_bucket_withdrawable") {
+        return {
+          code: "MANAGED_CONTROL_UNAVAILABLE",
+          reason:
+            "managed upward control is configured, but the fresh snapshot no longer exposes per-bucket withdrawable amounts"
+        };
+      }
+      return {
+        code: "MANAGED_CONTROL_UNAVAILABLE",
+        reason: `managed bucket ${failure.bucketIndex} no longer exposes enough withdrawable inventory for the plan: requested ${failure.requestedAmount?.toString()}, available ${failure.availableAmount?.toString()}`
+      };
     case "release_cap":
       // missing_withdrawable_totals is caught by the "availability" check that
       // policy always runs first, so in practice only exceeds_release_cap
@@ -325,6 +337,7 @@ function snapshotGuards(
 const PREFIX_SAFETY_CHECKS: readonly ManagedCheckName[] = [
   "eligibility",
   "availability",
+  "per_bucket_availability",
   "release_cap"
 ];
 

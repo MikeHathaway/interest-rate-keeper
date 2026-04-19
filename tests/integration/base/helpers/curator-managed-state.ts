@@ -16,6 +16,7 @@ import { calculateMaxWithdrawableQuoteAmountFromLp } from "../../../../src/ajna/
 import { fenwickIndexToPriceWad } from "./protocol.js";
 import { EXPERIMENTAL_AJNA_INFO_MANAGED_USED_POOL_ARCHETYPES } from "./fixtures.js";
 import {
+  advanceAndApplyEligibleUpdatesDirect,
   capturePassiveRateBranch,
   DEFAULT_ANVIL_PRIVATE_KEY,
   distanceToTargetRateBps,
@@ -1105,10 +1106,295 @@ export function createBaseFactoryCuratorManagedStateHelpers(_deps: CuratorHelper
     };
   }
 
+  /**
+   * End-to-end execution proof for curator-mode REMOVE_QUOTE on a pinned real
+   * managed archetype. The production keeper cannot be exercised with the
+   * curator's real private key, so this helper instead:
+   *   1. Runs the exact same snapshot + planning path the keeper would run
+   *      (AjnaRpcSnapshotSource + enableManagedInventoryUpwardControl).
+   *   2. Asserts the REMOVE_QUOTE candidate surfaces.
+   *   3. Impersonates the curator via anvil and submits the planned
+   *      removeQuoteToken call directly on-chain against the fork.
+   *   4. Verifies the call succeeded and the target bucket's deposit dropped
+   *      by the planned amount, proving the planned action actually executes
+   *      against real pool state.
+   * This closes the gap between "candidate surfaces" and "candidate executes
+   * without reverting on real fork state" for the curator-only path.
+   */
+  async function executeTargetedAjnaInfoManagedUsedPoolRemoveQuote(
+    archetypeId: string
+  ): Promise<{
+    archetypeId: string;
+    candidate: PlanCandidate;
+    currentRateBps: number;
+    targetRateBps: number;
+    removeQuoteAmount: bigint;
+    lenderBucketIndex: number;
+    bucketDepositBeforeWad: bigint;
+    bucketDepositAfterWad: bigint;
+    transactionHash: `0x${string}`;
+    gasUsed: bigint;
+    submissionDurationMs: number;
+    quoteTokenAddress: `0x${string}`;
+    quoteTokenScale: bigint;
+    rateBpsAfterFirstUpdate: number;
+    rateBpsAfterTerminalUpdate?: number;
+    observations: string[];
+  }> {
+    const upstreamRpcUrl = process.env.BASE_RPC_URL ?? "https://mainnet.base.org";
+    const archetype = EXPERIMENTAL_AJNA_INFO_MANAGED_USED_POOL_ARCHETYPES.find(
+      (candidate) => candidate.id === archetypeId
+    );
+    if (!archetype) {
+      throw new Error(`unknown ajna.info managed archetype: ${archetypeId}`);
+    }
+
+    const observations: string[] = [];
+    process.env.AJNA_KEEPER_PRIVATE_KEY = DEFAULT_ANVIL_PRIVATE_KEY;
+
+    return withTemporaryAnvilFork(
+      {
+        rpcUrl: upstreamRpcUrl,
+        chainId: 8453,
+        blockNumber: archetype.blockNumber
+      },
+      async ({ publicClient, testClient, walletClient, rpcUrl }) => {
+        const chainNow = Number((await publicClient.getBlock()).timestamp);
+        const [currentRateInfo, bucketInfoBefore] = await Promise.all([
+          publicClient.readContract({
+            address: archetype.poolAddress,
+            abi: ajnaPoolAbi,
+            functionName: "interestRateInfo"
+          }),
+          publicClient.readContract({
+            address: archetype.poolAddress,
+            abi: ajnaPoolAbi,
+            functionName: "bucketInfo",
+            args: [BigInt(archetype.lenderBucketIndex)]
+          })
+        ]);
+        const [currentRateWad] = currentRateInfo;
+        const currentRateBps = Number(
+          (currentRateWad * 10_000n + 10n ** 17n / 2n) / 10n ** 18n
+        );
+        const targetRateBps = currentRateBps + archetype.targetOffsetBps;
+        const bucketDepositBeforeWad = bucketInfoBefore[3];
+
+        const config = resolveKeeperConfig({
+          chainId: 8453,
+          poolAddress: archetype.poolAddress,
+          poolId: `8453:${archetype.poolAddress.toLowerCase()}`,
+          rpcUrl,
+          borrowerAddress: archetype.borrowerAddress,
+          simulationSenderAddress: archetype.senderAddress,
+          targetRateBps,
+          toleranceBps: archetype.toleranceBps,
+          toleranceMode: "absolute",
+          completionPolicy: "next_move_would_overshoot",
+          executionBufferBps: 0,
+          removeQuoteBucketIndex: archetype.lenderBucketIndex,
+          borrowSimulationLookaheadUpdates: 2,
+          maxQuoteTokenExposure: "1000000000000000000000000",
+          maxBorrowExposure: "1000000000000000000000",
+          snapshotAgeMaxSeconds: 3600,
+          minTimeBeforeRateWindowSeconds: 120,
+          minExecutableActionQuoteToken: "1",
+          recheckBeforeSubmit: true,
+          enableSimulationBackedLendSynthesis: true,
+          enableSimulationBackedBorrowSynthesis: true,
+          enableManagedInventoryUpwardControl: true,
+          enableManagedDualUpwardControl: false,
+          enableHeuristicLendSynthesis: false,
+          enableHeuristicBorrowSynthesis: false
+        });
+
+        const snapshot = await new AjnaRpcSnapshotSource(config, {
+          publicClient,
+          now: () => chainNow
+        }).getSnapshot();
+        const metadata = readPoolSnapshotMetadata(snapshot);
+
+        const candidate = snapshot.candidates.find(
+          (currentCandidate): currentCandidate is PlanCandidate =>
+            currentCandidate.candidateSource === "simulation" &&
+            currentCandidate.intent === "LEND" &&
+            currentCandidate.minimumExecutionSteps.some((step) => step.type === "REMOVE_QUOTE")
+        );
+
+        if (candidate === undefined) {
+          throw new Error(
+            `expected a simulation-backed REMOVE_QUOTE candidate for archetype ${archetype.id}, found none. candidates=${snapshot.candidates
+              .map(
+                (c) =>
+                  `${c.intent}:${c.minimumExecutionSteps
+                    .map((s) => s.type)
+                    .join("+")}:${c.candidateSource ?? "-"}`
+              )
+              .join(",") || "none"}`
+          );
+        }
+
+        const removeQuoteStep = candidate.minimumExecutionSteps.find(
+          (step): step is Extract<typeof step, { type: "REMOVE_QUOTE" }> =>
+            step.type === "REMOVE_QUOTE"
+        );
+        if (removeQuoteStep === undefined) {
+          throw new Error(
+            `candidate ${candidate.id} unexpectedly omits a REMOVE_QUOTE step`
+          );
+        }
+
+        const perBucketSerialized =
+          metadata.managedPerBucketWithdrawableQuoteAmount;
+        observations.push(
+          [
+            `archetype=${archetype.id}`,
+            `block=${archetype.blockNumber.toString()}`,
+            `bucket=${removeQuoteStep.bucketIndex}`,
+            `amount=${removeQuoteStep.amount.toString()}`,
+            `candidate=${candidate.id}`,
+            `validationSignature=${candidate.validationSignature ?? "none"}`,
+            `perBucketMetadata=${perBucketSerialized ?? "none"}`,
+            `predictedRate=${candidate.predictedRateBpsAfterNextUpdate}`,
+            `planningRate=${candidate.planningRateBps ?? "-"}`,
+            `planningLookahead=${candidate.planningLookaheadUpdates ?? 1}`
+          ].join(" ")
+        );
+
+        // Per-bucket metadata should include the target bucket for the plan
+        // we just synthesized, proving the new per-bucket write path is live.
+        if (perBucketSerialized === undefined) {
+          throw new Error(
+            `managedPerBucketWithdrawableQuoteAmount was not emitted for ${archetype.id}; per-bucket recheck would have nothing to validate`
+          );
+        }
+
+        await testClient.impersonateAccount({ address: archetype.senderAddress });
+        await testClient.setBalance({
+          address: archetype.senderAddress,
+          value: 10n ** 22n
+        });
+
+        const quoteTokenAddress = await publicClient.readContract({
+          address: archetype.poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "quoteTokenAddress"
+        });
+        const quoteTokenScale = await publicClient.readContract({
+          address: archetype.poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "quoteTokenScale"
+        });
+
+        const submissionStartedAtMs = Date.now();
+        const transactionHash = await walletClient.writeContract({
+          account: archetype.senderAddress,
+          chain: undefined,
+          address: archetype.poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "removeQuoteToken",
+          args: [removeQuoteStep.amount, BigInt(removeQuoteStep.bucketIndex)]
+        });
+        const receipt = await publicClient.waitForTransactionReceipt({
+          hash: transactionHash
+        });
+        const submissionDurationMs = Date.now() - submissionStartedAtMs;
+        if (receipt.status !== "success") {
+          throw new Error(
+            `removeQuoteToken reverted on fork; archetype=${archetype.id} amount=${removeQuoteStep.amount.toString()} bucket=${removeQuoteStep.bucketIndex}`
+          );
+        }
+
+        const bucketInfoAfter = await publicClient.readContract({
+          address: archetype.poolAddress,
+          abi: ajnaPoolAbi,
+          functionName: "bucketInfo",
+          args: [BigInt(archetype.lenderBucketIndex)]
+        });
+        const bucketDepositAfterWad = bucketInfoAfter[3];
+
+        observations.push(
+          [
+            `bucketDepositBefore=${bucketDepositBeforeWad.toString()}`,
+            `bucketDepositAfter=${bucketDepositAfterWad.toString()}`,
+            `receiptStatus=${receipt.status}`,
+            `gasUsed=${receipt.gasUsed.toString()}`,
+            `submissionMs=${submissionDurationMs}`,
+            `txHash=${transactionHash}`
+          ].join(" ")
+        );
+
+        // Warp to the next Ajna rate-update boundary + call updateInterest so
+        // we observe the REALIZED rate, not just the simulator's prediction.
+        // Ajna rate updates are 12h minimum intervals. If the candidate used a
+        // multi-update lookahead (e.g. planningLookaheadUpdates=2), warp twice
+        // so we can compare the terminal rate to candidate.planningRateBps.
+        const rateProgressionStartedAtMs = Date.now();
+        const firstUpdate = await advanceAndApplyEligibleUpdatesDirect(
+          archetype.senderAddress,
+          publicClient,
+          walletClient,
+          testClient,
+          archetype.poolAddress,
+          1
+        );
+        const rateBpsAfterFirstUpdate = firstUpdate.currentRateBps;
+
+        let rateBpsAfterTerminalUpdate: number | undefined;
+        const lookaheadUpdates = candidate.planningLookaheadUpdates ?? 1;
+        if (lookaheadUpdates > 1) {
+          const terminalUpdate = await advanceAndApplyEligibleUpdatesDirect(
+            archetype.senderAddress,
+            publicClient,
+            walletClient,
+            testClient,
+            archetype.poolAddress,
+            lookaheadUpdates - 1
+          );
+          rateBpsAfterTerminalUpdate = terminalUpdate.currentRateBps;
+        }
+
+        observations.push(
+          [
+            `rateAfterFirstUpdate=${rateBpsAfterFirstUpdate}`,
+            `rateAfterTerminalUpdate=${rateBpsAfterTerminalUpdate ?? "n/a"}`,
+            `rateProgressionMs=${Date.now() - rateProgressionStartedAtMs}`
+          ].join(" ")
+        );
+
+        await testClient.stopImpersonatingAccount({
+          address: archetype.senderAddress
+        });
+
+        return {
+          archetypeId: archetype.id,
+          candidate,
+          currentRateBps,
+          targetRateBps,
+          removeQuoteAmount: removeQuoteStep.amount,
+          lenderBucketIndex: removeQuoteStep.bucketIndex,
+          bucketDepositBeforeWad,
+          bucketDepositAfterWad,
+          transactionHash,
+          gasUsed: receipt.gasUsed,
+          submissionDurationMs,
+          quoteTokenAddress,
+          quoteTokenScale,
+          rateBpsAfterFirstUpdate,
+          ...(rateBpsAfterTerminalUpdate === undefined
+            ? {}
+            : { rateBpsAfterTerminalUpdate }),
+          observations
+        };
+      }
+    );
+  }
+
   return {
     inspectAjnaInfoManagedUsedPoolArchetypes,
     findTargetedAjnaInfoManagedUsedPoolInventoryCandidate,
     probeAjnaInfoManagedUsedPoolManualRemoveQuote,
-    probeAjnaInfoManagedUsedPoolManualRemoveQuoteAndBorrow
+    probeAjnaInfoManagedUsedPoolManualRemoveQuoteAndBorrow,
+    executeTargetedAjnaInfoManagedUsedPoolRemoveQuote
   };
 }

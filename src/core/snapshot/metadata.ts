@@ -27,6 +27,7 @@ export interface ManagedControlSnapshotMetadata {
   managedConfiguredBucketCount?: number;
   managedMaxWithdrawableQuoteAmount?: bigint;
   managedTotalWithdrawableQuoteAmount?: bigint;
+  managedPerBucketWithdrawableQuoteAmount?: ReadonlyMap<number, bigint>;
   managedRemoveQuoteCandidateCount?: number;
   managedDualCandidateCount?: number;
 }
@@ -43,9 +44,48 @@ export const MANAGED_METADATA_KEYS = {
   managedConfiguredBucketCount: "managedConfiguredBucketCount",
   managedMaxWithdrawableQuoteAmount: "managedMaxWithdrawableQuoteAmount",
   managedTotalWithdrawableQuoteAmount: "managedTotalWithdrawableQuoteAmount",
+  managedPerBucketWithdrawableQuoteAmount: "managedPerBucketWithdrawableQuoteAmount",
   managedRemoveQuoteCandidateCount: "managedRemoveQuoteCandidateCount",
   managedDualCandidateCount: "managedDualCandidateCount"
 } as const;
+
+// Serializes the per-bucket withdrawable map to a compact "idx:amount,idx:amount"
+// string so it fits the scalar-only PoolSnapshotMetadata shape. Entries are
+// sorted by bucket index for deterministic fingerprinting.
+export function serializeManagedPerBucketWithdrawable(
+  perBucket: ReadonlyMap<number, bigint>
+): string {
+  return Array.from(perBucket.entries())
+    .sort(([left], [right]) => left - right)
+    .map(([bucketIndex, amount]) => `${bucketIndex}:${amount.toString()}`)
+    .join(",");
+}
+
+export function parseManagedPerBucketWithdrawable(
+  serialized: string
+): Map<number, bigint> {
+  const map = new Map<number, bigint>();
+  if (serialized.length === 0) {
+    return map;
+  }
+  for (const entry of serialized.split(",")) {
+    const separatorIndex = entry.indexOf(":");
+    if (separatorIndex <= 0 || separatorIndex === entry.length - 1) {
+      throw new Error(
+        `managedPerBucketWithdrawableQuoteAmount entry must be 'idx:amount': ${entry}`
+      );
+    }
+    const bucketIndex = Number(entry.slice(0, separatorIndex));
+    if (!Number.isInteger(bucketIndex) || bucketIndex < 0) {
+      throw new Error(
+        `managedPerBucketWithdrawableQuoteAmount bucket index must be a non-negative integer: ${entry}`
+      );
+    }
+    const amount = BigInt(entry.slice(separatorIndex + 1));
+    map.set(bucketIndex, amount);
+  }
+  return map;
+}
 
 export type ManagedMetadataKey = keyof typeof MANAGED_METADATA_KEYS;
 
@@ -222,6 +262,7 @@ export function resolvePoolSnapshotMetadata(
   assignOptionalString(metadata, record, "managedDualIneligibilityReason");
   assignOptionalString(metadata, record, "managedMaxWithdrawableQuoteAmount");
   assignOptionalString(metadata, record, "managedTotalWithdrawableQuoteAmount");
+  assignOptionalString(metadata, record, "managedPerBucketWithdrawableQuoteAmount");
 
   assignOptionalRateMoveOutcome(metadata, record, "immediatePredictedNextOutcome");
 
@@ -386,6 +427,14 @@ export function readManagedControlSnapshotMetadata(
     snapshot,
     MANAGED_METADATA_KEYS.managedTotalWithdrawableQuoteAmount
   );
+  const managedPerBucketSerialized = readSnapshotMetadataString(
+    snapshot,
+    MANAGED_METADATA_KEYS.managedPerBucketWithdrawableQuoteAmount
+  );
+  const managedPerBucketWithdrawableQuoteAmount =
+    managedPerBucketSerialized === undefined
+      ? undefined
+      : parseManagedPerBucketWithdrawable(managedPerBucketSerialized);
   const managedRemoveQuoteCandidateCount = readSnapshotMetadataNumber(
     snapshot,
     MANAGED_METADATA_KEYS.managedRemoveQuoteCandidateCount
@@ -420,6 +469,9 @@ export function readManagedControlSnapshotMetadata(
     ...(managedTotalWithdrawableQuoteAmount === undefined
       ? {}
       : { managedTotalWithdrawableQuoteAmount }),
+    ...(managedPerBucketWithdrawableQuoteAmount === undefined
+      ? {}
+      : { managedPerBucketWithdrawableQuoteAmount }),
     ...(managedRemoveQuoteCandidateCount === undefined
       ? {}
       : { managedRemoveQuoteCandidateCount }),

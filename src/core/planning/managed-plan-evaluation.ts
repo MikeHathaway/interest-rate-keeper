@@ -12,6 +12,9 @@
 // Check decomposition:
 //  - eligibility: managedInventoryUpwardEligible + managedDualUpwardEligible
 //  - availability: managedTotalWithdrawableQuoteAmount present + positive
+//  - per_bucket_availability: each REMOVE_QUOTE step's target bucket still has
+//      sufficient withdrawable inventory (catches the case where aggregate
+//      stays positive but the specific target bucket was drained)
 //  - release_cap: configured cap satisfied (short-circuits when no cap set)
 //  - improvement_floor: plan actually improves the passive path, and clears
 //      config.minimumManagedImprovementBps if set
@@ -40,6 +43,7 @@ import { BPS_DENOMINATOR } from "../support/units.js";
 export type ManagedCheckName =
   | "eligibility"
   | "availability"
+  | "per_bucket_availability"
   | "release_cap"
   | "improvement_floor"
   | "sensitivity_threshold";
@@ -60,6 +64,8 @@ export type ManagedCheckKind =
   | "inventory_ineligible"
   | "dual_ineligible"
   | "missing_withdrawable_totals"
+  | "missing_per_bucket_withdrawable"
+  | "bucket_withdrawable_depleted"
   | "exceeds_release_cap"
   | "no_improvement"
   | "below_improvement_floor"
@@ -74,6 +80,9 @@ export interface ManagedCheckFailure {
   minimumImprovementBps?: number;
   maxManagedInventoryReleaseBps?: number;
   minimumManagedSensitivityBpsPer10PctRelease?: number;
+  bucketIndex?: number;
+  requestedAmount?: bigint;
+  availableAmount?: bigint;
 }
 
 // Local copy of planner.distanceToTargetBand to avoid a planner ↔ evaluator
@@ -152,6 +161,68 @@ export function checkManagedAvailability(
     totalWithdrawableQuoteAmount <= 0n
   ) {
     return { check: "availability", kind: "missing_withdrawable_totals" };
+  }
+
+  return undefined;
+}
+
+// Sum all REMOVE_QUOTE amounts in the plan that target the same bucket — dual
+// plans may in theory span multiple REMOVE_QUOTE steps, though today there is
+// only one per plan. Summing keeps the invariant honest regardless.
+function totalRemoveQuoteAmountPerBucket(
+  steps: readonly ExecutionStep[]
+): Map<number, bigint> {
+  const perBucket = new Map<number, bigint>();
+  for (const step of steps) {
+    if (step.type !== "REMOVE_QUOTE") {
+      continue;
+    }
+    const previous = perBucket.get(step.bucketIndex) ?? 0n;
+    perBucket.set(step.bucketIndex, previous + step.amount);
+  }
+  return perBucket;
+}
+
+// Per-bucket availability: for each distinct bucket the plan withdraws from,
+// verify the fresh snapshot still exposes at least the plan's requested amount
+// of withdrawable inventory in that specific bucket. Catches the case where
+// the aggregate managedTotalWithdrawableQuoteAmount stays positive (because
+// other managed buckets are flush) but the specific target bucket was drained
+// between planning and execution. Without this check, a fresh aggregate pass
+// lets the plan through and removeQuoteToken reverts on-chain.
+//
+// Tolerates a snapshot that didn't emit per-bucket data: the writer only emits
+// when managed-control is enabled and at least one lender bucket has
+// withdrawable inventory, so a missing field almost always means the aggregate
+// is zero and the availability check has already failed. Treating absence as
+// "no constraint" keeps legacy snapshots and non-managed fixtures working
+// while still enforcing the bucket-level invariant when the data is present.
+export function checkManagedPerBucketAvailability(
+  inputs: ManagedPlanEvaluationInputs
+): ManagedCheckFailure | undefined {
+  if (!stepsUseManagedRemoveQuote(inputs.steps)) {
+    return undefined;
+  }
+
+  const managedMetadata = readMetadata(inputs);
+  const perBucket = managedMetadata.managedPerBucketWithdrawableQuoteAmount;
+  if (perBucket === undefined) {
+    return undefined;
+  }
+
+  for (const [bucketIndex, requestedAmount] of totalRemoveQuoteAmountPerBucket(
+    inputs.steps
+  )) {
+    const availableAmount = perBucket.get(bucketIndex) ?? 0n;
+    if (availableAmount < requestedAmount) {
+      return {
+        check: "per_bucket_availability",
+        kind: "bucket_withdrawable_depleted",
+        bucketIndex,
+        requestedAmount,
+        availableAmount
+      };
+    }
   }
 
   return undefined;
@@ -291,6 +362,7 @@ const CHECK_FUNCTIONS: Record<
 > = {
   eligibility: checkManagedEligibility,
   availability: checkManagedAvailability,
+  per_bucket_availability: checkManagedPerBucketAvailability,
   release_cap: checkManagedReleaseCap,
   improvement_floor: checkManagedImprovementFloor,
   sensitivity_threshold: checkManagedSensitivity
