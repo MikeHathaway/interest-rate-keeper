@@ -5,7 +5,10 @@ import {
   type PlanCandidate,
   type RateMoveOutcome
 } from "../../../../src/index.js";
-import { readPoolSnapshotMetadata } from "../../../../src/core/snapshot/metadata.js";
+import {
+  readManagedControlSnapshotMetadata,
+  readPoolSnapshotMetadata
+} from "../../../../src/core/snapshot/metadata.js";
 import { withTemporaryAnvilFork } from "../../../../src/ajna/dev/anvil-fork.js";
 import {
   buildMultiCycleBorrowSearchAmounts,
@@ -1121,26 +1124,56 @@ export function createBaseFactoryCuratorManagedStateHelpers(_deps: CuratorHelper
    * This closes the gap between "candidate surfaces" and "candidate executes
    * without reverting on real fork state" for the curator-only path.
    */
-  async function executeTargetedAjnaInfoManagedUsedPoolRemoveQuote(
+  /**
+   * Return shape for the probe-style helper that iterates across all pinned
+   * managed archetypes. A discriminated union: either the archetype surfaced a
+   * candidate and was executed (full rate-progression metrics), or no
+   * simulation-backed REMOVE_QUOTE candidate surfaced and we record that fact
+   * so the multi-archetype test can summarize which archetypes are supported
+   * vs. which are not-yet-surfacing without aborting the loop.
+   */
+  type TargetedRemoveQuoteProbeResult =
+    | {
+        status: "executed_and_realized";
+        archetypeId: string;
+        candidate: PlanCandidate;
+        currentRateBps: number;
+        targetRateBps: number;
+        removeQuoteAmount: bigint;
+        lenderBucketIndex: number;
+        bucketDepositBeforeWad: bigint;
+        bucketDepositAfterWad: bigint;
+        transactionHash: `0x${string}`;
+        gasUsed: bigint;
+        submissionDurationMs: number;
+        quoteTokenAddress: `0x${string}`;
+        quoteTokenScale: bigint;
+        rateBpsAfterFirstUpdate: number;
+        rateBpsAfterTerminalUpdate?: number;
+        observations: string[];
+      }
+    | {
+        status: "no_candidate";
+        archetypeId: string;
+        currentRateBps: number;
+        targetRateBps: number;
+        predictedNextRateBps: number;
+        predictedNextOutcome: string;
+        secondsUntilNextRateUpdate: number;
+        lenderLpBalance: bigint;
+        bucketDepositWad: bigint;
+        managedInventoryUpwardEligible?: boolean;
+        managedInventoryIneligibilityReason?: string;
+        managedTotalWithdrawableQuoteAmount?: bigint;
+        managedPerBucketWithdrawableQuoteAmount?: ReadonlyMap<number, bigint>;
+        candidateCount: number;
+        candidateSummaries: string[];
+        observations: string[];
+      };
+
+  async function runTargetedManagedRemoveQuoteProbe(
     archetypeId: string
-  ): Promise<{
-    archetypeId: string;
-    candidate: PlanCandidate;
-    currentRateBps: number;
-    targetRateBps: number;
-    removeQuoteAmount: bigint;
-    lenderBucketIndex: number;
-    bucketDepositBeforeWad: bigint;
-    bucketDepositAfterWad: bigint;
-    transactionHash: `0x${string}`;
-    gasUsed: bigint;
-    submissionDurationMs: number;
-    quoteTokenAddress: `0x${string}`;
-    quoteTokenScale: bigint;
-    rateBpsAfterFirstUpdate: number;
-    rateBpsAfterTerminalUpdate?: number;
-    observations: string[];
-  }> {
+  ): Promise<TargetedRemoveQuoteProbeResult> {
     const upstreamRpcUrl = process.env.BASE_RPC_URL ?? "https://mainnet.base.org";
     const archetype = EXPERIMENTAL_AJNA_INFO_MANAGED_USED_POOL_ARCHETYPES.find(
       (candidate) => candidate.id === archetypeId
@@ -1222,16 +1255,81 @@ export function createBaseFactoryCuratorManagedStateHelpers(_deps: CuratorHelper
         );
 
         if (candidate === undefined) {
-          throw new Error(
-            `expected a simulation-backed REMOVE_QUOTE candidate for archetype ${archetype.id}, found none. candidates=${snapshot.candidates
-              .map(
-                (c) =>
-                  `${c.intent}:${c.minimumExecutionSteps
-                    .map((s) => s.type)
-                    .join("+")}:${c.candidateSource ?? "-"}`
-              )
-              .join(",") || "none"}`
+          // Read raw pool state at the seeded bucket so we can tell apart
+          // "operator has no LP here" vs "operator has LP but the search
+          // found no improving amount." lenderInfo returns (lpBalance,
+          // depositTime). bucketInfoBefore[3] is the bucket's total deposit.
+          const [lenderLpBalance] = (await publicClient.readContract({
+            address: archetype.poolAddress,
+            abi: ajnaPoolAbi,
+            functionName: "lenderInfo",
+            args: [BigInt(archetype.lenderBucketIndex), archetype.senderAddress]
+          })) as readonly [bigint, bigint];
+
+          const managedMetadata =
+            readManagedControlSnapshotMetadata(snapshot);
+          const candidateSummaries = snapshot.candidates.map(
+            (c) =>
+              `${c.intent}:${c.minimumExecutionSteps
+                .map((s) => s.type)
+                .join("+")}:${c.candidateSource ?? "-"}:next=${c.predictedRateBpsAfterNextUpdate}`
           );
+
+          observations.push(
+            [
+              `archetype=${archetype.id}`,
+              `status=no_candidate`,
+              `block=${archetype.blockNumber.toString()}`,
+              `bucket=${archetype.lenderBucketIndex}`,
+              `lenderLp=${lenderLpBalance.toString()}`,
+              `bucketDeposit=${bucketDepositBeforeWad.toString()}`,
+              `managedEligible=${managedMetadata.managedInventoryUpwardEligible ?? "n/a"}`,
+              `managedIneligibleReason=${managedMetadata.managedInventoryIneligibilityReason ?? "none"}`,
+              `managedTotalWithdrawable=${managedMetadata.managedTotalWithdrawableQuoteAmount?.toString() ?? "n/a"}`,
+              `candidates=${candidateSummaries.join(",") || "none"}`
+            ].join(" ")
+          );
+          return {
+            status: "no_candidate",
+            archetypeId: archetype.id,
+            currentRateBps,
+            targetRateBps,
+            predictedNextRateBps: snapshot.predictedNextRateBps,
+            predictedNextOutcome: snapshot.predictedNextOutcome,
+            secondsUntilNextRateUpdate: snapshot.secondsUntilNextRateUpdate,
+            lenderLpBalance,
+            bucketDepositWad: bucketDepositBeforeWad,
+            ...(managedMetadata.managedInventoryUpwardEligible === undefined
+              ? {}
+              : {
+                  managedInventoryUpwardEligible:
+                    managedMetadata.managedInventoryUpwardEligible
+                }),
+            ...(managedMetadata.managedInventoryIneligibilityReason ===
+            undefined
+              ? {}
+              : {
+                  managedInventoryIneligibilityReason:
+                    managedMetadata.managedInventoryIneligibilityReason
+                }),
+            ...(managedMetadata.managedTotalWithdrawableQuoteAmount ===
+            undefined
+              ? {}
+              : {
+                  managedTotalWithdrawableQuoteAmount:
+                    managedMetadata.managedTotalWithdrawableQuoteAmount
+                }),
+            ...(managedMetadata.managedPerBucketWithdrawableQuoteAmount ===
+            undefined
+              ? {}
+              : {
+                  managedPerBucketWithdrawableQuoteAmount:
+                    managedMetadata.managedPerBucketWithdrawableQuoteAmount
+                }),
+            candidateCount: snapshot.candidates.length,
+            candidateSummaries,
+            observations
+          };
         }
 
         const removeQuoteStep = candidate.minimumExecutionSteps.find(
@@ -1367,6 +1465,7 @@ export function createBaseFactoryCuratorManagedStateHelpers(_deps: CuratorHelper
         });
 
         return {
+          status: "executed_and_realized",
           archetypeId: archetype.id,
           candidate,
           currentRateBps,
@@ -1390,11 +1489,47 @@ export function createBaseFactoryCuratorManagedStateHelpers(_deps: CuratorHelper
     );
   }
 
+  /**
+   * Strict variant of the probe: throws if no REMOVE_QUOTE candidate surfaces
+   * on the archetype. Used by the single-archetype dog/USDC test that expects
+   * a known-good candidate to exist.
+   */
+  async function executeTargetedAjnaInfoManagedUsedPoolRemoveQuote(
+    archetypeId: string
+  ) {
+    const result = await runTargetedManagedRemoveQuoteProbe(archetypeId);
+    if (result.status !== "executed_and_realized") {
+      throw new Error(
+        `expected a simulation-backed REMOVE_QUOTE candidate for archetype ${archetypeId}, got status=${result.status}. observations=${result.observations.join(" | ")}`
+      );
+    }
+    return result;
+  }
+
+  /**
+   * Tolerant iterator across every pinned managed archetype. Each archetype
+   * gets its own fresh fork. Returns an array of per-archetype results with
+   * a status discriminator so the caller can decide which assertions to make.
+   * Used by the multi-archetype E2E test to discover which archetypes surface
+   * a candidate AND realize the predicted rate vs. which are not-yet-supported.
+   */
+  async function probeManagedRemoveQuoteAcrossAllArchetypes(): Promise<{
+    results: TargetedRemoveQuoteProbeResult[];
+  }> {
+    const results: TargetedRemoveQuoteProbeResult[] = [];
+    for (const archetype of EXPERIMENTAL_AJNA_INFO_MANAGED_USED_POOL_ARCHETYPES) {
+      const result = await runTargetedManagedRemoveQuoteProbe(archetype.id);
+      results.push(result);
+    }
+    return { results };
+  }
+
   return {
     inspectAjnaInfoManagedUsedPoolArchetypes,
     findTargetedAjnaInfoManagedUsedPoolInventoryCandidate,
     probeAjnaInfoManagedUsedPoolManualRemoveQuote,
     probeAjnaInfoManagedUsedPoolManualRemoveQuoteAndBorrow,
-    executeTargetedAjnaInfoManagedUsedPoolRemoveQuote
+    executeTargetedAjnaInfoManagedUsedPoolRemoveQuote,
+    probeManagedRemoveQuoteAcrossAllArchetypes
   };
 }

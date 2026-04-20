@@ -76,8 +76,17 @@ export function deriveManagedInventoryDiagnostics(
       ? undefined
       : serializeManagedPerBucketWithdrawable(perBucketWithdrawableMap);
   const preWindowState = readState.immediatePrediction.secondsUntilNextRateUpdate > 0;
+  // `noOfLoans >= 1n` (not the stricter `> 1n`) is intentional for managed
+  // control. Concentrated-ownership managed positions on Ajna tend to be
+  // solo-borrower: the operator is the only active loan on their own bucket.
+  // The original `> 1n` check was a "real used pool vs fresh pool" heuristic
+  // for the generic synthesis paths; for curator mode specifically, if the
+  // operator IS the single active borrower, rate projections are more
+  // reliable (not less) because the keeper controls both sides of the MAU
+  // formation. Still requires EMA-initialized state so we don't try to steer
+  // a pool that hasn't warmed up yet.
   const usedPoolLike =
-    (readState.loansState?.noOfLoans ?? 0n) > 1n &&
+    (readState.loansState?.noOfLoans ?? 0n) >= 1n &&
     !hasUninitializedAjnaEmaState(readState.rateState);
   const sameAccountManagedBorrower =
     accountState === undefined

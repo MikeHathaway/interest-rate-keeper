@@ -14,19 +14,493 @@ Without standing inventory, the current evidence still does not support broad us
 
 ## Status
 
-Targeted managed `REMOVE_QUOTE` is now a **supported** curator-mode path. A pinned
-real used-pool archetype (dog/USDC at Base block `43,506,804`) has been verified
-end-to-end: the simulation-backed synthesis produces a REMOVE_QUOTE candidate,
-the planned call executes against the forked pool, and the realized on-chain
-rate after a warp-and-update matches the simulator's prediction exactly
-(`+28 bps` on the first update, `+58 bps` terminal across two updates, for a
-release of ~67% of the target bucket's deposit).
+Targeted managed `REMOVE_QUOTE` is a **supported but narrow** curator-mode
+path. Of the five pinned `ajna.info.finance` managed archetypes we have
+actual-chain state for, exactly one (dog/USDC at Base block `43,506,804`) is
+verified end-to-end today: the simulation-backed synthesis produces a
+REMOVE_QUOTE candidate, the planned call executes against the forked pool,
+and the realized on-chain rate after a warp-and-update matches the
+simulator's prediction exactly (`+28 bps` on the first update, `+58 bps`
+terminal across two updates). The operator owns ~100% of the target bucket
+and the candidate's release amount is ~67% of the bucket's deposit (the
+**release fraction**, not the ownership fraction — see the next section for
+the distinction).
+
+The other four pinned archetypes do **not** surface an exact REMOVE_QUOTE
+candidate today. The diagnostic probe in
+`tests/integration/base/curator.ts` reports the root cause for each:
+
+| Archetype | Root cause | Category |
+| --- | --- | --- |
+| `ajna-info-managed-weth-usdc-2024-12-01` | `secondsUntilNextRateUpdate: 0` — the block is pinned inside the rate-update window. Eligibility reason: *"managed inventory upward control currently only runs before the next eligible rate update"*. | Fixture timing (pinned block chosen for ajna.info event capture, not curator testability) |
+| `ajna-info-managed-2388-2024-04-08` | EMAs are zero. Eligibility reason: *"managed inventory upward control is only modeled on EMA-initialized used pools"*. | Pool state (pool too young to model) |
+| `ajna-info-managed-prime-usdc-2025-10-17` | Eligibility passes, search runs, but finds no improving amount. Operator holds ~9% of the target bucket's deposit (~10 USDC out of ~110 USDC total); no withdrawal size beats the passive 2-update path. | Action-space constraint (operator's fraction of pool deposit EMA too small to move the rate) |
+| `ajna-info-managed-weth-usdglo-2024-10-03` | EMAs are zero. Same eligibility reason as archetype 2. | Pool state (pool too young to model) |
+
+Two findings worth calling out:
+
+**Three of four failures are not search-quality issues.** Two archetypes are
+correctly refused by the curator-eligibility gate because the pool is not
+EMA-initialized, one is pinned inside the rate-update window. The keeper is
+behaving correctly; those archetypes are just not curator-applicable at their
+pinned blocks.
+
+**One archetype reveals a real action-space boundary.** On PRIME/USDC, the
+operator's ~9% ownership of the target bucket's deposit is too small a
+fraction of the pool's total deposit EMA to move the rate meaningfully. This
+is not a search-grid bug. It is the keeper correctly refusing to act when an
+operator's inventory cannot produce a beat-passive improvement. For curator
+operators: if your bucket ownership is a small fraction of total pool deposit
+EMA, expect the keeper to produce no exact candidate, regardless of search
+tuning.
+
+### Two fractions that matter, and how they differ
+
+Two different fractions come up in curator analysis and they are easy to
+confuse. They answer different questions:
+
+- **Ownership fraction** — *before* the action, how much of the target
+  bucket's deposit the operator already controls. For dog/USDC this is
+  ~100% (operator LP ≈ bucket deposit); for PRIME/USDC it is ~9%.
+- **Release fraction** — *as part of the action*, how much of the target
+  bucket the keeper's selected REMOVE_QUOTE amount will withdraw. For
+  dog/USDC this is ~67% of the bucket; the synthetic-pool sweep below lands
+  on ~63% at its surfacing point.
+
+Ownership gates whether a candidate surfaces at all. Release is what the
+surfaced candidate does once it is eligible to act. The release fraction
+looks remarkably stable across the cases we've measured (~2/3 of the bucket
+both on dog/USDC and in the synthetic sweep), which is why it is tempting
+to quote as a single number; the ownership threshold is pool-specific and
+cannot be quoted as a single universal number.
+
+### Ownership threshold (synthetic-pool-specific)
+
+A synthetic-pool ownership sweep in
+`tests/integration/base/helpers/curator-ownership-sweep.ts` fixes the fraction
+of the target bucket's deposit the operator controls (the ownership
+fraction), and asks whether the simulation-backed search surfaces a
+candidate. On a synthetic EMA-initialized two-borrower pool seeded with a
+single "other lender" holding a fixed 10k-unit deposit and 5k of debt at
+10k of collateral, stepping the operator's share through
+`{10%, 30%, 50%, 80%, 95%}`:
+
+| Operator share | Candidate surfaces? | Terminal-rate move (2 updates) | Release fraction (of bucket) |
+| --- | --- | --- | --- |
+| 10% | No | n/a | n/a |
+| 30% | No | n/a | n/a |
+| 50% | No | n/a | n/a |
+| 80% | No | n/a | n/a |
+| **95%** | **Yes** | +147 bps (baseline 1464 → candidate 1611) | ~63% |
+
+So on this specific synthetic pool the surfacing threshold for operator
+ownership sits between 80% and 95%. **The threshold number is
+configuration-specific, not a universal constant.** The pool's debt/deposit
+ratio, EMA state, deposit distribution across other buckets, and target
+offset all affect the rate-response-per-withdrawn-unit and therefore the
+minimum ownership that produces a beat-passive improvement. A pool with
+more debt relative to deposit, or a thinner deposit distribution, would
+likely have a lower threshold.
+
+The real-chain data is consistent with the synthetic finding:
+
+- **dog/USDC (~100% operator ownership)**: surfaces and executes end-to-end.
+- **PRIME/USDC (~9% operator ownership)**: does not surface.
+
+Both are well outside the 80–95% synthetic-threshold band, so we cannot tell
+from these two real archetypes alone whether the threshold in a pool that
+looked like PRIME/USDC would actually sit at 80%, 50%, or elsewhere — only
+that 9% is too low and 100% is enough.
+
+### Why the release fraction consistently lands at ~2/3
+
+Both the real dog/USDC result and the synthetic 95%-ownership trial settled
+on a release of ~2/3 of the operator's maxWithdrawable. This is not a
+search-grid coincidence — it is where the Ajna protocol's STEP_UP condition
+actually crosses on these pools.
+
+An empirical rate-response probe (see
+`tests/integration/base/helpers/curator-rate-response-probe.ts`) fixes
+the operator's withdrawal fraction across a fine grid, realises the
+`removeQuoteToken` on a fresh fork of dog/USDC, warps to the next two Ajna
+rate-update boundaries, and records the realised `interestRateInfo` after
+each:
+
+| Withdrawal fraction of operator LP | Rate after 1st update | Rate after 2nd update | 2-update move |
+| --- | --- | --- | --- |
+| 10% – 66% | 275 | 275 | **0 bps** |
+| **66.5%** | **303** | **333** | **+58 bps** ⬆ |
+| 67% – 93% | 303 | 333 | +58 bps |
+| **93.5%** (narrow hole) | **275** | **275** | **0 bps** |
+| 94% – 99% | 303 | 333 | +58 bps (timing-sensitive near 94%) |
+| **100%** | **275** | **275** | **0 bps** ⬇ |
+
+Two distinct cliff structures:
+
+**Lower cliff (between 66% and 66.5%).** Below 66% the `MAU / TU` ratio after
+one rate-update boundary does not cross the STEP_UP threshold, so passive
+`NO_CHANGE` wins. Above 66.5% it does. This is a sharp, reproducible
+boundary.
+
+**Upper region (93%–100%) is non-monotonic, not a clean cliff.** We observed:
+
+- A narrow `NO_CHANGE` hole at 93.5%, surrounded by working values on both
+  sides (93%, 94% both produce +58 bps).
+- A repeat run flipped the 94% result between `+58` and `0` for the
+  identical withdraw amount. The fork is pinned to the same block and the
+  withdraw args are byte-identical — the only variable is the exact
+  `block.timestamp` anvil assigns when we warp 12h+1s past the last update.
+  Near the STEP_UP / NO_CHANGE boundary the EMA-update math is sensitive
+  enough that microsecond-scale timing differences change which side we
+  land on.
+- A deterministic `NO_CHANGE` at 100%: emptying the bucket entirely shifts
+  the LUP (lowest-utilized price) upward, which increases the `lupt0DebtEma`
+  input to `TU`, rebalancing `MAU / TU` back into the NO_CHANGE band.
+
+The safe, robust operational window is **~67% to ~90%** of operator LP.
+Inside this range the rate response is deterministic and reproducible. The
+keeper's hardcoded `2/3` search anchor sits exactly at the low end of this
+band. Above 90%, treat the response as cliff-adjacent and avoid relying on
+it: small protocol-level timing variation or state perturbation can flip the
+outcome.
+
+What this means for the "2/3" observation:
+
+- The keeper's `buildHighEndExposureFractionAnchorAmounts` hardcodes anchors
+  at `{2/3, 3/4, 9/10, 1/1}` of maxWithdrawable, then the search returns the
+  smallest improving anchor. On dog/USDC the lower cliff is at ~66.5%, so
+  2/3 (66.67%) is the smallest anchor that just clears the STEP_UP
+  condition.
+- Without the 2/3 anchor, the search's other amount generators
+  (`buildOneTwoFiveSearchAmounts` + mirrored top-end points) would mostly
+  skip the 65%–70% band and probably return 3/4 or 9/10 instead. That would
+  still be a working candidate but less capital-efficient than the 2/3
+  anchor allows.
+- The 9/10 anchor is near the edge of the reliable window and the 1/1
+  anchor is in the 100% reversal zone. The search returning 2/3 (the
+  smallest anchor) is actually the safest choice — it keeps the release
+  firmly inside the reproducible `[~67%, ~90%]` band and well away from the
+  cliff-adjacent 93%–100% region on dog/USDC.
+
+### The cliff is pool-shape-specific (not a universal constant)
+
+A two-shape synthetic comparison (see
+`tests/integration/base/helpers/curator-rate-response-synthetic.ts`) runs
+the same fine-grained withdrawal-fraction sweep on two different pool
+shapes at fixed 95% operator ownership:
+
+| Pool shape | Debt / total-deposit ratio | Starting rate | Withdrawal-fraction cliff |
+| --- | --- | --- | --- |
+| Shape A (baseline) | 5k / 200k ≈ 2.5% | 1331 bps | **Between 30% and 50%** |
+| Shape B (5× debt) | 25k / 200k ≈ 12.5% | 729 bps | **No viable cliff** — all fractions produce STEP_DOWN |
+| dog/USDC (real) | pool-specific | 275 bps | **Between 66% and 66.5%** |
+
+Shape A's cliff sits near 40%, not 67%. At 30% withdrawal the rate steps up
+on the first update (1331 → 1464) but then falls to 1000 via `RESET_TO_TEN`
+— Ajna's safety net firing when the rate is above 10% and utilization drops
+far enough. The trajectory is net −331 bps for a 30% withdrawal. From 50%
+onward, both updates STEP_UP cleanly (1331 → 1464 → 1610 = +279 bps).
+
+Shape B produces no improvement at any fraction. Increasing debt 5× while
+holding the deposit structure fixed places the pool in a regime where
+withdrawing the operator's LP can't shift `MAU / TU` past the STEP_UP
+threshold — all withdrawals result in STEP_DOWN on both updates.
+
+Takeaways:
+
+- **There is no universal 2/3 rule.** The cliff position is a function of
+  the pool's debt / deposit ratio, EMA state, and target offset. Dog/USDC
+  and the synthetic 95%-ownership single-shape trial both happen to have
+  cliffs near 2/3 because their pool states are shaped similarly. A pool
+  with a lower debt/deposit ratio can cliff at 40% or lower; a pool with
+  a higher debt/deposit ratio may cliff nowhere in `(0, 1)`.
+- **The search's hardcoded 2/3 anchor is the right default but not
+  capital-optimal on every pool.** On Shape A the operator could safely
+  withdraw as little as 50% and still hit +279 bps, but the search would
+  still return 2/3 because it's the smallest *anchor* that the
+  high-end-anchor generator emits. Operators who want minimum-release
+  outcomes on light-debt pools could get more capital efficiency by
+  widening the anchor set; the current code doesn't do this.
+- **Some pools are "curator-untouchable" regardless of ownership.** Shape B
+  is an example: no fraction produces improvement. Operators on
+  high-debt-ratio pools should not expect the keeper to be able to steer
+  the rate upward via REMOVE_QUOTE at all.
+
+This reinforces the operator-facing rule stated earlier: the dry-run is the
+only definitive per-pool test. If a candidate surfaces, the keeper has found
+a viable withdrawal; if not, no tuning of release fractions (hardcoded or
+otherwise) will change the action space.
+
+The lower cliff is protocol-level (MAU/TU threshold shaped by pool state);
+the 100% reversal on dog/USDC is protocol-level too (bucket-empty LUP
+shift); Shape B's "no-cliff" regime is also protocol-level (pool state
+outside curator-addressable envelope). None of these are keeper-tunable
+knobs.
+
+### Practical rule for operators
+
+Curator mode requires (a) an EMA-initialized pool and pre-window timing
+(the managed-eligibility gate enforces this automatically), and (b) enough
+operator ownership of the target bucket that the rate-sensitive release
+fraction (~2/3 of the bucket) translates into an absolute rate move large
+enough to beat passive over the 2-update horizon. How much ownership is
+"enough" is pool-specific; the dry-run answers it definitively for any
+given pool state. If a candidate surfaces, the ownership is sufficient; if
+not, it isn't, and no config tuning will change that. Treat the dog/USDC
+result as an existence proof for a high-concentration position; treat the
+80–95% number as evidence that a significant minority share will not
+surface on *this* synthetic pool, not as a universal minimum.
+
+This is tracked and continuously re-verified in
+`tests/integration/base/curator.ts` via
+"probes curator-mode REMOVE_QUOTE across every pinned managed archetype and
+verifies realized rate matches prediction for every archetype that surfaces"
+— when additional archetypes start surfacing candidates, they will be covered
+automatically by the same realized-rate invariant.
 
 Managed `REMOVE_QUOTE + DRAW_DEBT` (dual mode) remains **research**: manual
 probes still find some improvements on hand-picked states, but the exact
 simulation-backed synthesis has not surfaced a dual candidate on any pinned
 archetype, even with the lender bucket and borrow limit indexes explicitly
 seeded.
+
+### Why dual mode does not surface on PRIME/USDC
+
+A debug trace over the dual exact synthesis on PRIME/USDC
+(`tests/integration/base/curator.ts` → "diagnoses why dual REMOVE_QUOTE +
+DRAW_DEBT does not surface on PRIME/USDC") instruments
+`synthesize/dual/exact.ts` via `setDualSynthesisDebugTrace` and records every
+`(removeQuoteAmount, drawDebtAmount, limitIndex, collateralAmount)` tuple
+the search evaluates, along with the verdict.
+
+On PRIME/USDC, the search evaluates **288 tuples across 8
+limit-index/collateral combinations**. The results:
+
+| Metric | Value |
+| --- | --- |
+| Total evaluations | 288 |
+| Evaluation failures (`simulatePath` threw) | **270 (94%)** |
+| Improving candidates | **0** |
+| Successful evaluations | 18 (6%) |
+| All successful tuples converge on | `quoteAmount = 1 wei, drawDebtAmount ≈ 3.9 WAD (~4 USDC)` |
+| Best terminal distance | 219 bps (equal to passive baseline) |
+
+The failure pattern by limit index is telling:
+
+- **Lower limit indexes (500, 1000, 2658, 3158, 3408)**: every `drawDebt`
+  call reverts (36/36 failures per limit). These correspond to higher price
+  constraints — the pool's HTP (highest threshold price) exceeds the
+  requested limit, so Ajna's drawDebt precondition fails.
+- **Higher limit indexes (3506, 3558, 3608)**: `drawDebt` succeeds only for
+  tiny amounts (~4 USDC). Larger amounts revert because the existing
+  borrower is near collateralization limits.
+
+**Classification: structural / real-pool-constraint issue**, not a
+search-quality issue. The pool's borrower state genuinely doesn't leave
+headroom for the keeper to construct a dual action that meaningfully moves
+the rate. The 6% of tuples that execute without reverting are too small to
+perturb the deposit/debt EMAs enough to cross the STEP_UP threshold — all
+land on the same terminal rate as passive.
+
+This is the same family as Shape B in the synthetic ownership sweep
+(curator-untouchable regime): a pool state where no REMOVE_QUOTE +
+DRAW_DEBT combination can produce a rate response, regardless of how the
+search grid is tuned.
+
+### What would make dual mode ship-able
+
+For dual exact synthesis to surface a candidate, we would need a pinned
+managed archetype where all of these hold simultaneously:
+
+1. Operator owns the overwhelming majority of a target bucket (per the
+   single-action ownership-threshold finding).
+2. Operator is also a borrower on the same account (`sameAccountManagedBorrower`).
+3. The borrower has enough collateral headroom that `drawDebt` succeeds at
+   meaningful amounts (not just ~4 USDC).
+4. The combined action shifts `MAU / TU` past the STEP_UP threshold for at
+   least one of the lookahead updates.
+5. *And*: single-action alone must **not** already saturate the STEP_UP cap.
+   Ajna caps rate moves at two STEP_UPs over a 2-update lookahead, so if
+   REMOVE_QUOTE alone reaches terminal = baseline × 1.10² then the dual path
+   cannot strictly improve on it.
+
+### Empirical test of (1)–(4): the dual code works, the regime is narrow
+
+A synthetic ownership sweep that satisfies conditions (1)–(4) by
+construction (95% operator ownership + same-account borrower + 20×
+collateral headroom) confirms:
+
+| Ownership | Passive trajectory | Single-action REMOVE_QUOTE | Dual best terminal | Dual surfaces? |
+| --- | --- | --- | --- | --- |
+| 95% | 1100 → 1000 → ~900 (step-down) | **Surfaces** at terminal 1210 (distance 40) | 1210 (same as single) | **No** (cannot beat single) |
+| 75% | 1331 → 1464 → 1611 (already overshoots target 1531±50) | Does not surface (no action needed) | 1611 (same as passive) | No (no improvement needed) |
+| 55% | Same as 75% | Does not surface | 1611 (same as passive) | No (no improvement needed) |
+
+Across all three ownership levels the dual-synthesis evaluate loop runs
+cleanly — 288 tuples per level, ~50% success rate on `simulatePath` (vs
+PRIME/USDC's 6%). The dual code produces valid rate-response simulations.
+It just never produces a candidate that strictly improves on the best
+alternative, because:
+
+- **At 95% ownership**: single-action REMOVE_QUOTE already achieves
+  `2 × STEP_UP` terminal, which is the protocol-imposed ceiling for a
+  2-update lookahead. Adding DRAW_DEBT cannot push the rate higher.
+- **At ≤75% ownership**: the synthetic warmup lands the pool in a state
+  where the passive trajectory already overshoots the target band. No
+  keeper action is needed.
+
+Condition (5) is the new operational requirement: the pool state must be
+in a narrow marginal regime where single-action cannot quite trigger
+both STEP_UPs but dual can. That regime is reachable in principle but
+hard to land on empirically — tuning deposit ratios, debt sizes, and
+target offsets simultaneously. Finding a real-chain pool in that regime
+(or constructing one reproducibly) is the remaining barrier.
+
+### Classification
+
+Dual mode's failure to surface is now pinned to **three** distinct causes,
+all confirmed empirically across 8 pinned managed archetypes:
+
+1. **Borrower collateral starvation** (PRIME/USDC pattern): 94% of
+   evaluations revert on `drawDebt`. Real-chain pools where the borrower
+   is near collateralization limits cannot support meaningful additional
+   debt, so dual can never run.
+2. **Single-action saturation** (dog/USDC + synthetic 95%): 63% of
+   evaluations succeed, but single-action REMOVE_QUOTE alone already hits
+   the protocol's 2× STEP_UP ceiling over the 2-update lookahead. Dual
+   can't beat what single already reaches.
+3. **Passive-trajectory saturation** (pool `0x7b0b` pattern): 33% of
+   evaluations succeed, but the passive (no-action) trajectory is already
+   STEP_UP-ing at the protocol's 2× cap over the lookahead. The dual
+   search confirms it can match that trajectory but cannot exceed it —
+   the protocol simply refuses to STEP_UP more than twice in 2 updates.
+   Nothing the keeper does can help, because passive is already doing
+   the maximum.
+
+Neither is a keeper bug. (1) is a pool-state constraint; (2) and (3) are
+protocol-level ceilings interacting with the search's "must strictly
+improve" rule.
+
+### Widened empirical sweep — 8 archetypes tested
+
+To confirm the picture wasn't a fluke of the original 5 archetypes, a
+discovery-script sweep over `ajna.info.finance` added 3 more pinned
+archetypes (pool `0x7b0b85c8`, pool `0x2a869a39`, and a second actor on the
+existing PRIME/USDC pool `0x1abc629d`). Running the multi-archetype probe +
+dual-diagnostic trace on all 8:
+
+| Archetype | Eligible? | Single surfaces? | Dual surfaces? | Failure category |
+| --- | --- | --- | --- | --- |
+| `weth-usdc-2024-12-01` | no | n/a | n/a | eligibility: pinned inside rate-update window |
+| `2388-2024-04-08` | no | n/a | n/a | eligibility: not EMA-initialized |
+| `prime-usdc-2025-10-17` | yes | **no** | **no** | (1) collateral starvation (94% revert) |
+| `weth-usdglo-2024-10-03` | no | n/a | n/a | eligibility: not EMA-initialized |
+| `dog-usdc-2026-03-18` | yes | **YES** | **no** | (2) single already saturates STEP_UP cap |
+| `7b0b-2025-10-25` | yes | no | **no** | (3) passive already saturates STEP_UP cap |
+| `prime-usdc-ccad-2025-10-09` | no | n/a | n/a | eligibility: not EMA-initialized |
+| `2a869a-2026-04-18` | no | n/a | n/a | eligibility: not EMA-initialized |
+
+Only ONE of eight (`dog-usdc`) surfaces a working single-action candidate.
+ZERO of eight surface a dual candidate. Five of eight fail the eligibility
+gate outright (not EMA-initialized, or in the rate-update window). The
+three that pass eligibility each hit a different protocol-level limitation.
+
+### Why the conditions stack unfavorably
+
+The five conditions dual needs are *individually* satisfiable but hard to
+stack. Among actual-chain managed pools found on Base:
+
+- Most managed pools are young (transferred LP, recent borrower). Young
+  pools have uninitialized EMAs and fail eligibility.
+- Among older managed pools with initialized EMAs: concentrated ownership
+  tends to correlate with single-action saturating, because a highly-owned
+  bucket has enough LP to trigger 2× STEP_UP on release alone.
+- Pools where passive is naturally STEP_UP-ing (like `0x7b0b`) don't need
+  any action — the protocol is already doing the work.
+- Pools where the borrower has already maxed their collateralization are
+  common in the "active steering" scenarios where dual would theoretically
+  help — but they're also exactly where dual can't run.
+
+The empirical conclusion: **the pool-state regime where dual is both
+feasible AND useful is either very rare or effectively empty on Base**.
+The discovery script found 12 same-account managed archetypes across
+the chain's history; none of the 4 in our expanded sweep (dog/USDC's
+single already suffices; 7b0b's passive already suffices; PRIME has two
+actors both with collateral problems; 2a869a / weth-usdglo not
+EMA-initialized) fall into the dual-useful regime.
+
+### Cross-chain expansion — same conclusion, more evidence
+
+A mainnet discovery run against the ajna.info API found 16 same-account
+managed archetypes on Ethereum. The top two (chosen for concentrated
+ownership + collateral headroom) were probed:
+
+| Pool (mainnet) | Pair | Ownership | On-chain collateral vs debt | noOfLoans | Dual result |
+| --- | --- | --- | --- | --- | --- |
+| `0x660ae24a` | scrvUSD/crvUSD | 100% | 45.76 / 10.05 (~4.5× headroom) | **1** | single-action saturation (288 evals, best terminal matches single) |
+| `0xb3f52e1f` | DMusd/USDC | 100% | on-chain differs from API | **1** | collateral starvation (288 evals, **100% revert rate**) |
+
+Both are solo-borrower pools — operator is the only active loan. This
+originally looked like a fifth failure mode, but on inspection the gate
+`noOfLoans > 1n` was overly conservative for managed-dual: if the operator
+IS the pool's single loan, rate projections are *more* reliable (they
+control both sides of MAU). The check was protecting against "fresh pool
+with no real activity" but managed-dual has a different invariant.
+
+### The gate relaxation
+
+The `noOfLoans > 1n` check was relaxed to `noOfLoans >= 1n` in three
+managed-specific paths:
+
+- `src/ajna/adapter/managed-diagnostics.ts:79-87` — eligibility flag
+- `src/ajna/adapter/snapshot-source.ts:687-702` — multi-cycle dual gate
+- `src/ajna/synthesize/dual/exact.ts:429-446` — protocolShapedManagedDualSearch
+
+The relaxation is guarded: only the managed-dual path uses the looser gate;
+the generic ADD_QUOTE dual path and non-managed paths keep the stricter
+`> 1n` check (where it's semantically appropriate — multi-cycle lookahead
+does benefit from background loan activity when the keeper isn't the
+dominant actor).
+
+After the relaxation the mainnet probes became eligible and dual synthesis
+ran (288 evaluations each), but:
+
+- scrvUSD/crvUSD: single-action saturation (classification 2 above) — dual
+  can't beat single's terminal
+- DMusd/USDC: 100% `drawDebt` revert rate (classification 1 above) — API's
+  "481× headroom" claim didn't match actual on-chain state at the pinned
+  block
+
+So **relaxing the gate confirmed the original finding**: the dual regime
+is empty even on solo-borrower pools where the gate was previously the
+only thing blocking the path. Across 8 Base archetypes + 2 mainnet
+archetypes (10 total surveyed under the relaxed gate): zero surface dual.
+
+### Stopping point
+
+Without a pinned archetype that satisfies all five conditions
+simultaneously (or a realistic mechanism for the keeper to construct one),
+dual mode cannot ship. Future research would need to either:
+
+- Find such a pool organically on Base (the discovery script can be re-run
+  periodically as new curator-like actors emerge).
+- Construct a synthetic fixture tuned into the marginal regime (deposit
+  sizes / debt / target offset all calibrated so single-action triggers 1
+  STEP_UP but dual triggers 2). This was attempted in the synthetic
+  ownership sweep; no configuration tested landed in that band.
+- Expand the dual synthesis to consider `ADD_COLLATERAL + DRAW_DEBT +
+  REMOVE_QUOTE` triples, which would let the keeper create collateral
+  headroom in pools like PRIME/USDC (but adds capital lockup).
+
+None of these are low-effort. Given the data, the realistic product
+recommendation is to treat dual as permanent research until and unless
+one of these paths becomes concretely viable.
+
+**Note on `setDualSynthesisDebugTrace`:** this is a module-level listener
+hook added specifically for this diagnostic. Production paths leave it
+unset; the emit call is a cheap conditional check. Keep it in place — it's
+how the next investigation (if/when a dual-eligible archetype appears) will
+characterize whether the search is landing on improving tuples.
 
 ## Current Keeper State
 

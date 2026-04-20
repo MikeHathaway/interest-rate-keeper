@@ -67,6 +67,47 @@ const EXACT_DUAL_MAX_BORROW_SAMPLES = 6;
 const EXACT_DUAL_MAX_PROMISING_BASINS = 3;
 const EXACT_DUAL_MAX_LIMIT_INDEXES = 8;
 
+// Optional debug trace for the dual-synthesis inner evaluate() loop. When set
+// (via setDualSynthesisDebugTrace), every tuple the exact synthesis evaluates
+// is reported together with its verdict. Used by the research investigation
+// that asks "why doesn't dual synthesis surface a candidate on PRIME/USDC?";
+// production code leaves this null so there's zero overhead.
+export interface DualSynthesisEvaluationEvent {
+  path: "add_quote_plus_draw_debt" | "remove_quote_plus_draw_debt";
+  bucketIndex: number;
+  limitIndex: number;
+  collateralAmount: bigint;
+  quoteAmount: bigint;
+  drawDebtAmount: bigint;
+  comparisonNextDistance: number;
+  comparisonTerminalDistance: number;
+  candidateNextDistance: number;
+  candidateTerminalDistance: number;
+  candidateFirstRateBpsAfterNextUpdate: number;
+  candidateTerminalRateBps: number;
+  minimumManagedImprovementBps: number;
+  improvesConvergence: boolean;
+  evaluationFailed: boolean;
+}
+
+type DualSynthesisDebugListener = (
+  event: DualSynthesisEvaluationEvent
+) => void;
+
+let dualSynthesisDebugListener: DualSynthesisDebugListener | undefined;
+
+export function setDualSynthesisDebugTrace(
+  listener: DualSynthesisDebugListener | undefined
+): void {
+  dualSynthesisDebugListener = listener;
+}
+
+function emitDualSynthesisEvaluation(event: DualSynthesisEvaluationEvent): void {
+  if (dualSynthesisDebugListener !== undefined) {
+    dualSynthesisDebugListener(event);
+  }
+}
+
 interface DualSimulationContext {
   fork: TemporaryAnvilForkContext;
   poolAddress: HexAddress;
@@ -389,9 +430,20 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
     lookaheadUpdates > 1 &&
     readState.immediatePrediction.secondsUntilNextRateUpdate > 0 &&
     (readState.loansState?.noOfLoans ?? 0n) > 1n;
+  // Relaxed noOfLoans gate for the managed-dual path only (`>= 1n` rather than
+  // `> 1n`). Concentrated-ownership managed positions tend to be solo-borrower
+  // — the operator is the single active loan on their own bucket. The
+  // original `> 1n` was a "real used pool" heuristic for the generic ADD_QUOTE
+  // dual path; for curator-mode specifically it excludes legitimately
+  // steerable solo-managed pools. See the mainnet-probe diagnostic for the
+  // empirical basis.
+  const protocolShapedManagedDualSearch =
+    lookaheadUpdates > 1 &&
+    readState.immediatePrediction.secondsUntilNextRateUpdate > 0 &&
+    (readState.loansState?.noOfLoans ?? 0n) >= 1n;
   const allowRemoveQuoteDualSearch =
     config.enableManagedDualUpwardControl === true &&
-    protocolShapedDualSearch &&
+    protocolShapedManagedDualSearch &&
     baselinePrediction.predictedNextRateBps < targetBand.minRateBps &&
     !hasUninitializedAjnaEmaState(readState.rateState) &&
     borrowerAddress.toLowerCase() === simulationSenderAddress.toLowerCase();
@@ -873,6 +925,26 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
                       nextDistance < comparisonNextDistance ||
                       predictionChanged(baselinePrediction, candidatePrediction));
 
+                  emitDualSynthesisEvaluation({
+                    path: "remove_quote_plus_draw_debt",
+                    bucketIndex: lenderBucketState.bucketIndex,
+                    limitIndex,
+                    collateralAmount,
+                    quoteAmount,
+                    drawDebtAmount,
+                    comparisonNextDistance,
+                    comparisonTerminalDistance,
+                    candidateNextDistance: nextDistance,
+                    candidateTerminalDistance:
+                      candidatePath.terminalDistanceToTargetBps,
+                    candidateFirstRateBpsAfterNextUpdate:
+                      candidatePath.firstRateBpsAfterNextUpdate,
+                    candidateTerminalRateBps: candidatePath.terminalRateBps,
+                    minimumManagedImprovementBps,
+                    improvesConvergence,
+                    evaluationFailed: false
+                  });
+
                   if (!improvesConvergence) {
                     return undefined;
                   }
@@ -882,6 +954,23 @@ export async function synthesizeAjnaLendAndBorrowCandidateViaSimulation(
                     nextDistance
                   };
                 } catch {
+                  emitDualSynthesisEvaluation({
+                    path: "remove_quote_plus_draw_debt",
+                    bucketIndex: lenderBucketState.bucketIndex,
+                    limitIndex,
+                    collateralAmount,
+                    quoteAmount,
+                    drawDebtAmount,
+                    comparisonNextDistance,
+                    comparisonTerminalDistance,
+                    candidateNextDistance: Number.POSITIVE_INFINITY,
+                    candidateTerminalDistance: Number.POSITIVE_INFINITY,
+                    candidateFirstRateBpsAfterNextUpdate: 0,
+                    candidateTerminalRateBps: 0,
+                    minimumManagedImprovementBps,
+                    improvesConvergence: false,
+                    evaluationFailed: true
+                  });
                   return undefined;
                 }
               },

@@ -684,9 +684,25 @@ export class AjnaRpcSnapshotSource implements SnapshotSource {
             planningLookaheadUpdates = borrowResult.planningLookaheadUpdates;
           }
 
+          // `noOfLoans > 1n` is the correct gate for the generic ADD_QUOTE
+          // dual path — multi-cycle lookahead projections depend on the
+          // pool having enough background loan activity that debt EMAs
+          // don't pivot wildly on a single actor's behavior. The managed
+          // dual path has the opposite invariant: the operator IS the
+          // single active loan on their own bucket, and the keeper
+          // controlling both sides of MAU actually makes the projection
+          // MORE reliable. So: allow multi-cycle dual when either (a) the
+          // pool meets the generic threshold, or (b) managed-dual is
+          // explicitly enabled and the pool has ≥ 1 loan.
+          const hasMultiActorLoans =
+            (readState.loansState?.noOfLoans ?? 0n) > 1n;
+          const hasAtLeastOneLoan =
+            (readState.loansState?.noOfLoans ?? 0n) >= 1n;
+          const managedDualActive =
+            synthesisConfig.enableManagedDualUpwardControl === true;
           const allowMultiCycleDualSearch =
-            (readState.loansState?.noOfLoans ?? 0n) > 1n &&
-            !hasUninitializedAjnaEmaState(readState.rateState);
+            !hasUninitializedAjnaEmaState(readState.rateState) &&
+            (hasMultiActorLoans || (managedDualActive && hasAtLeastOneLoan));
 
           if (
             synthesisPolicy.simulationLend &&

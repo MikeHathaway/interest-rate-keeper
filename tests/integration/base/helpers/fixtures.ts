@@ -530,6 +530,56 @@ export const EXPERIMENTAL_AJNA_INFO_MANAGED_USED_POOL_ARCHETYPES = [
     inventorySource: "direct_add_quote" as const,
     targetOffsetBps: 200,
     toleranceBps: 50
+  },
+  // Sourced from the ajna.info discovery script (2026-04) as a higher-value
+  // candidate for the dual-mode investigation: 79.87% bucket ownership, 999
+  // supply, 105 debt, and ~2_000_000 collateral = ~19_000× collateral
+  // headroom. Multiple borrowers in the pool (debtShare 8.4%) so noOfLoans
+  // > 1 is cleared. Starting rate ~3578 bps — much higher than the other
+  // archetypes, which exposes different STEP_UP dynamics.
+  {
+    id: "ajna-info-managed-7b0b-2025-10-25",
+    poolAddress: "0x7b0b85c831596be8d94b2bea2394e373c38c7845",
+    blockNumber: 37_281_466n,
+    senderAddress: "0xd501204f415c5a58b8e85c4854e6d678f4e39c03",
+    borrowerAddress: "0xd501204f415c5a58b8e85c4854e6d678f4e39c03",
+    lenderBucketIndex: 4165,
+    inventorySource: "transfer_lp" as const,
+    targetOffsetBps: 200,
+    toleranceBps: 50
+  },
+  // A different actor on the same PRIME/USDC pool as the existing
+  // "prime-usdc-2025-10-17" archetype, pinned at an earlier block where
+  // they held 90.74% of the bucket (vs the later actor's 9%). Collateral
+  // headroom is low (~0.01 collateral vs 0.20 debt), so this probably still
+  // hits the PRIME-style drawDebt revert wall, but worth confirming with
+  // the same diagnostic.
+  {
+    id: "ajna-info-managed-prime-usdc-ccad-2025-10-09",
+    poolAddress: "0x1abc629d901100218cdfd389e6e778b9399e9f70",
+    blockNumber: 36_618_859n,
+    senderAddress: "0xccadea5cc24204995a98daa056c37bd5207fd0c5",
+    borrowerAddress: "0xccadea5cc24204995a98daa056c37bd5207fd0c5",
+    lenderBucketIndex: 3506,
+    inventorySource: "transfer_lp" as const,
+    targetOffsetBps: 200,
+    toleranceBps: 50
+  },
+  // Near-total (99.998%) bucket ownership by a single same-account actor;
+  // collateral 102 vs debt 69.78 = ~1.46× headroom (modest). Fresh at the
+  // time of discovery (borrower first activity 2026-04-17, pinned
+  // 2026-04-18). Tests whether a near-saturated pool with near-100%
+  // ownership produces single-only or dual results.
+  {
+    id: "ajna-info-managed-2a869a-2026-04-18",
+    poolAddress: "0x2a869a3911396ff387f4671735dc7df3330d0c31",
+    blockNumber: 44_863_420n,
+    senderAddress: "0x370a5275f69cb3c2e76cfe575cf7f846f906b34d",
+    borrowerAddress: "0x370a5275f69cb3c2e76cfe575cf7f846f906b34d",
+    lenderBucketIndex: 4221,
+    inventorySource: "direct_add_quote" as const,
+    targetOffsetBps: 200,
+    toleranceBps: 50
   }
 ] as const;
 
